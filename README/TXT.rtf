@@ -1,0 +1,425 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2869
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 HelveticaNeue-Bold;\f1\fnil\fcharset0 HelveticaNeue-Italic;\f2\fnil\fcharset0 HelveticaNeue;
+}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\deftab560
+\pard\pardeftab560\partightenfactor0
+
+\f0\b\fs40 \cf0 Project AETHER\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\fs32 \cf0 A Bare-Metal Android Environment Built On A Custom Type-1 Hypervisor\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f1\i\b0\fs26 \cf0 A complete, sovereign Android universe sharing nothing with Windows except the silicon beneath them both.
+\f2\i0 \
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Foreword\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 This document is the architectural specification, design philosophy, and engineering plan for 
+\f0\b Project AETHER
+\f2\b0  \'97 a Type-1 hypervisor that runs Windows-on-ARM and a bare-metal Android image as parallel guests on the same physical ARM64 hardware, with absolute isolation between the two worlds.\
+It is written to be read as a book rather than skimmed as a reference. Each chapter builds on the previous ones, and the early chapters establish the mental models you will need to understand the later ones. If you are joining this project at any point in its multi-year development, read it from the beginning. The architecture is internally consistent and every design choice depends on choices made elsewhere; reading out of order will produce confusion that the document cannot resolve.\
+The project's defining principle is uncompromising. There is no shortcut between Windows and Android. There is no shared file system, no shared driver, no shared kernel service, no shared anything \'97 except the ARM64 instruction set architecture as defined by ARM Limited. This purity is not aesthetic. It is the entire technical reason the project exists, because every shortcut taken by every other Android-on-PC solution becomes a fingerprint that distinguishes their environment from real hardware. AETHER takes no shortcuts and therefore presents no fingerprints.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Part I \'97 The Vision\
+Chapter 1. What AETHER Is\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 AETHER is a Type-1 hypervisor written from scratch in Rust and assembly that boots directly on ARM64 hardware before any operating system. Once running, it partitions the machine's physical resources into two completely isolated domains. The first domain hosts Windows-on-ARM, which boots and runs without any awareness that it is virtualized. The second domain hosts a complete Android stack \'97 bootloader, Linux kernel, AOSP system services, ART runtime, microG, and applications \'97 which equally has no awareness that anything else exists on the machine. The two domains share only the physical processor's instruction set. They do not share memory. They do not share devices. They do not share kernels, drivers, file systems, or even concepts of time beyond what the hardware timer dictates. They are two parallel computational universes that happen to occupy the same silicon.\
+The user experiences AETHER as a single laptop that can run native Windows applications and native Android applications simultaneously, switch between them instantly, and use peripherals seamlessly with both \'97 but underneath this surface convenience, the two operating systems have no relationship to each other. Each one believes it owns the machine. Each one is correct from its own perspective.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 2. Why AETHER Exists\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 Every Android-on-PC product that exists today \'97 BlueStacks, LDPlayer, NoxPlayer, MEmu, Waydroid, Genymotion, Android Studio's emulator, and the rest \'97 makes architectural compromises that produce detectable seams. They allow file system sharing for drag-and-drop convenience. They proxy graphics calls through the host's graphics driver. They route Android's network through the host's network stack. They simulate sensors with simple noise generators that don't follow real physical models. They use generic device identifiers that anti-cheat systems can recognize. Each compromise saves engineering time and produces a usable product, but each compromise also introduces a place where the Android environment behaves differently than it would on real Android hardware. Software designed to detect these differences \'97 anti-cheat systems, banking apps, DRM systems \'97 can find them.\
+AETHER's reason for existing is to take none of these compromises. By driving the boundary between Windows and Android down to the silicon itself, every layer above the silicon is genuinely Android, talking to genuinely simulated Android hardware that responds with genuinely physical fidelity. There is no place for a fingerprint to form, because there is no place where Windows leaks through.\
+The practical consequence is an Android environment in which apps cannot tell they are not running on a real device, because at every level of inspection they are running on a real device \'97 a real ARM64 processor, a real GPU partition, real memory, real storage, real network \'97 just one whose top-level identity has been defined by the hypervisor rather than by a phone manufacturer.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 3. The Non-Negotiables\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The following design constraints are inviolable. Every engineering decision in AETHER must satisfy all of them simultaneously. If a proposed feature would violate any of them, the feature is rejected, no matter how convenient it would be.\
+The Android partition must never make a system call into Windows or the hypervisor for the purpose of accessing host resources. Every resource the Android partition uses must be either dedicated to it via hardware passthrough or simulated by the hypervisor's internal virtual device subsystem.\
+The Windows partition must never have visibility into the Android partition's memory, devices, or execution state. Windows must believe it is the only operating system on the machine.\
+The hypervisor itself must be invisible to both guests at the level of normal operation. Guests can detect virtualization only through deliberate ARM64 instructions that the architecture exposes for that purpose, and even those signals must be configured to match what real ARM64 hardware would report.\
+There is no "host" in AETHER. The hypervisor is not a host. The hypervisor is a referee that allocates resources at boot and then steps out of the way. Both Windows and Android are equal guests with no privilege over each other.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Part II \'97 The Silicon\
+Chapter 4. ARM64 As The Substrate\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The ARM64 architecture, formally called AArch64, is the only thing AETHER assumes exists. Everything else is built on top of it. Understanding what ARM64 provides at the hardware level is therefore essential to understanding every other part of this document.\
+An ARM64 processor implements a specific instruction set defined in the ARM Architecture Reference Manual. The reference manual is a public document of approximately twelve thousand pages, and it is the only specification AETHER treats as authoritative for the hardware layer. Every behavior the hypervisor depends on is something the reference manual guarantees. Every behavior the hypervisor exposes to its guests is something the reference manual describes for real hardware.\
+The processor has thirty-one general-purpose sixty-four-bit registers, a stack pointer, a program counter, and a register file for floating-point and SIMD operations. It has a memory management unit that translates virtual addresses to physical addresses through page tables. It has a generic interrupt controller that delivers signals from hardware to software. It has architectural timers that count cycles and elapsed time. These are the primitives. Everything else \'97 operating systems, applications, user experiences \'97 is constructed from them.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 5. Exception Levels\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The ARM64 architecture defines a hierarchy of privilege called exception levels, numbered from zero to three. Code running at a higher exception level can do things that code at a lower level cannot. This hierarchy is enforced by the processor itself in hardware, not by software, and is the foundation of all isolation in AETHER.\
+Exception Level 0, written EL0, is the level at which application code runs. An app like Free Fire executes its instructions at EL0. At this level, the processor disallows any instruction that would affect another process or the operating system. EL0 is the lowest privilege; everything above it is more privileged.\
+Exception Level 1, written EL1, is the level at which operating system kernels run. The Linux kernel inside the Android partition runs at EL1. The Windows NT kernel inside the Windows partition also runs at EL1. At this level, the processor allows access to page tables, interrupt configuration, and other resources that user code cannot touch. But EL1 cannot reach above itself.\
+Exception Level 2, written EL2, is the level designed specifically for hypervisors. AETHER runs at EL2. From this level, AETHER can intercept and control what happens at EL1 and EL0 in either guest. AETHER configures a second stage of address translation, called Stage 2, that sits between the guest's view of physical memory and the actual physical memory of the machine. This is how AETHER ensures that when Android writes to what it thinks is physical address 0x40000000, the write actually lands somewhere in the memory region AETHER has assigned to Android, not somewhere in Windows's memory.\
+Exception Level 3, written EL3, is the level at which secure firmware runs. AETHER does not run at EL3. The system's existing firmware \'97 typically ARM Trusted Firmware on ARM laptops \'97 runs at EL3 and remains in place. AETHER cooperates with EL3 firmware during boot but does not replace it.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 6. The Virtualization Extensions\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 AETHER's existence is made possible by a specific set of optional features in the ARM64 architecture called the Virtualization Extensions, often abbreviated VHE in their newer form. These features include the EL2 execution mode itself, the Stage 2 translation tables that allow nested address translation, the virtual interrupt controller interface that lets the hypervisor inject and route interrupts to guests, and the system register trapping mechanisms that let the hypervisor catch sensitive operations performed by guests.\
+The virtualization extensions are present and enabled on Snapdragon X Elite, Apple Silicon, AWS Graviton, and most other modern ARM64 systems-on-chip. AETHER will not run on processors that lack these extensions. The build system explicitly checks for them and refuses to produce a hypervisor binary for processors that cannot support virtualization.\
+When a guest operating system at EL1 attempts to perform a sensitive operation \'97 for instance, modifying its own page tables in a way that would conflict with the hypervisor's Stage 2 translation \'97 the processor automatically traps to EL2, transferring control to AETHER. AETHER inspects the operation, decides whether to allow it, modifies its parameters if necessary, and either performs the operation on the guest's behalf or returns control to the guest with the operation completed. The guest never knows this happened. From the guest's perspective, time simply passed slightly more slowly than expected for that one instruction.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Part III \'97 The Hypervisor\
+Chapter 7. Boot\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 When the machine is powered on, control passes through a sequence of firmware stages defined by the platform's manufacturer. The first stage is the boot ROM, baked into silicon and unchangeable. The second stage is the platform firmware \'97 UEFI on most ARM laptops \'97 which initializes RAM, storage, and the bootable device tree. The third stage is the EL3 secure firmware, which establishes the secure world and the chain of trust.\
+AETHER inserts itself at the fourth stage, replacing what would normally be the Windows boot manager. The platform firmware loads AETHER as the bootable EFI image. AETHER takes control at EL2 and immediately performs three operations in sequence.\
+First, AETHER discovers the machine's hardware inventory by parsing the firmware-provided ACPI tables and device tree, building an internal map of every CPU core, memory region, GPU, network interface, storage controller, USB controller, and peripheral the machine contains. This inventory becomes the basis for resource partitioning.\
+Second, AETHER reads its own configuration from a small partition on the system's primary storage device. The configuration specifies how resources should be divided between Windows and Android \'97 how many CPU cores each guest receives, how much memory, which GPU partition, which network interface, which storage region, and so on. This configuration is established at install time and rarely changes.\
+Third, AETHER constructs the initial state for both guests. It creates Stage 2 page tables that map each guest's view of physical memory to the actual machine memory regions assigned to it. It configures the virtual interrupt controller to route interrupts from the guest's assigned devices to that guest. It loads the bootable image of each guest \'97 the Windows boot manager for the Windows partition, and the Android bootloader for the Android partition \'97 into their respective memory regions. Then it starts both guests by transferring execution to their entry points at EL1 in their respective contexts.\
+From this moment on, the guests run, and AETHER intervenes only when a guest performs an operation that requires hypervisor mediation. Most of the time, both guests are executing native ARM64 instructions on the real CPU at full hardware speed, and AETHER is asleep.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 8. Memory Architecture\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 Memory is the most carefully managed resource in AETHER, because mistakes here would compromise the isolation between Windows and Android. The architecture of memory partitioning works through three layers of address translation, the third of which AETHER controls.\
+The first layer is the guest's own page tables, which translate the addresses an application sees (called virtual addresses or VAs) into addresses the guest kernel believes are physical (called intermediate physical addresses or IPAs). The guest manages these page tables freely and is unaware that its "physical" addresses are not the actual machine's physical addresses.\
+The second layer is AETHER's Stage 2 page tables, which translate intermediate physical addresses into actual physical addresses (called PAs) on the machine. These tables are owned by AETHER and are inaccessible to either guest. Every memory access by either guest passes through Stage 2 translation, and AETHER ensures the translations only resolve to memory regions assigned to that specific guest. An attempt by the Android guest to access a memory region assigned to Windows results in a Stage 2 translation fault that traps to EL2, where AETHER terminates the offending access.\
+The third layer is the IOMMU, called SMMU in ARM terminology \'97 the System Memory Management Unit. The SMMU performs the same Stage 2 translation for memory accesses initiated by hardware devices, not just by the CPU. Without the SMMU, a device assigned to Android could be programmed by a malicious or buggy Android driver to write to a memory address that belongs to Windows. The SMMU prevents this by enforcing the same address translation policy on device DMA operations as AETHER enforces on CPU memory accesses. AETHER configures the SMMU at boot with translation tables that mirror the Stage 2 tables, and the SMMU hardware enforces the partitioning automatically thereafter.\
+The result is that no instruction executed by either guest, and no DMA operation performed by either guest's devices, can ever touch memory belonging to the other guest. The isolation is enforced by hardware, not software, and cannot be defeated by any code running at EL1 or below in either guest.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 9. CPU Partitioning\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 AETHER allocates CPU cores to guests at boot, and after that point, each core belongs exclusively to one guest until the system is rebooted. There is no time-sliced multiplexing of CPU cores between guests. This is a deliberate choice for performance and for fingerprint purity.\
+A typical Snapdragon X Elite has twelve CPU cores. A typical AETHER configuration might assign six of them to Windows and six to Android, although the configuration is adjustable. Each core runs its assigned guest's code at native speed. There is no scheduling overhead, no context switching between guests on a single core, no jitter from interleaving. The core simply executes whatever its assigned guest tells it to execute, with AETHER intervening only for trapped operations.\
+Within each guest, normal scheduling happens entirely inside that guest's kernel. Windows schedules Windows threads across its assigned cores. The Android Linux kernel schedules Android processes across its assigned cores. Neither kernel is aware that other cores exist on the machine, because AETHER reports to each guest only the cores assigned to that guest.\
+This static partitioning sacrifices some flexibility \'97 you cannot temporarily borrow Windows's idle cores to accelerate Android, for example \'97 but it produces a clean, predictable, isolated execution environment that is much closer to running on native hardware than dynamic scheduling would be. Predictability is part of fidelity.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 10. Interrupt Routing\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 When a hardware device needs the CPU's attention \'97 a disk has finished a read, a network packet has arrived, a timer has expired \'97 it raises an interrupt through the Generic Interrupt Controller, called GIC in ARM terminology. The GIC determines which CPU core should handle the interrupt and signals that core, which immediately suspends whatever it was doing and runs the interrupt handler.\
+In a virtualized system, interrupts must be routed to the correct guest. If a device assigned to Android raises an interrupt, that interrupt must reach the Android kernel. If a device assigned to Windows raises an interrupt, it must reach the Windows kernel. AETHER must never deliver an Android device's interrupt to Windows or vice versa.\
+The ARM virtualization extensions provide a feature called the GIC Virtualization Extension that handles this routing in hardware. AETHER configures the GIC at boot to associate each device's interrupt line with a specific guest. Thereafter, when an interrupt arrives, the GIC consults its routing table and delivers the interrupt directly to the appropriate guest's virtual GIC, which makes it appear to that guest's kernel exactly as if the interrupt had arrived on real hardware. The hypervisor itself does not need to mediate most interrupts; the hardware does it correctly without any software involvement, which preserves performance.\
+The few interrupts that AETHER does handle directly are those targeted at AETHER itself \'97 primarily the EL2 timer interrupt, which AETHER uses to maintain its own internal time, and inter-processor interrupts that AETHER uses for hypervisor-internal coordination across cores.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Part IV \'97 Device Strategy\
+Chapter 11. The Passthrough Principle\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 Every hardware device on the machine must be assigned to exactly one guest, and that guest gets exclusive direct access to it. This is called passthrough. AETHER does not virtualize devices for purposes that matter to Android. The only virtualization that occurs is for devices that the Android partition needs to believe exist but that don't physically exist on a laptop \'97 most notably the cellular modem, the phone-specific sensors, and certain phone-specific peripherals. For everything else, the principle is passthrough or nothing.\
+The reasoning is direct. Every paravirtualized device is a fingerprint. A paravirtualized network card responds to register reads with timing characteristics that don't match any real network card. A paravirtualized GPU has performance characteristics that don't match any real GPU. The only way to make a device behave like real hardware is for it to 
+\f1\i be
+\f2\i0  real hardware. AETHER takes this principle to its logical extreme.\
+For the GPU, this is achieved through SR-IOV, described in Chapter 13. For the network interface, AETHER assigns the entire WiFi or Ethernet adapter to one guest exclusively, and the other guest is given a different physical adapter or none at all. For storage, each guest is given its own dedicated NVMe controller or its own dedicated namespace within a single NVMe drive. For USB, AETHER assigns specific USB controllers to specific guests; a USB device plugged into an "Android" USB port is connected directly to Android with no Windows visibility.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 12. The Necessity Of Paravirtualization\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 There are three categories of devices for which passthrough is impossible and paravirtualization is therefore unavoidable. AETHER paravirtualizes these and only these.\
+The first category is the cellular modem. A laptop does not have a cellular modem in the form factor Android expects, so AETHER's hypervisor includes a virtual modem device that responds to AT commands and presents itself to the Android kernel as a Qualcomm or Samsung baseband processor. The virtual modem reports a valid IMEI from a pool of legitimate IMEIs, responds to network registration requests with synthetic but plausible cellular network data, and routes any actual data traffic through the network interface assigned to Android. The virtual modem's responses are timed and parameterized to match the behavior of a real baseband processor as closely as possible.\
+The second category is the sensor suite. A laptop has a much smaller set of sensors than a phone \'97 no gyroscope, no magnetometer, no proximity sensor, sometimes no accelerometer. AETHER's virtual sensor subsystem generates synthetic sensor data using physically realistic models. Accelerometer readings include thermal noise generated from a Gaussian distribution with parameters matching specific Bosch BMI160 or InvenSense MPU6500 sensors that are common in real Android phones. Gyroscope readings include drift modeled as a random walk with the correct integration characteristics. Magnetometer readings include realistic deviation from true magnetic north plus appropriate noise. The data is generated in real time at the polling rates real sensors use, and the API responses match the timing and format that real sensor drivers produce.\
+\pard\pardeftab560\slleading20\pardirnatural\partightenfactor0
+\cf0 The third category is phone-specific peripherals like the fingerprint sensor and the front-facing camera. These are simulated as virtual devices that report not-currently-available status when queried. Apps that depend on these features will see them as present but inactive, which is a normal state on real devices when the user has disabled them or when they are obscured. Here\'92s where this is completely possible:\uc0\u8232 
+\f0\b Phone Hardware Bridge Mode
+\f2\b0 \
+\pard\pardeftab560\slleading20\partightenfactor0
+\cf0 For users who possess a physical Android device and wish to achieve maximum hardware fidelity beyond what software simulation can provide, AETHER offers Phone Hardware Bridge Mode. When the user connects a real Android phone to the laptop via USB and installs the AETHER companion app, the virtual Android partition can replace its simulated hardware responses with live data sourced directly from the physical phone.\
+In this mode, the gyroscope, accelerometer, and magnetometer data feeding into the Android partition's sensor stack come in real time from the phone's actual MEMS sensors rather than from AETHER's mathematical simulation. The data carries the exact thermal noise characteristics, drift patterns, and calibration signatures of that specific physical sensor, because it is that specific physical sensor producing it.\
+The IMEI, device serial number, and all hardware identifiers reported by the Android partition are queried live from the connected phone rather than generated synthetically. These identifiers are real, registered, and verifiable in carrier and manufacturer databases because they belong to a real device.\
+Cellular connectivity, where required by apps, is routed through the phone's actual modem via standard USB tethering. The cellular radio handling the connection is a real radio on a real registered SIM, not a simulated interface.\
+Camera input, where requested by applications running in the partition, can optionally be sourced from the phone's camera hardware, with frames streamed to the partition over USB in real time.\
+The phone's application processor bears negligible load throughout all of this. Identity queries are infrequent string lookups. Sensor streaming is lightweight USB data transfer. The phone remains fully usable for any simultaneous task. All computation \'97 game logic, rendering, network packet processing \'97 happens entirely on the laptop's hardware. The phone is a hardware witness, not a computational participant.\
+Bridge Mode is entirely optional. AETHER's simulation is designed to be sufficient without it. Bridge Mode exists for users who want the highest possible fidelity and happen to have a compatible Android device available.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 13. GPU Partitioning Through SR-IOV\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 Graphics is the most performance-sensitive subsystem in the entire architecture, because a key use case for AETHER is gaming. The graphics partitioning strategy uses a hardware feature called SR-IOV \'97 Single Root I/O Virtualization \'97 that allows a single physical GPU to present itself as multiple independent GPUs to the system.\
+When SR-IOV is enabled on a GPU, the GPU's driver subsystem creates a small number of virtual functions, each of which appears to the system as a separate PCI device with its own memory regions, command queues, and interrupt sources. The host operating system sees one or more of these virtual functions and can assign them to different guests. The GPU's hardware enforces isolation between virtual functions, ensuring that work submitted to one cannot interfere with work submitted to another.\
+AETHER configures SR-IOV at boot to create two virtual functions on the integrated GPU. One is assigned to Windows, the other to Android. Each guest's graphics driver communicates directly with its assigned virtual function with no software mediation by the hypervisor. The Android graphics stack \'97 Adreno or Mali driver, OpenGL ES library, Vulkan library \'97 talks to its virtual function exactly as it would to a real GPU. The performance is native; the hypervisor does not see graphics commands.\
+Android's graphics driver is selected at AOSP build time to match the virtual function's reported identity. If AETHER configures the Android virtual function to identify as an Adreno 740, the Android image is built with the Adreno graphics driver. The driver communicates with what it believes is real Adreno hardware, and at the hardware level, the GPU's SR-IOV implementation responds correctly because the virtual function genuinely presents Adreno-compatible registers and command formats.\
+SR-IOV support on consumer ARM laptop GPUs is currently uneven. Snapdragon X Elite's Adreno X1 GPU supports SR-IOV in newer firmware revisions. Apple Silicon GPUs do not expose SR-IOV. Future revisions of AETHER may need to fall back to software-based GPU sharing using techniques like Intel GVT-g or NVIDIA vGPU, but the architectural target is full SR-IOV passthrough.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 14. Storage Partitioning\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 Storage is partitioned at the NVMe namespace level. A modern NVMe SSD supports multiple namespaces, each of which appears as a separate block device. AETHER assigns one namespace to Windows and another to Android, and configures the NVMe controller's SR-IOV implementation (where supported) or its built-in namespace isolation to ensure that each guest's NVMe driver can only see and access its assigned namespace.\
+The Android namespace is formatted with the Android-standard partition layout \'97 boot partition, system partition, vendor partition, userdata partition, and so on \'97 and contains a complete Android filesystem. The Windows namespace contains a complete Windows installation. Neither namespace is visible to the other guest. There is no shared partition, no shared folder, no clipboard sync between guests at the storage level.\
+The performance implication is that storage I/O happens at native NVMe speed in both guests, with no hypervisor mediation in the data path. A read or write issued by either guest is dispatched directly to the NVMe controller through the guest's own NVMe driver, executes against the guest's assigned namespace, and returns directly to the guest. AETHER is not involved.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 15. Network Partitioning\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The networking strategy depends on the laptop's hardware. Most ARM laptops have a single wireless network adapter, which presents a partitioning challenge because two guests cannot share a single radio without paravirtualization or hardware support for SR-IOV on the adapter.\
+AETHER's preferred configuration uses laptops that have separate WiFi and cellular modems, or laptops with WiFi adapters that support SR-IOV. In the SR-IOV case, the strategy mirrors the GPU strategy \'97 two virtual functions, one assigned to each guest, with isolation enforced in hardware. In the dual-adapter case, the WiFi is assigned to Windows and the cellular modem (where present) is assigned to Android.\
+For laptops with only a single non-SR-IOV WiFi adapter, AETHER falls back to a paravirtualized network where the adapter is assigned to one guest and the other guest receives a virtual network interface that tunnels its traffic through the assigned guest. This is a deliberate compromise reserved for hardware that cannot support proper passthrough. The design goal is to minimize how often this fallback is needed by recommending hardware that supports clean passthrough.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 16. USB And Input Routing\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 USB is partitioned at the controller level, not the device level. A laptop typically has multiple USB controllers \'97 one for the integrated keyboard and trackpad, one for external USB-A ports, one for USB-C ports. AETHER assigns each controller to a specific guest at boot. A keyboard plugged into a port managed by the Android-assigned controller appears in Android only, not in Windows.\
+This partitioning is enforced through the SMMU, just like other DMA-capable devices. The Android USB controller's DMA operations are constrained by the SMMU to access only Android memory regions, and the controller's interrupts are routed only to Android cores. Windows has no visibility into USB activity on the Android-assigned controller and cannot interfere with it.\
+For the integrated keyboard and trackpad, AETHER provides a small mechanism for the user to switch which guest currently receives input \'97 typically a key combination that signals AETHER to reassign the integrated input controller from one guest to the other. This is the only point at which AETHER provides a user-facing affordance that crosses the partition boundary, and it does so only for the practical reality that a laptop has only one physical keyboard.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Part V \'97 The Windows Partition\
+Chapter 17. Windows As A Guest\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 Windows-on-ARM is, from AETHER's perspective, simply an ARM64 operating system that boots from a UEFI environment and runs at EL1. AETHER provides Windows with what looks like a normal UEFI boot environment, including ACPI tables that describe the Windows-assigned hardware and firmware services that Windows expects to call.\
+Windows boots from its assigned NVMe namespace using its own boot manager, loads its own drivers for the hardware it has been given, and runs as it would on a non-virtualized machine that happened to have only the resources AETHER has assigned to it. From Windows's point of view, it is running on a laptop with six CPU cores, sixteen gigabytes of RAM, one GPU virtual function, one NVMe namespace, one WiFi adapter, and a few USB controllers. That Windows is wrong about the machine's full hardware inventory is the entire point \'97 Windows is intentionally confined to its own slice.\
+AETHER does not modify Windows. There is no AETHER agent or driver inside Windows. Windows is unaltered, unmodified, and unaware. This is critical for several reasons. It means Windows updates can be applied normally without breaking AETHER. It means Windows licensing works normally because Windows sees what looks like a normal certified machine. It means Microsoft's own diagnostics and security tools work normally because Windows is genuinely Windows.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 18. The Windows ACPI Description\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The way Windows discovers what hardware it has is through ACPI tables provided by the firmware. AETHER constructs a custom set of ACPI tables for the Windows partition that describes only the hardware Windows has been assigned. The tables list the Windows CPU cores, the Windows memory map, the Windows GPU virtual function, the Windows NVMe namespace, and so on. They do not list any of the Android-assigned hardware.\
+These ACPI tables are presented to Windows as if they came from real platform firmware. Windows reads them during boot, builds its internal device tree from them, and proceeds to load drivers for the listed hardware. The fact that AETHER fabricated these tables is invisible to Windows because the tables are formally compliant with the ACPI specification and describe a coherent, plausible machine.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Part VI \'97 The Android Partition\
+Chapter 19. The Bootloader\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The Android partition begins its life with an Android-compliant bootloader, specifically a port of U-Boot or a custom bootloader following the Android Verified Boot specification. AETHER loads the bootloader into the Android partition's memory at the entry point Android expects, and execution begins there at EL1 inside the Android partition's context.\
+The bootloader performs the same operations it would on a real Android device. It initializes its view of the platform \'97 which AETHER has prepared to look like a specific Android device, complete with device tree, ACPI-equivalent hardware description, and verified boot keys. It verifies the cryptographic signature of the Android boot image. It loads the Linux kernel into memory, places the device tree blob at the address the kernel expects, and transfers execution to the kernel entry point.\
+The verified boot subsystem reports a "locked" bootloader state, which is the state real Android devices ship in and the state SafetyNet and similar attestation systems expect. AETHER's bootloader is not actually unlocked \'97 it cryptographically verifies the Android image it loads, using keys controlled by AETHER's build system. Because AETHER is the entity that built the Android image and signed it, the verification succeeds, and the bootloader truthfully reports a locked state.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 20. The Linux Kernel\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The Linux kernel inside the Android partition is built from the Android Common Kernel source tree, which is Google's curated branch of mainline Linux with Android-specific patches. AETHER builds this kernel for the ARM64 architecture targeting AETHER's virtual hardware platform.\
+The kernel is configured with drivers for the hardware the Android partition has been assigned. The Adreno GPU driver is included because the Android partition has been given an Adreno virtual function. The Qualcomm WiFi driver or cellular modem driver is included to match the network hardware. The standard ARM architectural timer driver, GIC driver, and SMMU driver are included because every ARM64 system needs them.\
+Crucially, the kernel does not include any AETHER-specific drivers. There is no virtio driver, no paravirtualization client, no hypervisor integration code. The kernel believes it is running on a real ARM64 SoC and uses standard drivers for what it perceives as standard hardware. This is what makes the partition appear genuine \'97 every driver in the kernel is a real driver for real hardware, and the hardware those drivers communicate with is either real (passed through) or genuinely simulated to specification (the few paravirtualized devices).\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 21. AOSP And The Android Userspace\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 Above the kernel runs the Android userspace, built from the Android Open Source Project. The build target is a custom AETHER device configuration that specifies the hardware identity, the included system services, and the preinstalled applications.\
+The device configuration tells the AOSP build system that this device has the hardware AETHER's virtual platform exposes \'97 specific CPU cores, specific GPU, specific sensors, specific identifiers. The build system generates the appropriate 
+\fs24 vendor
+\fs26  partition contents, including the hardware abstraction layer libraries that match this hardware. When Android runs, its userspace HALs talk to the same hardware the kernel drivers do, and the chain from app to kernel to hardware is unbroken Android software all the way down.\
+The Android Runtime (ART) compiles applications from DEX bytecode to native ARM64 machine code at install time, just as it does on a real device, and that native code executes directly on the real CPU at native speed. There is no interpretation, no translation, no performance penalty. Apps run as fast as they would on a real Android device with equivalent hardware \'97 and given that the Android partition has access to a Snapdragon X Elite's CPU cores, that means apps run faster than they do on most actual phones.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 22. The microG Substitution\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 Google Play Services is Google's proprietary collection of cloud-connected services that most Android applications depend on. It provides Google account authentication, push notifications through Firebase Cloud Messaging, location services through the Fused Location Provider, advertising identifiers, in-app purchasing, and the Play Integrity API that detects non-certified Android environments.\
+AETHER does not include Google Play Services because Google does not license it to non-certified Android implementations, and obtaining certification for a hypervisor-based Android image would require Google's cooperation. Instead, AETHER integrates microG, an open-source reimplementation of the Google Play Services API surface.\
+microG provides API-level compatibility for the most commonly used Google services. Apps that authenticate users through Google Sign-In work because microG implements the same authentication flow. Apps that receive push notifications through FCM work because microG's GmsCore reimplements the FCM client. Apps that look up the user's location through the Fused Location Provider receive location data, although the data comes from the microG location backend rather than from Google's servers.\
+The Play Integrity API is the hardest case, because its purpose is specifically to detect non-Google Android environments. microG's Play Integrity implementation returns responses indicating an unverified environment, which causes some apps \'97 primarily banking apps and certain games with strict integrity requirements \'97 to refuse to run. For applications that do not check Play Integrity, microG provides full functional compatibility. For applications that do check it, AETHER offers a future path through a compatibility shim that responds to integrity checks with cached attestations from real devices, but this remains a research direction rather than a current feature.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 23. The Play Store Question\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The Google Play Store, the application AETHER users will most want to install applications from, is itself a Google application that depends on Play Services. Without official Google certification, the Play Store cannot be legitimately included in AETHER's Android image.\
+AETHER addresses this through alternative app sources. The default app store in AETHER is F-Droid, which carries open-source applications and is freely redistributable. For applications not available on F-Droid, AETHER includes Aurora Store, an open-source frontend to the Google Play Store backend that allows users to download Play Store apps using anonymous accounts. Aurora Store provides access to most of the Play Store catalog without requiring AETHER itself to be certified.\
+For users who wish to install the genuine Google Play Store, AETHER provides a manual installation path that requires the user to acknowledge the legal and technical implications of running Google's proprietary services on a non-certified Android implementation. This path is supported but not the default.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Part VII \'97 Cross-Cutting Concerns\
+Chapter 24. Performance\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The performance philosophy of AETHER is that nothing should be slower than it would be on equivalent native hardware, and many things should be faster because the underlying ARM64 chip in a Snapdragon X Elite is more capable than any phone's chip.\
+CPU performance is native. Guests execute their instructions directly on the real CPU at full speed. The hypervisor only intervenes for trapped operations, which are rare during normal application execution.\
+Memory performance is native. Stage 2 translation happens in hardware via the MMU's two-stage translation, which is fully pipelined and adds no measurable overhead to normal memory accesses.\
+GPU performance is native via SR-IOV. Graphics commands flow from the Android graphics stack directly to the GPU virtual function with no software mediation.\
+Storage performance is native via NVMe namespace passthrough. Reads and writes flow from the Android NVMe driver directly to the controller.\
+Network performance is native via SR-IOV or dedicated adapter passthrough. Packets flow through the assigned hardware without hypervisor involvement.\
+The places where overhead exists are the paravirtualized devices \'97 the modem, the sensors, the phone-specific peripherals \'97 but these are not performance-critical for any normal use case. Reading the gyroscope at one hundred hertz is not bottlenecked by anything AETHER does.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 25. Security\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The security model of AETHER rests on hardware enforcement of partitioning. The SMMU enforces device DMA isolation. Stage 2 translation enforces CPU memory isolation. The GIC enforces interrupt isolation. None of these are software policies that can be bypassed by buggy or malicious code in either guest. They are hardware mechanisms that the processor enforces unconditionally.\
+The hypervisor itself runs at EL2, above both guests, and its memory is not mapped into either guest's address space. There is no way for code in either guest to read or write hypervisor memory.\
+The attack surface of the hypervisor is small by design. The hypervisor exposes no API to its guests beyond what the ARM architecture defines for guest-host communication, and the guest-host communication paths it does expose are minimal \'97 a small number of hypercall handlers for operations that genuinely require hypervisor mediation. Each handler is a few dozen lines of carefully audited code.\
+The hypervisor is written in Rust to provide memory safety at the language level for everything outside the few hand-written assembly entry points. The assembly portions are limited to the EL2 exception vectors and the context-switching code, both of which are small enough to be audited line by line.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 26. Time\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 Time deserves its own chapter because it is one of the subtlest aspects of virtualization and one where most hypervisors leak fingerprints.\
+Each ARM64 core has an architectural timer that counts cycles since the system started. Guests read this timer to measure elapsed time, and many anti-cheat systems compare timer readings to detect virtualization through inconsistencies. AETHER configures the virtual architectural timer such that each guest sees a coherent, monotonic time stream that matches what real hardware would produce.\
+Because AETHER does not multiplex CPU cores between guests, time in each guest flows continuously and naturally. There are no gaps in the time stream where AETHER took the CPU away to run something else. The Android partition's clock advances at exactly the rate the real CPU's architectural timer advances. The Windows partition's clock does the same, on its own cores.\
+The wall-clock time, separate from the architectural timer, is initialized at boot from the platform's real-time clock and then maintained internally by each guest using its own NTP synchronization through its assigned network interface. AETHER does not provide time services to either guest.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Part VIII \'97 Build And Toolchain\
+Chapter 27. The Build System\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 AETHER is built from a unified build system that produces three artifacts: the hypervisor binary, the Windows boot configuration, and the Android image. The build system is implemented in a combination of Make, Cargo (for the Rust hypervisor code), and Soong (for the AOSP portion of the Android image). A top-level orchestration script invokes each subsystem in the correct order with the correct configuration.\
+The hypervisor source tree is structured as a Rust workspace with separate crates for the EL2 entry code, the Stage 2 translation manager, the SMMU manager, the GIC manager, the device assignment manager, the paravirtualized device implementations, and the boot orchestration logic. Each crate has its own unit tests, and the workspace as a whole has integration tests that run inside QEMU's virtualization emulation for development.\
+The Android image build is performed by a fork of AOSP that includes AETHER's device configuration and the integrated microG components. The fork is rebased regularly against upstream AOSP to incorporate security patches and feature updates.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 28. The Development Workflow\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 Development happens primarily on x86-64 Linux workstations using cross-compilation toolchains for ARM64. The hypervisor binary is built with the Rust ARM64 target. The Android image is built with AOSP's standard build system targeting AETHER's device configuration.\
+Testing happens at three levels. Unit tests run on the development machine for individual hypervisor components. Integration tests run the hypervisor inside QEMU's ARM64 system emulation, with simulated guests, on the development machine. Hardware tests run the full hypervisor on real ARM64 hardware \'97 initially development boards like the SolidRun HoneyComb or actual Snapdragon X Elite laptops in a development partition.\
+Continuous integration runs the unit and integration test suites on every commit. Hardware tests run nightly on a small fleet of physical test machines.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Part IX \'97 Roadmap\
+Chapter 29. Phase One \'97 Foundation\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The first phase, estimated at twelve to eighteen months for a small team, produces a hypervisor that boots on real ARM64 hardware, partitions resources between two guests, and runs a minimal Linux guest in each partition. Both guests can execute code, allocate memory, handle interrupts from their assigned devices, and communicate with simple peripherals through passthrough. There is no Android, no Windows, no graphics \'97 just two isolated Linux instances proving the hypervisor architecture works end to end.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 30. Phase Two \'97 Windows\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The second phase, estimated at six to nine months, gets Windows-on-ARM booting and running in one partition. This requires constructing valid ACPI tables for the Windows partition, ensuring all Windows-required platform services are exposed correctly, and validating that Windows runs stably with full performance. By the end of phase two, the system is a functional Windows-on-ARM laptop with a sleeping second partition.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 31. Phase Three \'97 Android Bring-Up\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The third phase, estimated at twelve months, brings up Android in the second partition. This requires building AOSP for AETHER's device target, integrating microG, configuring the paravirtualized sensors and modem, setting up GPU passthrough through SR-IOV, and validating that standard Android applications run correctly. By the end of phase three, the system runs both Windows and Android side by side with isolated execution.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 32. Phase Four \'97 Performance And Compatibility\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The fourth phase, estimated at twelve months, focuses on performance optimization and application compatibility testing. The graphics path is tuned for native performance. The sensor models are refined against real device measurements. Application compatibility is validated across the top thousand Play Store applications, with bug fixes for any that misbehave.\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Chapter 33. Phase Five \'97 Polish And Release\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The fifth phase, estimated at six to twelve months, is product polish \'97 installer, configuration tools, documentation, support infrastructure, and the cross-partition input switching mechanism. This phase culminates in a public release.\
+The total timeline from phase one to phase five is approximately four to five years for a dedicated team of five to ten engineers, or longer for a smaller team. Working part-time alongside a four-year computer science degree, expect this to be a six-to-eight year project for the full vision, with intermediate milestones that produce real capability along the way.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Appendix A. Glossary\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\fs26 \cf0 AArch64
+\f2\b0  \'97 The 64-bit execution state of the ARM architecture; synonymous with ARM64.\
+
+\f0\b ACPI
+\f2\b0  \'97 Advanced Configuration and Power Interface, the standard for describing hardware to operating systems.\
+
+\f0\b AOSP
+\f2\b0  \'97 Android Open Source Project, Google's open-source Android codebase.\
+
+\f0\b ART
+\f2\b0  \'97 Android Runtime, the execution environment for Android applications.\
+
+\f0\b DMA
+\f2\b0  \'97 Direct Memory Access, hardware-initiated memory transfers that bypass the CPU.\
+
+\f0\b EL
+\f2\b0  \'97 Exception Level, the ARM64 privilege hierarchy ranging from EL0 (applications) to EL3 (secure firmware).\
+
+\f0\b GIC
+\f2\b0  \'97 Generic Interrupt Controller, the ARM standard interrupt controller.\
+
+\f0\b Hypervisor
+\f2\b0  \'97 Software that creates and manages virtual machines, here specifically a Type-1 hypervisor running directly on hardware.\
+
+\f0\b IPA
+\f2\b0  \'97 Intermediate Physical Address, the address a guest believes is physical but which actually requires Stage 2 translation.\
+
+\f0\b microG
+\f2\b0  \'97 Open-source reimplementation of Google Play Services.\
+
+\f0\b Passthrough
+\f2\b0  \'97 Direct exclusive assignment of a hardware device to a single guest.\
+
+\f0\b Paravirtualization
+\f2\b0  \'97 Software simulation of a hardware device by the hypervisor.\
+
+\f0\b SMMU
+\f2\b0  \'97 System Memory Management Unit, the ARM IOMMU implementation.\
+
+\f0\b SR-IOV
+\f2\b0  \'97 Single Root I/O Virtualization, a hardware feature for partitioning PCI devices.\
+
+\f0\b Stage 2
+\f2\b0  \'97 The hypervisor-controlled second phase of address translation that maps guest physical addresses to machine physical addresses.\
+
+\f0\b Type-1 Hypervisor
+\f2\b0  \'97 A hypervisor that runs directly on hardware with no underlying operating system.\
+
+\f0\b VHE
+\f2\b0  \'97 Virtualization Host Extensions, the modern ARM64 virtualization feature set.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Appendix B. Required Reading\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 The ARM Architecture Reference Manual for ARMv8-A is the single most important document for this project. Read the chapters on exception levels, the memory management unit, Stage 2 translation, the GIC architecture, the SMMU, and the architectural timer in particular.\
+The AOSP source tree is its own form of reading. Build it, modify it, understand its structure. The hardware abstraction layer interfaces and the device configuration system are where AETHER's customization happens.\
+The Linux kernel source for the ARM64 architecture, particularly the KVM subsystem, provides a reference implementation of every concept AETHER implements. KVM is not what AETHER is, but KVM solves many of the same problems AETHER must solve, and its source is the most readable specification of the solutions.\
+The Xen Project documentation, particularly for Xen on ARM, describes a Type-1 hypervisor architecture closer to AETHER's than KVM's. Xen's design choices are not all appropriate for AETHER, but the rationale Xen documents for each choice is invaluable.\
+The microG project documentation describes the API surface microG implements and the gaps relative to genuine Google Play Services.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Appendix C. Prerequisites For Contributors\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 A contributor to AETHER must possess working knowledge of all of the following: the ARM64 architecture at the level of someone who has read the architecture reference manual; the Rust programming language at intermediate or advanced level; the Linux kernel at the level of having read and modified driver code; the Android operating system at the level of having built AOSP from source and modified its system services; computer architecture concepts including caching, memory hierarchies, and out-of-order execution; and operating system theory including scheduling, virtual memory, and interrupt handling.\
+This is a high bar. It is the bar required to do this work without producing subtle, hard-to-diagnose bugs that compromise either correctness or fingerprint fidelity. The project is not friendly to learners in the way some open-source projects are. It is friendly to people who are already competent at systems programming and want to apply that competence to one of the hardest problems in the field.\
+\
+\pard\pardeftab560\sa40\partightenfactor0
+
+\f0\b\fs32 \cf0 Closing Words\
+\pard\pardeftab560\slleading20\partightenfactor0
+
+\f2\b0\fs26 \cf0 AETHER is, by design, an extreme project. It rejects every shortcut that other Android-on-PC products have taken. It demands hardware features that not all laptops have. It requires expertise that few engineers possess. It will take years to build and more years to perfect.\
+But the result, if executed correctly, is something that does not currently exist anywhere \'97 an Android environment so faithful to real hardware that no software can tell the difference, running alongside a fully functional Windows installation on a single laptop, with absolute isolation between the two. That has value far beyond the original use case that motivated this project. It is a foundation for any future work that requires a sovereign, untraceable, fully-faithful Android execution environment, and there will be many such future works.\
+The journey is long. The destination is clear. The work begins at the silicon and proceeds upward, layer by layer, exactly as this document describes.\
+\
+
+\f1\i This document is a living specification. As the project evolves, so will this text. The principles, however, are fixed.
+\f2\i0 \
+}
