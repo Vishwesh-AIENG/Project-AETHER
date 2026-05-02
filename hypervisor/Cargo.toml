@@ -1,0 +1,14 @@
+[package]
+name = "hypervisor"
+version = "0.1.0"
+edition = "2024"
+description = "AETHER Type-1 hypervisor — bare-metal ARM64 EL2"
+
+[[bin]]
+name = "hypervisor"
+path = "src/main.rs"
+
+[lib]
+name = "hypervisor"
+path = "src/lib.rs"
+
