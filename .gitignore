@@ -3,3 +3,4 @@ target/
 *.o
 *.a
 linux-ref/
+aether-skills/
