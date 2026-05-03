@@ -1,0 +1,335 @@
+// ch05: Exception classification and dispatch
+//
+// When an exception is taken to EL2, the first task is to determine what
+// caused it. ESR_EL2 (Exception Syndrome Register) contains a 6-bit
+// Exception Class (EC) field in bits [31:26] that identifies the cause.
+//
+// This module defines:
+//   - ExceptionType: which of the four ARM64 exception types arrived
+//   - ExceptionClass: the EC field decoded into a Rust enum
+//   - ExitReason: what AETHER should do in response
+//
+// All EC values are verified against:
+//   linux-ref/arch/arm64/include/asm/esr.h
+//   ARM ARM DDI0487 Table D1-6
+//
+// Skill guide warning (ch05): Claude frequently gets EC values wrong.
+// Every variant below is from esr.h, not from training data.
+
+use super::context::GuestContext;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExceptionType — the four hardware exception categories
+//
+// ARM64 has four exception types. Each has a dedicated vector table slot.
+// Source: ARM ARM DDI0487 Section D1.7
+// ────────────────────────────────────────────────────────────────────────────��
+
+/// The four ARM64 exception types that can be taken to EL2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExceptionType {
+    /// Synchronous exception: caused by the currently executing instruction.
+    /// Includes page faults, undefined instructions, SVC, HVC, SMC.
+    /// ESR_EL2 is valid and contains the Exception Class.
+    Synchronous,
+
+    /// IRQ: normal hardware interrupt. Routed to EL2 when HCR_EL2.IMO = 1.
+    /// ESR_EL2 is NOT valid for IRQ; GIC registers describe the interrupt.
+    Irq,
+
+    /// FIQ: fast interrupt request. Routed to EL2 when HCR_EL2.FMO = 1.
+    /// ESR_EL2 is NOT valid for FIQ.
+    Fiq,
+
+    /// SError: asynchronous system error (bus error, memory abort).
+    /// Routed to EL2 when HCR_EL2.AMO = 1.
+    SError,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExceptionClass — decoded EC field from ESR_EL2
+//
+// Only the EC values that AETHER will actually handle are listed.
+// Unknown EC values are represented by `ExceptionClass::Unknown(u8)`.
+//
+// All values verified against:
+//   linux-ref/arch/arm64/include/asm/esr.h ESR_ELx_EC_* constants
+//   ARM ARM DDI0487 Table D1-6
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Decoded Exception Class from ESR_EL2 bits [31:26].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExceptionClass {
+    /// EC = 0x01: WFI or WFE instruction trapped.
+    /// Occurs when HCR_EL2.TWI=1 (WFI) or HCR_EL2.TWE=1 (WFE).
+    /// AETHER intercepts WFI to implement guest idle.
+    WfxTrap,
+
+    /// EC = 0x0E: Illegal execution state.
+    /// Guest attempted to execute an instruction that is UNDEFINED at its
+    /// current exception level.
+    IllegalState,
+
+    /// EC = 0x15: SVC instruction from AArch64.
+    /// Guest made a system call into its own kernel (EL0 → EL1).
+    /// Should not normally reach EL2; if it does, it is a configuration error.
+    Svc64,
+
+    /// EC = 0x16: HVC instruction from AArch64.
+    /// Guest explicitly invoked the hypervisor. AETHER's hypercall interface
+    /// is the only intentional cross-EL communication (Chapter 7).
+    Hvc64,
+
+    /// EC = 0x17: SMC instruction from AArch64.
+    /// Guest attempted to call secure firmware. Trapped because HCR_EL2.TSC=1.
+    /// AETHER filters SMC calls; most are forwarded to EL3.
+    Smc64,
+
+    /// EC = 0x18: MSR/MRS to a system register that is trapped.
+    /// Guest tried to read/write a system register AETHER intercepts.
+    SystemRegister,
+
+    /// EC = 0x20: Instruction Abort from a lower Exception Level.
+    /// Stage 2 instruction fault — guest tried to fetch from an unmapped IPA.
+    InstructionAbortLow,
+
+    /// EC = 0x24: Data Abort from a lower Exception Level.
+    /// Stage 2 data fault — guest tried to read/write an unmapped or
+    /// protected IPA. The most common fault AETHER handles (Chapter 8).
+    DataAbortLow,
+
+    /// Any other EC value not explicitly handled above.
+    /// AETHER logs and halts on unknown EC values during development.
+    Unknown(u8),
+}
+
+impl ExceptionClass {
+    /// Decode the EC field from a raw ESR_EL2 register value.
+    ///
+    /// Extracts bits [31:26] and maps them to an `ExceptionClass` variant.
+    #[inline]
+    pub fn from_esr(esr: u64) -> Self {
+        // EC field: bits [31:26], 6 bits wide.
+        // Verified: linux-ref/arch/arm64/include/asm/esr.h ESR_ELx_EC_SHIFT=26
+        let ec = ((esr >> 26) & 0x3F) as u8;
+        match ec {
+            0x01 => Self::WfxTrap,
+            0x0E => Self::IllegalState,
+            0x15 => Self::Svc64,
+            0x16 => Self::Hvc64,
+            0x17 => Self::Smc64,
+            0x18 => Self::SystemRegister,
+            0x20 => Self::InstructionAbortLow,
+            0x24 => Self::DataAbortLow,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// Return the raw 6-bit EC value.
+    #[inline]
+    pub fn raw(self) -> u8 {
+        match self {
+            Self::WfxTrap             => 0x01,
+            Self::IllegalState        => 0x0E,
+            Self::Svc64               => 0x15,
+            Self::Hvc64               => 0x16,
+            Self::Smc64               => 0x17,
+            Self::SystemRegister      => 0x18,
+            Self::InstructionAbortLow => 0x20,
+            Self::DataAbortLow        => 0x24,
+            Self::Unknown(v)          => v,
+        }
+    }
+
+    /// Return true if this EC is a guest memory fault (Stage 2 violation).
+    #[inline]
+    pub fn is_memory_fault(self) -> bool {
+        matches!(self, Self::InstructionAbortLow | Self::DataAbortLow)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ISS field helpers for DataAbortLow (EC = 0x24)
+//
+// When a Data Abort is taken to EL2, bits [24:0] of ESR_EL2 are the
+// Instruction-Specific Syndrome (ISS). Key subfields:
+//
+//   ISS[5:0]  — DFSC: Data Fault Status Code
+//   ISS[6]    — WnR: 0=read fault, 1=write fault
+//   ISS[24]   — ISV: Instruction Syndrome Valid
+//
+// Source: ARM ARM DDI0487 Section D1.13.5 (Data Abort ISS encoding)
+// Verified: linux-ref/arch/arm64/include/asm/esr.h ESR_ELx_WNR, ESR_ELx_DFSC_*
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Extract the Data Fault Status Code from ESR_EL2 for a Data Abort.
+/// Bits [5:0] of ESR_EL2.
+#[inline]
+pub const fn dfsc(esr: u64) -> u8 {
+    (esr & 0x3F) as u8
+}
+
+/// Return true if the faulting access was a write (ESR_EL2 bit 6 = WnR).
+#[inline]
+pub const fn is_write_fault(esr: u64) -> bool {
+    (esr >> 6) & 1 == 1
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExitReason — what AETHER should do after classifying the exception
+//
+// The Rust exception handlers (called from the vector table) return an
+// ExitReason that tells the assembly epilogue how to return to the guest.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What AETHER should do after handling an EL2 exception.
+///
+/// `#[repr(u8)]` makes this FFI-safe so the enum can be returned from
+/// `extern "C"` handler functions called by the vector table assembly.
+/// The integer values are arbitrary; only `ReturnToGuest` / `Halt` matter
+/// to the current assembly epilogue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ExitReason {
+    /// Return to the same guest at the instruction after the trap.
+    /// The vector epilogue executes ERET with restored context.
+    ReturnToGuest,
+
+    /// Return to the same guest but at the *current* PC
+    /// (re-execute the faulting instruction after AETHER resolved the fault).
+    RetryInstruction,
+
+    /// A fatal condition was encountered. The hypervisor halts.
+    /// Used during bring-up when unhandled exceptions must not silently corrupt state.
+    Halt,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level synchronous exception dispatcher
+//
+// Called by the EL2 vector table after saving the GuestContext.
+// Reads ESR_EL2, decodes the EC, and calls the appropriate handler.
+// Returns an ExitReason that drives the assembly epilogue.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Dispatch a synchronous EL1→EL2 exception.
+///
+/// Called from assembly (vectors.rs) with a mutable pointer to the guest
+/// context on the EL2 stack. Reads ESR_EL2 directly from hardware since
+/// the exception just fired.
+///
+/// # Safety
+/// - Must be called from EL2 with interrupts masked.
+/// - `ctx` must point to a valid, fully-populated `GuestContext` on the stack.
+///   The pointer is valid for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_handle_sync(ctx: *mut GuestContext) -> ExitReason {
+    let esr: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, esr_el2", out(reg) esr,
+                         options(nomem, nostack, preserves_flags));
+    }
+
+    let ec = ExceptionClass::from_esr(esr);
+    let ctx = unsafe { &mut *ctx };
+
+    match ec {
+        ExceptionClass::Hvc64 => handle_hvc(ctx, esr),
+        ExceptionClass::Smc64 => handle_smc(ctx, esr),
+        ExceptionClass::WfxTrap => handle_wfx(ctx, esr),
+        ExceptionClass::DataAbortLow => handle_data_abort(ctx, esr),
+        ExceptionClass::InstructionAbortLow => handle_inst_abort(ctx, esr),
+        ExceptionClass::SystemRegister => handle_sysreg_trap(ctx, esr),
+        _ => ExitReason::Halt, // unhandled EC — halt during bring-up
+    }
+}
+
+/// Handle a synchronous IRQ or FIQ taken to EL2.
+///
+/// At this stage (Chapter 5) interrupt routing is a stub. Full GIC
+/// virtual interrupt injection is implemented in Chapter 10.
+///
+/// # Safety
+/// Must be called from EL2.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_handle_irq(_ctx: *mut GuestContext) -> ExitReason {
+    // Chapter 10: route interrupt to correct guest via GIC virtual interface.
+    ExitReason::ReturnToGuest
+}
+
+/// Handle a System Error (SError) taken to EL2.
+///
+/// # Safety
+/// Must be called from EL2.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aether_handle_serror(_ctx: *mut GuestContext) -> ExitReason {
+    // Unrecoverable at this stage.
+    ExitReason::Halt
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Individual exception handlers (stubs — fleshed out in later chapters)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// EC = 0x16: HVC — hypervisor call.
+///
+/// x0 in the guest context holds the hypercall number (SMC calling
+/// convention). Full hypercall table is Chapter 7.
+#[inline]
+fn handle_hvc(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
+    // Chapter 7: implement hypercall dispatch table.
+    // Advance PC past the HVC instruction (4 bytes) on return.
+    ExitReason::ReturnToGuest
+}
+
+/// EC = 0x17: SMC trapped from EL1.
+///
+/// Guests should not issue SMC directly. AETHER forwards known-safe SMC
+/// calls to EL3 firmware; all others are rejected.
+#[inline]
+fn handle_smc(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
+    // Chapter 7: forward safe SMC calls to EL3; reject others.
+    ExitReason::ReturnToGuest
+}
+
+/// EC = 0x01: WFI/WFE trapped from EL1.
+///
+/// Guest is idle. AETHER can park the CPU or schedule other work.
+/// Static partitioning (Chapter 9) means the CPU stays with this guest.
+#[inline]
+fn handle_wfx(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
+    // Chapter 9: CPU partitioning — for now just return to let guest re-execute.
+    ExitReason::ReturnToGuest
+}
+
+/// EC = 0x24: Stage 2 Data Abort.
+///
+/// Guest accessed an IPA that has no Stage 2 mapping or that is protected.
+/// The most common operation for AETHER to handle — paravirtualized device
+/// MMIO accesses land here. Full implementation in Chapter 8.
+#[inline]
+fn handle_data_abort(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
+    // Chapter 8: resolve Stage 2 page fault or dispatch MMIO emulation.
+    ExitReason::Halt
+}
+
+/// EC = 0x20: Stage 2 Instruction Abort.
+///
+/// Guest tried to fetch an instruction from an IPA with no Stage 2 mapping.
+/// This is almost always a bug — valid code should always be mapped.
+#[inline]
+fn handle_inst_abort(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
+    // Chapter 8: map the missing page if it belongs to the guest.
+    ExitReason::Halt
+}
+
+/// EC = 0x18: System register access trapped.
+///
+/// Guest tried to read/write a system register that AETHER intercepts.
+/// Chapter 6 configures which registers trap; Chapter 7 implements
+/// the emulation.
+#[inline]
+fn handle_sysreg_trap(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
+    // Chapter 6/7: emulate the trapped system register access.
+    ExitReason::Halt
+}

@@ -21,3 +21,8 @@
 pub mod barriers; // DSB, ISB, DMB — memory and instruction ordering
 pub mod paging;   // page granule constants and address-space sizing
 pub mod regs;     // system register read/write via MRS/MSR
+
+// ch05: Exception Levels — vector table, context save frame, ESR dispatch
+pub mod context;   // GuestContext: 272-byte CPU state save frame
+pub mod exception; // ExceptionClass / ExitReason; aether_handle_* C entry points
+pub mod vectors;   // EL2 vector table (global_asm!); install_vectors()
