@@ -11,3 +11,6 @@
 // Part I — The Vision (Chapters 1–3)
 pub mod fingerprint; // ch02: fingerprint sources and elimination strategies
 pub mod partition;   // ch03: non-negotiables encoded as types
+
+// Part II — The Silicon (Chapters 4–6)
+pub mod arm64; // ch04: ARM64 substrate — regs, barriers, paging constants
