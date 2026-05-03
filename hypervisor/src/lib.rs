@@ -14,3 +14,6 @@ pub mod partition;   // ch03: non-negotiables encoded as types
 
 // Part II — The Silicon (Chapters 4–6)
 pub mod arm64; // ch04: ARM64 substrate — regs, barriers, paging constants
+
+// Part III — The Hypervisor (Chapters 7–10)
+pub mod boot; // ch07: UEFI handoff, ExitBootServices, ACPI discovery, guest ERET
