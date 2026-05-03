@@ -16,4 +16,5 @@ pub mod partition;   // ch03: non-negotiables encoded as types
 pub mod arm64; // ch04: ARM64 substrate — regs, barriers, paging constants
 
 // Part III — The Hypervisor (Chapters 7–10)
-pub mod boot; // ch07: UEFI handoff, ExitBootServices, ACPI discovery, guest ERET
+pub mod boot;   // ch07: UEFI handoff, ExitBootServices, ACPI discovery, guest ERET
+pub mod memory; // ch08: Stage 2 page tables, bump allocator, SMMU v3 stream table
