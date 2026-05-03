@@ -26,3 +26,6 @@ pub mod regs;     // system register read/write via MRS/MSR
 pub mod context;   // GuestContext: 272-byte CPU state save frame
 pub mod exception; // ExceptionClass / ExitReason; aether_handle_* C entry points
 pub mod vectors;   // EL2 vector table (global_asm!); install_vectors()
+
+// ch06: The Virtualization Extensions — HCR_EL2, Stage 2, GIC virt
+pub mod virt;      // configure_el2_virt(); hcr_el2/vtcr_el2/vttbr_el2/stage2/cptr_el2/gic_virt
