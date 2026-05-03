@@ -1,18 +1,20 @@
 # Project AETHER
-## A Bare-Metal Android Environment Built On A Custom Type-1 Hypervisor
+## A Bare-Metal Android Hypervisor for ARM64 and x86
 
-**A complete, sovereign Android universe sharing nothing with Windows except the silicon beneath them both.**
+**A complete, sovereign Android universe — native on Snapdragon X, translated on Intel and AMD — sharing nothing with the host machine.**
 
 ---
 
 ## Overview
 
-**AETHER** is a Type-1 hypervisor written from scratch in Rust and assembly that boots directly on ARM64 hardware before any operating system. Once running, it partitions the machine's physical resources into two completely isolated domains:
+**AETHER** is a Type-1 hypervisor written from scratch in Rust and assembly that boots directly on hardware before any operating system. It delivers a complete, production Android environment with no host OS, no emulation overhead, and no fingerprints detectable by apps.
 
-1. **Windows-on-ARM partition** — runs Windows NT unaware of virtualization
-2. **Android partition** — runs complete AOSP stack unaware of anything else
+AETHER ships in two hardware tiers, auto-detected at install time:
 
-The two domains share only the physical processor's instruction set. They do not share memory, devices, kernels, drivers, file systems, or concepts of time beyond hardware timer pulses. They are two parallel computational universes on the same silicon.
+- **ARM Tier** — Snapdragon X Elite / X Plus. Rust hypervisor at EL2. Android runs natively — zero translation, full SR-IOV GPU passthrough, NVMe namespace isolation, GICv3 virtualization. Native hardware speed throughout.
+- **x86 Tier** — any Intel or AMD machine with VT-x or AMD-V. Rust hypervisor at VMX/SVM root. Android runs inside the hypervisor with an integrated DBT engine (FEX-Emu) that translates ARM64 to x86 below the Android kernel. No host OS. Full Android experience on any hardware.
+
+Both tiers support **Phone Bridge Mode**: connect any Android phone via USB, toggle on real sensor data — gyroscope, accelerometer, magnetometer, barometer, GPS, camera, IMEI, IMSI, and carrier identity stream directly from your phone's hardware. Toggle it off and AETHER's physics-accurate software sensor models take over.
 
 ---
 
@@ -20,16 +22,25 @@ The two domains share only the physical processor's instruction set. They do not
 
 ### Chapter 1: What AETHER Is
 
-AETHER is a Type-1 hypervisor that boots directly on ARM64 hardware at Exception Level 2 (EL2), before any operating system loads. It partitions physical resources between two guest operating systems — Windows-on-ARM and a complete Android stack — such that each guest believes it owns the entire machine.
+AETHER is a Type-1 hypervisor that boots directly on hardware before any operating system, delivering a complete, production Android environment that behaves identically to a real Android phone at every layer of software inspection.
 
-**Key characteristics:**
-- Runs at EL2, above both guests at EL1
-- Guests execute at full native hardware speed
-- No host OS; hypervisor is the bare-metal referee
-- Both Windows and Android are equal guests with no privilege over each other
-- Invisible to guests except through deliberate ARM64 virtualization instructions
+**ARM Tier** (Snapdragon X Elite / X Plus):
+- Boots at Exception Level 2 (EL2), directly on ARM64 silicon
+- Android guest executes native ARM64 instructions at full hardware speed
+- Zero translation layers between Android and processor
+- SR-IOV GPU partitioning, NVMe namespace isolation, GICv3 virtual interrupts
+- Invisible to Android at every inspection point
 
-**User experience:** A single laptop that runs native Windows applications and native Android applications simultaneously, switches between them instantly, uses peripherals seamlessly with both — while the two operating systems have no relationship to each other.
+**x86 Tier** (Intel / AMD with VT-x or AMD-V):
+- Boots in VMX/SVM root mode directly on x86 silicon — no host OS
+- Integrated DBT engine (FEX-Emu) translates ARM64 guest code to x86 inside the hypervisor
+- Android kernel and userspace run unmodified as ARM64 — DBT is invisible to Android
+- EPT/NPT enforces memory isolation; hardware-accelerated x86 virtualization underneath
+- Full Android experience on any Intel or AMD machine
+
+**Hardware auto-detection:** AETHER installer detects CPU family at install time and deploys the correct tier automatically.
+
+**User experience:** Any laptop running the full Android experience — native apps, games, banking, anything — with behavior indistinguishable from a real Android phone, on ARM or x86 hardware.
 
 ### Chapter 2: Why AETHER Exists
 
@@ -43,29 +54,29 @@ Every existing Android-on-PC product (BlueStacks, LDPlayer, NoxPlayer, MEmu, Way
 
 Each compromise saves engineering time but introduces places where Android behaves differently than real hardware. Anti-cheat systems, banking apps, and DRM systems detect these differences.
 
-**AETHER's reason for existing:** Take none of these compromises. By driving the boundary between Windows and Android down to the silicon itself, every layer above the silicon is genuinely Android, talking to genuinely simulated Android hardware with genuine physical fidelity. There is no place for a fingerprint to form because there is no place where Windows leaks through.
+**AETHER's reason for existing:** Take none of these compromises. By driving the boundary between the host machine and Android down to the silicon itself, every layer above the silicon is genuinely Android, talking to genuinely simulated Android hardware with genuine physical fidelity. There is no place for a fingerprint to form because there is no place where the host leaks through.
 
-**Commercial outcome:** An Android environment in which apps cannot tell they are not running on real devices, because at every level of inspection they are running on real devices — real ARM64 processor, real GPU partition, real memory, real storage, real network — just one whose top-level identity has been defined by the hypervisor rather than a phone manufacturer.
+**Commercial outcome:** An Android environment in which apps cannot tell they are not running on real devices — because at every level of inspection they are running on real devices: real ARM64 processor (or ARMv8 instruction set via DBT), real GPU partition (ARM tier), real memory, real storage, real network, real sensor physics. Two hardware tiers, one consistent experience.
 
 ### Chapter 3: The Non-Negotiables
 
 The following design constraints are inviolable. Every engineering decision must satisfy all simultaneously. If a proposed feature violates any, it is rejected.
 
 #### Non-Negotiable 1: Resource Isolation
-The Android partition must never make a system call into Windows or the hypervisor for the purpose of accessing host resources. Every resource Android uses must be either:
+The Android partition must never depend on any host OS or external system for the purpose of accessing resources. Every resource Android uses must be either:
 - **Dedicated via hardware passthrough**, or
 - **Simulated by hypervisor's internal virtual device subsystem**
 
 No shortcuts. No shared drivers. No proxying through Windows.
 
-#### Non-Negotiable 2: Windows Opaqueness
-The Windows partition must never have visibility into the Android partition's memory, devices, or execution state. Windows must believe it is the only operating system on the machine.
+#### Non-Negotiable 2: Host Opaqueness
+No software running outside AETHER's Android partition — including any OS sharing the physical machine — must ever have visibility into the Android partition's memory, devices, or execution state. From the Android partition's perspective, it owns the entire machine.
 
 #### Non-Negotiable 3: Hypervisor Invisibility
 The hypervisor itself must be invisible to both guests at the level of normal operation. Guests can detect virtualization only through deliberate ARM64 instructions that the architecture exposes for that purpose, and even those signals must be configured to match what real ARM64 hardware would report.
 
 #### Non-Negotiable 4: No Host
-There is no "host" in AETHER. The hypervisor is not a host. The hypervisor is a referee that allocates resources at boot and then steps out of the way. Both Windows and Android are equal guests with no privilege over each other.
+There is no "host" in AETHER. The hypervisor is not a host. The hypervisor is a referee that allocates resources at boot and then steps out of the way. Android is the sole guest with full access to assigned resources.
 
 ---
 
@@ -132,6 +143,13 @@ These extensions are present and enabled on:
 - Most modern ARM64 systems-on-chip
 
 AETHER will not run on processors lacking these extensions. The build system explicitly checks and refuses to produce hypervisor binaries for unsupported processors.
+
+**x86 Tier virtualization hardware:**
+
+Intel VT-x and AMD-V provide equivalent capabilities on x86:
+- **VMCS / VMCB** — VM Control Structure (Intel) / VM Control Block (AMD): per-vCPU structure controlling which guest operations cause VM exits and what host state is restored on exit. Equivalent to ARM64's exception-level hardware context.
+- **EPT / NPT** — Extended Page Tables (Intel) / Nested Page Tables (AMD): x86 equivalent of Stage 2 translation. AETHER programs EPT/NPT to restrict Android's physical memory view to its assigned region.
+- **DBT Integration** — FEX-Emu translates ARM64 instruction blocks to x86 inside the hypervisor. Translated blocks are JIT-cached; after warmup, overhead targets less than 20% versus native ARM64 execution. The translation is invisible to the Android kernel and userspace — they execute as ARM64 software throughout.
 
 **How it works:** When a guest at EL1 attempts a sensitive operation (e.g., modifying page tables conflicting with Stage 2 translation), the processor automatically traps to EL2, transferring control to AETHER. AETHER inspects the operation, decides whether to allow it, modifies its parameters if necessary, and either performs it on the guest's behalf or returns control with the operation completed. The guest never knows this happened — time simply passed slightly slower for that one instruction.
 
@@ -210,8 +228,10 @@ AETHER allocates CPU cores to guests at boot. After that point, each core belong
 - **Fingerprint purity** — predictability closer to native hardware
 
 **Typical configuration** (Snapdragon X Elite with 12 cores):
-- 6 cores to Windows
-- 6 cores to Android
+- All 12 cores assigned to Android partition
+- Hypervisor reserves no dedicated cores; it runs transiently during VM exits only
+
+**x86 Tier:** Same model — all physical cores assigned to Android. Hypervisor runs only during VM exits and DBT compilation events.
 
 Each core runs its assigned guest's code at native speed. Within each guest, normal scheduling happens entirely inside that guest's kernel. Windows schedules Windows threads across its assigned cores. Android kernel schedules Android processes across its assigned cores. Neither kernel is aware that other cores exist because AETHER reports to each guest only the cores assigned to that guest.
 
@@ -282,21 +302,45 @@ AETHER's virtual sensor subsystem generates synthetic sensor data using physical
 #### Category 3: Phone-Specific Peripherals
 Fingerprint sensor, front-facing camera, etc. Simulated as virtual devices that report not-currently-available status when queried. Apps that depend on these features see them as present but inactive — a normal state on real devices when user has disabled them or they are obscured.
 
-#### Phone Hardware Bridge Mode (Optional)
-For users who possess physical Android device and wish to achieve maximum hardware fidelity beyond software simulation:
+#### Phone Bridge Mode
 
-**When user connects real Android phone to laptop via USB and installs AETHER companion app:**
-- Virtual Android partition can replace simulated hardware responses with live data from physical phone
-- Gyroscope, accelerometer, magnetometer data come in real time from phone's actual MEMS sensors
-- Data carries exact thermal noise, drift patterns, calibration signatures of that specific sensor
-- IMEI, device serial number, hardware identifiers queried live from phone (real, registered, verifiable)
-- Cellular connectivity routed through phone's actual modem via USB tethering
-- Camera input optionally sourced from phone's camera hardware, frames streamed over USB
-- Phone's application processor bears negligible load (identity queries, lightweight USB data transfer)
-- Phone remains fully usable for simultaneous tasks
-- All computation happens entirely on laptop's hardware; phone is hardware witness, not computational participant
+Phone Bridge Mode is a first-class feature on both ARM and x86 tiers. Connect any Android phone via USB and toggle it on or off at any time.
 
-**Bridge Mode is entirely optional.** AETHER's simulation designed to be sufficient without it. Bridge Mode exists for users wanting highest possible fidelity with compatible Android device available.
+**Toggle ON — real hardware data:**
+- Gyroscope, accelerometer, magnetometer, barometer: live MEMS sensor data from the phone's hardware, carrying exact thermal noise, drift patterns, and calibration signatures of that specific sensor
+- GPS: real position from phone's GPS chip
+- Camera: frames streamed from phone camera hardware over USB
+- IMEI: real, registered, verifiable IMEI from phone's baseband
+- IMSI: real SIM card identity
+- Carrier name and network registration: real data from phone's modem
+- All data streams at the polling rates Android requests, timestamped with CLOCK_BOOTTIME nanoseconds
+
+**Toggle OFF — physics-accurate software models:**
+- Accelerometer: Gaussian noise, σ≈150µg/√Hz (matches Bosch BMI160 specification)
+- Gyroscope: random walk bias drift with correct integration characteristics
+- Magnetometer: local magnetic declination plus calibrated sensor noise
+- Barometer: altitude-appropriate pressure plus thermal drift
+- IMEI: Luhn-valid configured identifier
+- Carrier: configured network identity matching IMEI TAC range
+- GPS: static user-configured location
+
+Phone Bridge Mode is entirely optional. The software models are designed to be sufficient without it. Bridge Mode exists for users wanting maximum hardware fidelity.
+
+**Implementation:** AETHER companion app on the phone sends sensor data over USB; AETHER's virtual HAL layer presents it to Android through the standard Android sensor HAL interface. Phone runs its normal workload simultaneously — the data stream imposes negligible load.
+
+#### Hardware Authenticity Requirements
+
+AETHER builds production Android. Every detail must match what real hardware reports:
+
+**Build identity:** `ro.build.type = user`, `ro.debuggable = 0`, `ro.secure = 1`, `ro.build.tags = release-keys`. Developer builds are not shipped — they are structurally different from production devices.
+
+**Sensor physics:** All software sensor models use Gaussian noise distributions, not uniform random. Uniform noise is not physically correct for MEMS sensors and fails statistical tests that anti-cheat systems run. Timestamps use CLOCK_BOOTTIME nanoseconds. Polling rate within ±5% of requested.
+
+**Connectivity identity:** IMEI passes Luhn checksum validation. MAC address OUI from Qualcomm registered vendor range. Android ID persistent across reboots, generated on first boot.
+
+**Production hardening:** ADB disabled (`ro.adb.secure=1`), root not present, SELinux enforcing. These are properties of a complete production Android device, not optional.
+
+**CPU identity:** MIDR_EL1 reports the real ARM64 CPU. AETHER never traps or modifies CPU identity registers. The Android kernel reads what the silicon actually is.
 
 ### Chapter 13: GPU Partitioning Through SR-IOV
 
@@ -326,23 +370,20 @@ Selected at AOSP build time to match virtual function's reported identity. If AE
 - Future AETHER revisions may need to fall back to software-based GPU sharing (Intel GVT-g or NVIDIA vGPU techniques)
 - Architectural target is full SR-IOV passthrough
 
+**x86 Tier GPU:** SR-IOV passthrough is not available on x86 tier in Phase One. Android's graphics stack runs through the DBT engine with software-emulated Adreno GPU registers. GPU passthrough for x86 is a Phase Four target, dependent on hardware SR-IOV support in Intel Arc or AMD consumer GPUs.
+
 ### Chapter 14: Storage Partitioning
 
-Storage partitioned at NVMe namespace level. Modern NVMe SSD supports multiple namespaces, each appearing as separate block device. AETHER assigns:
-- One namespace to Windows
-- Another to Android
+Storage partitioned at NVMe namespace level. Modern NVMe SSD supports multiple namespaces, each appearing as separate block device. AETHER assigns the Android namespace exclusively, with the remainder available to other system software outside the hypervisor.
 
-NVMe controller's SR-IOV implementation (where supported) or built-in namespace isolation ensures each guest's NVMe driver can only see and access its assigned namespace.
+NVMe controller's SR-IOV implementation (where supported) or built-in namespace isolation ensures Android's NVMe driver can only see and access its assigned namespace.
 
 **Android namespace:**
 - Formatted with Android-standard partition layout
 - Boot partition, system partition, vendor partition, userdata partition, etc.
 - Contains complete Android filesystem
 
-**Windows namespace:**
-- Contains complete Windows installation
-
-**Neither namespace visible to other guest.** No shared partition, no shared folder, no clipboard sync at storage level.
+The Android namespace is inaccessible to any software outside AETHER's partition. No shared partition, no shared folder, no clipboard sync at storage level.
 
 **Performance:** Storage I/O happens at native NVMe speed in both guests with no hypervisor mediation in data path. Read or write issued by either guest is dispatched directly to NVMe controller through guest's own NVMe driver, executes against guest's assigned namespace, and returns directly to guest. AETHER not involved.
 
@@ -373,39 +414,52 @@ AETHER assigns each controller to specific guest at boot. Keyboard plugged into 
 
 ---
 
-## Part V — The Windows Partition
+## Part V — Platform Tier Configuration
 
-### Chapter 17: Windows As A Guest
+### Chapter 17: ARM Tier — Hardware And Partition Configuration
 
-Windows-on-ARM is, from AETHER's perspective, simply an ARM64 operating system that boots from UEFI environment and runs at EL1. AETHER provides Windows with what looks like normal UEFI boot environment, including ACPI tables describing Windows-assigned hardware and firmware services Windows expects to call.
+On ARM Tier hardware (Snapdragon X Elite / X Plus), AETHER configures the following at boot:
 
-**How Windows boots:**
-- From assigned NVMe namespace using own boot manager
-- Loads own drivers for hardware given to it
-- Runs as it would on non-virtualized machine with only resources AETHER assigned
-- From Windows's point of view: running on laptop with specific CPU cores, RAM amount, one GPU virtual function, one NVMe namespace, one WiFi adapter, few USB controllers
+**Resource assignment:**
+- CPU cores assigned to Android partition (all physical cores; no second guest)
+- Memory partitioned: hypervisor reservation + Android working set
+- GPU SR-IOV virtual function configured for Android's Adreno driver
+- NVMe namespace assigned exclusively to Android filesystem
+- USB controllers assigned per-device to Android
 
-That Windows is wrong about machine's full hardware inventory is the entire point — Windows is intentionally confined to own slice.
+**ACPI and device tree:**
+AETHER constructs device tree blobs describing Android's assigned hardware exactly. The Android bootloader and kernel read these descriptions and load drivers for what they believe is real hardware — because it is real hardware, passed through directly.
 
-**AETHER does not modify Windows:**
-- No AETHER agent or driver inside Windows
-- Windows is unaltered, unmodified, unaware
-- Critical because Windows updates can be applied normally without breaking AETHER
-- Windows licensing works normally because Windows sees what looks like normal certified machine
-- Microsoft's own diagnostics and security tools work normally because Windows is genuinely Windows
+**Stage 2 page tables:**
+Programmed at boot to map Android's IPA space to its assigned PA regions. Any out-of-bounds access traps to EL2, where AETHER terminates it.
 
-### Chapter 18: The Windows ACPI Description
+**GIC configuration:**
+Each device's interrupt lines configured to route only to Android's assigned cores via GICv3 virtualization extension. AETHER configures this once at boot; hardware enforces it thereafter.
 
-Windows discovers what hardware it has through ACPI tables provided by firmware. AETHER constructs custom set of ACPI tables for Windows partition that describes only hardware Windows has been assigned:
-- Windows CPU cores
-- Windows memory map
-- Windows GPU virtual function
-- Windows NVMe namespace
-- And so on
+### Chapter 18: x86 Tier — DBT And VMCS Configuration
 
-Tables do not list any Android-assigned hardware.
+On x86 Tier hardware (Intel / AMD), AETHER configures:
 
-**Implementation:** ACPI tables presented to Windows as if they came from real platform firmware. Windows reads them during boot, builds internal device tree from them, and proceeds to load drivers for listed hardware. Fact that AETHER fabricated these tables is invisible to Windows because tables are formally compliant with ACPI specification and describe coherent, plausible machine.
+**VMCS / VMCB initialization:**
+- Host state fields: AETHER's register state restored on every VM exit
+- Guest state fields: Android's initial register state, GDT, IDT, page table roots
+- VM-execution controls: which MSR accesses and memory accesses cause exits
+- EPT / NPT root: AETHER programs nested page table root pointing to Android's physical memory region
+
+**DBT engine (FEX-Emu) initialization:**
+- ARM64 instruction decoder and x86 code emitter initialized at hypervisor startup
+- JIT translation cache allocated in hypervisor memory (inaccessible to Android)
+- First execution of each ARM64 basic block: DBT translates → caches → jumps to translated block
+- Subsequent executions: JIT cache hit, translated x86 runs directly with no re-translation
+- ARM64 system register accesses emulated by DBT engine to return correct values for the emulated CPU model (Cortex-X4)
+
+**Memory model:**
+- EPT maps Android's IPA → PA for its assigned physical memory
+- DBT translated code pages execute in x86 VMX non-root mode under EPT enforcement
+- Android kernel's own page tables are respected; DBT operates below the kernel's view
+
+**Android's perspective:**
+The Android kernel and all userspace code run as ARM64 software. They read ARM64 system registers, execute ARM64 instructions, and receive ARM64 exception semantics. The x86 hardware underneath is completely invisible.
 
 ---
 
@@ -610,36 +664,38 @@ Development happens primarily on x86-64 Linux workstations using cross-compilati
 
 ## Part IX — Roadmap
 
-### Chapter 29: Phase One — Foundation
+### Chapter 29: Phase One — Foundation (ARM Tier)
 **Timeline:** 12–18 months for small team
 
 Produces hypervisor that:
-- Boots on real ARM64 hardware
-- Partitions resources between two guests
-- Runs minimal Linux guest in each partition
-- Both guests can execute code, allocate memory, handle interrupts from assigned devices, communicate with simple peripherals through passthrough
-- No Android, no Windows, no graphics
-- Two isolated Linux instances proving hypervisor architecture works end to end
+- Boots on real Snapdragon X Elite hardware at EL2
+- Runs minimal Linux guest in Android partition
+- Guest executes code, allocates memory, handles interrupts from assigned devices
+- NVMe namespace passthrough working, GIC routing working
+- No Android userspace, no graphics yet
+- ARM Tier architecture validated end to end on real hardware
 
-### Chapter 30: Phase Two — Windows
+### Chapter 30: Phase Two — Android Bring-Up (ARM Tier)
 **Timeline:** 6–9 months
 
-Gets Windows-on-ARM booting and running in one partition:
-- Constructing valid ACPI tables for Windows partition
-- Ensuring all Windows-required platform services are exposed correctly
-- Validating Windows runs stably with full performance
-- System becomes functional Windows-on-ARM laptop with sleeping second partition
+Brings full Android stack into the ARM Tier partition:
+- Building AOSP for AETHER's ARM Tier device target
+- Integrating microG and Phone Bridge Mode
+- Configuring physics-accurate virtual sensors and virtual modem
+- SR-IOV GPU passthrough working with Adreno driver
+- Validating full Android application compatibility
+- System is a functional, app-store-compatible Android device on Snapdragon X hardware
 
-### Chapter 31: Phase Three — Android Bring-Up
+### Chapter 31: Phase Three — x86 Tier Foundation
 **Timeline:** 12 months
 
-Brings up Android in second partition:
-- Building AOSP for AETHER's device target
-- Integrating microG
-- Configuring paravirtualized sensors and modem
-- Setting up GPU passthrough through SR-IOV
-- Validating standard Android applications run correctly
-- System runs both Windows and Android side by side with isolated execution
+Ports AETHER to Intel / AMD hardware:
+- VMX/SVM root mode boot, VMCS/VMCB initialization
+- FEX-Emu DBT engine integration inside hypervisor
+- EPT/NPT memory isolation
+- Android boots inside DBT layer on x86 hardware
+- Core applications validated through translation layer
+- x86 Tier architecture validated end to end
 
 ### Chapter 32: Phase Four — Performance And Compatibility
 **Timeline:** 12 months
@@ -699,7 +755,21 @@ Product polish:
 
 **Type-1 Hypervisor** — Hypervisor running directly on hardware with no underlying operating system
 
+**DBT** — Dynamic Binary Translation, JIT compilation of guest instruction set (ARM64) to host instruction set (x86) at runtime
+
+**EPT** — Extended Page Tables (Intel), x86 equivalent of Stage 2 translation; controls guest physical memory access
+
+**FEX-Emu** — Open-source ARM64-to-x86 dynamic binary translator; integrated inside AETHER's x86 Tier hypervisor
+
+**NPT** — Nested Page Tables (AMD), AMD equivalent of Intel EPT
+
+**SVM** — Secure Virtual Machine (AMD), AMD's hardware virtualization feature set equivalent to Intel VMX
+
 **VHE** — Virtualization Host Extensions, modern ARM64 virtualization feature set
+
+**VMX** — Virtual Machine Extensions (Intel), the x86 hardware virtualization feature set; AETHER x86 Tier runs in VMX root mode
+
+**VMCS** — VM Control Structure, Intel per-vCPU structure controlling VM entry, VM exit, and execution behavior of a guest
 
 ---
 
@@ -744,9 +814,9 @@ The project is not friendly to learners in way some open-source projects are. It
 
 AETHER is, by design, an extreme project. It rejects every shortcut that other Android-on-PC products have taken. It demands hardware features that not all laptops have. It requires expertise that few engineers possess. It will take years to build and more years to perfect.
 
-But the result, if executed correctly, is something that does not currently exist anywhere — an Android environment so faithful to real hardware that no software can tell the difference, running alongside fully functional Windows installation on single laptop, with absolute isolation between the two.
+But the result, if executed correctly, is something that does not currently exist anywhere — an Android environment so faithful to real hardware that no software can tell the difference, running on any PC laptop whether ARM64 or x86, with absolute isolation from everything else on the machine.
 
-That has value far beyond original use case that motivated this project. It is a foundation for any future work requiring sovereign, untraceable, fully-faithful Android execution environment, and there will be many such future works.
+That has value far beyond the original use case that motivated this project. It is a foundation for any future work requiring a sovereign, untraceable, fully-faithful Android execution environment — on any hardware, for any user.
 
 **The journey is long. The destination is clear. The work begins at the silicon and proceeds upward, layer by layer, exactly as this document describes.**
 
