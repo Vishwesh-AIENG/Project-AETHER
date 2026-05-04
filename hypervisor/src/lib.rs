@@ -24,3 +24,6 @@ pub mod gic;         // ch10: GICv3 init, virtual interrupt injection, maintenan
 
 // Part IV — Devices (Chapters 11–16)
 pub mod passthrough; // ch11: PCIe device assignment — IOMMU groups, FLR, BAR mapping, SMMU STE
+
+// Support
+pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
