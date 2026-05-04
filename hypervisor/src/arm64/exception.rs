@@ -273,22 +273,51 @@ pub unsafe extern "C" fn aether_handle_serror(_ctx: *mut GuestContext) -> ExitRe
 
 /// EC = 0x16: HVC — hypervisor call.
 ///
-/// x0 in the guest context holds the hypercall number (SMC calling
-/// convention). Full hypercall table is Chapter 7.
+/// Dispatches PSCI calls (CPU_ON / CPU_OFF / AFFINITY_INFO etc.) to
+/// `cpu::handle_psci_call`.  The SMCCC convention places the function
+/// identifier in x0 and arguments in x1–x3; the return value goes back
+/// into x0.  ELR_EL2 already points past the HVC instruction so no PC
+/// adjustment is needed here.
 #[inline]
-fn handle_hvc(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
-    // Chapter 7: implement hypercall dispatch table.
-    // Advance PC past the HVC instruction (4 bytes) on return.
+fn handle_hvc(ctx: &mut GuestContext, _esr: u64) -> ExitReason {
+    let func_id = ctx.regs[0];
+    let arg1    = ctx.regs[1];
+    let arg2    = ctx.regs[2];
+    let arg3    = ctx.regs[3];
+
+    // SAFETY: mrs mpidr_el1 is always valid at EL2; aether_partition_mut
+    // returns the single mutable reference to the static partition table,
+    // which is only accessed from exception context (single-threaded per
+    // core, serialised by EL2 entry).
+    let caller_mpidr = unsafe { crate::cpu::Mpidr::read_current() };
+    let partition    = unsafe { crate::cpu::aether_partition_mut() };
+    let result = crate::cpu::handle_psci_call(
+        func_id, arg1, arg2, arg3, caller_mpidr, partition,
+    );
+    ctx.regs[0] = result as u64;
     ExitReason::ReturnToGuest
 }
 
 /// EC = 0x17: SMC trapped from EL1.
 ///
-/// Guests should not issue SMC directly. AETHER forwards known-safe SMC
-/// calls to EL3 firmware; all others are rejected.
+/// Guests running at EL1 must not issue SMC directly (that would bypass
+/// AETHER).  We forward PSCI-shaped SMC calls through the same dispatch
+/// path as HVC so that guests compiled with either convention work
+/// transparently.  Non-PSCI SMC calls return NOT_SUPPORTED.
 #[inline]
-fn handle_smc(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
-    // Chapter 7: forward safe SMC calls to EL3; reject others.
+fn handle_smc(ctx: &mut GuestContext, _esr: u64) -> ExitReason {
+    let func_id = ctx.regs[0];
+    let arg1    = ctx.regs[1];
+    let arg2    = ctx.regs[2];
+    let arg3    = ctx.regs[3];
+
+    // SAFETY: same as handle_hvc above.
+    let caller_mpidr = unsafe { crate::cpu::Mpidr::read_current() };
+    let partition    = unsafe { crate::cpu::aether_partition_mut() };
+    let result = crate::cpu::handle_psci_call(
+        func_id, arg1, arg2, arg3, caller_mpidr, partition,
+    );
+    ctx.regs[0] = result as u64;
     ExitReason::ReturnToGuest
 }
 
