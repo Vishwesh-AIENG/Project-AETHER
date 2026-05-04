@@ -1,4 +1,5 @@
-#![no_std]
+// Production: no_std (bare-metal EL2). Tests: std available (native host).
+#![cfg_attr(not(test), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 // AETHER hypervisor — core library
@@ -15,8 +16,11 @@ pub mod partition;   // ch03: non-negotiables encoded as types
 // Part II — The Silicon (Chapters 4–6)
 pub mod arm64; // ch04: ARM64 substrate — regs, barriers, paging constants
 
-// Part III — The Hypervisor (Chapters 7–10)
-pub mod boot;   // ch07: UEFI handoff, ExitBootServices, ACPI discovery, guest ERET
-pub mod memory; // ch08: Stage 2 page tables, bump allocator, SMMU v3 stream table
-pub mod cpu;    // ch09: static CPU partitioning, PSCI dispatch, GIC SPI routing
-pub mod gic;    // ch10: GICv3 init, virtual interrupt injection, maintenance IRQ
+// Part III — The Hypervisor (Chapters 7–11)
+pub mod boot;        // ch07: UEFI handoff, ExitBootServices, ACPI discovery, guest ERET
+pub mod memory;      // ch08: Stage 2 page tables, bump allocator, SMMU v3 stream table
+pub mod cpu;         // ch09: static CPU partitioning, PSCI dispatch, GIC SPI routing
+pub mod gic;         // ch10: GICv3 init, virtual interrupt injection, maintenance IRQ
+
+// Part IV — Devices (Chapters 11–16)
+pub mod passthrough; // ch11: PCIe device assignment — IOMMU groups, FLR, BAR mapping, SMMU STE

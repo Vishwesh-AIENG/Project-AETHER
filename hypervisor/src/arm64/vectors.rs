@@ -1,3 +1,8 @@
+// This file is only valid on aarch64-unknown-uefi. The global_asm! uses .org
+// alignment checks (≤ 128 bytes per vector entry) that are met only in the
+// optimised UEFI release build; they fail on the native macOS host in debug mode.
+#![cfg(target_os = "uefi")]
+
 // ch05: EL2 exception vector table
 //
 // ARM64 exception handling requires a vector table stored at a 2KiB-aligned

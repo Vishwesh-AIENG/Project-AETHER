@@ -25,6 +25,11 @@ pub mod regs;     // system register read/write via MRS/MSR
 // ch05: Exception Levels — vector table, context save frame, ESR dispatch
 pub mod context;   // GuestContext: 272-byte CPU state save frame
 pub mod exception; // ExceptionClass / ExitReason; aether_handle_* C entry points
+// vectors.rs uses global_asm! with .org alignment checks that enforce
+// ≤ 128 bytes per entry. On the native macOS host (aarch64-apple-darwin)
+// in debug mode the ABI generates larger frames and the checks fail.
+// Gate to the UEFI bare-metal target where the code paths are actually valid.
+#[cfg(target_os = "uefi")]
 pub mod vectors;   // EL2 vector table (global_asm!); install_vectors()
 
 // ch06: The Virtualization Extensions — HCR_EL2, Stage 2, GIC virt
