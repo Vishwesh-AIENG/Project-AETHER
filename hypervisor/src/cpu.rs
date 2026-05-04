@@ -579,12 +579,16 @@ pub fn build_irouter_specific(mpidr: Mpidr) -> u64 {
 /// Only valid for SPIs (intid ≥ 32). SGIs and PPIs are per-CPU and use a
 /// different routing mechanism (GICR_* registers).
 ///
-/// Layout: GICD_BASE + 0x6000 + (intid − 32) × 8
-/// Source: GIC Architecture Specification IHI0069 Section 4.8
+/// Layout: GICD_BASE + 0x6000 + intid × 8
+/// Source: GIC Architecture Specification IHI0069 Section 12.2.18;
+///         linux-ref/drivers/irqchip/irq-gic-v3.c line 978:
+///         `base + GICD_IROUTER + i * 8` where i starts at 32.
+/// Note: the base offset 0x6000 applies to the INTID directly, not to a
+///       zero-based SPI index. GICD_IROUTER32 is at 0x6000 + 32×8 = 0x6100.
 #[inline]
 pub fn gicd_irouter_offset(intid: u32) -> u64 {
     debug_assert!(intid >= 32, "GICD_IROUTER only applies to SPIs (intid >= 32)");
-    0x6000 + ((intid - 32) as u64) * 8
+    0x6000 + (intid as u64) * 8
 }
 
 /// Configure GICD_IROUTER for all SPIs in `spi_intids` to route to

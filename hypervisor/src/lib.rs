@@ -19,3 +19,4 @@ pub mod arm64; // ch04: ARM64 substrate — regs, barriers, paging constants
 pub mod boot;   // ch07: UEFI handoff, ExitBootServices, ACPI discovery, guest ERET
 pub mod memory; // ch08: Stage 2 page tables, bump allocator, SMMU v3 stream table
 pub mod cpu;    // ch09: static CPU partitioning, PSCI dispatch, GIC SPI routing
+pub mod gic;    // ch10: GICv3 init, virtual interrupt injection, maintenance IRQ

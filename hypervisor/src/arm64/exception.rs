@@ -244,16 +244,26 @@ pub unsafe extern "C" fn aether_handle_sync(ctx: *mut GuestContext) -> ExitReaso
     }
 }
 
-/// Handle a synchronous IRQ or FIQ taken to EL2.
+/// Handle a physical IRQ taken to EL2.
 ///
-/// At this stage (Chapter 5) interrupt routing is a stub. Full GIC
-/// virtual interrupt injection is implemented in Chapter 10.
+/// HCR_EL2.IMO=1 routes all Group 1 NS physical IRQs to EL2. This handler
+/// acknowledges the physical interrupt and forwards it to the Android guest
+/// via a hardware-backed List Register (ICH_LRn_EL2.HW=1). The GIC then
+/// delivers it to the virtual CPU Interface automatically.
+///
+/// Maintenance interrupts (ICH_MISR_EL2) arrive on the same path and are
+/// distinguished by their INTID matching `VGicState::maint_intid()`.
 ///
 /// # Safety
-/// Must be called from EL2.
+/// Must be called from EL2 with interrupts masked (guaranteed by exception
+/// entry). The global VGIC state must have been initialized via
+/// `gic::aether_vgic_init()` before this is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn aether_handle_irq(_ctx: *mut GuestContext) -> ExitReason {
-    // Chapter 10: route interrupt to correct guest via GIC virtual interface.
+    // SAFETY: called from EL2 exception handler (non-reentrant — PSTATE.I
+    // is set on EL2 exception entry, preventing nested IRQ exceptions).
+    let vgic = unsafe { crate::gic::aether_vgic_mut() };
+    unsafe { crate::gic::handle_physical_irq(vgic) };
     ExitReason::ReturnToGuest
 }
 
