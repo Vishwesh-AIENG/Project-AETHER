@@ -34,6 +34,8 @@ pub mod usb;         // ch16: USB controller partitioning, xHCI passthrough, cro
 // Part V — The Windows Partition (Chapters 17–18)
 pub mod windows;     // ch17: ARM Tier Windows partition config — CPUID hypervisor leaves, Hyper-V
                      //       enlightenments, Secure Boot chain, crash dump sizing, inbox-driver policy
+pub mod acpi;        // ch18: Windows ACPI tables — RSDP, XSDT, MADT (ARM GIC entries), GTDT, IORT,
+                     //       FADT (hardware-reduced); checksums, byte-precise table builders
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
