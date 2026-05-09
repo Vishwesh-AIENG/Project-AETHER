@@ -26,6 +26,7 @@ pub mod gic;         // ch10: GICv3 init, virtual interrupt injection, maintenan
 pub mod passthrough; // ch11: PCIe device assignment — IOMMU groups, FLR, BAR mapping, SMMU STE
 pub mod paravirt;    // ch12: paravirtualization — virtual modem (AT/3GPP), MEMS sensor suite (BMI160
                      //       Gaussian noise models), Phone Bridge Mode toggle
+pub mod gpu;         // ch13: GPU partitioning via SR-IOV — VF enumeration, assignment, isolation
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
