@@ -31,5 +31,9 @@ pub mod storage;     // ch14: storage partitioning — NVMe namespace isolation,
 pub mod network;     // ch15: network partitioning — SR-IOV VFs, dedicated adapters, paravirt bridge fallback
 pub mod usb;         // ch16: USB controller partitioning, xHCI passthrough, cross-partition input switching
 
+// Part V — The Windows Partition (Chapters 17–18)
+pub mod windows;     // ch17: ARM Tier Windows partition config — CPUID hypervisor leaves, Hyper-V
+                     //       enlightenments, Secure Boot chain, crash dump sizing, inbox-driver policy
+
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
