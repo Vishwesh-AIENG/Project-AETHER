@@ -27,6 +27,7 @@ pub mod passthrough; // ch11: PCIe device assignment — IOMMU groups, FLR, BAR 
 pub mod paravirt;    // ch12: paravirtualization — virtual modem (AT/3GPP), MEMS sensor suite (BMI160
                      //       Gaussian noise models), Phone Bridge Mode toggle
 pub mod gpu;         // ch13: GPU partitioning via SR-IOV — VF enumeration, assignment, isolation
+pub mod storage;     // ch14: storage partitioning — NVMe namespace isolation, SR-IOV, exclusive attachment
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
