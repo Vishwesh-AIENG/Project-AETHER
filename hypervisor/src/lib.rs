@@ -29,6 +29,7 @@ pub mod paravirt;    // ch12: paravirtualization — virtual modem (AT/3GPP), ME
 pub mod gpu;         // ch13: GPU partitioning via SR-IOV — VF enumeration, assignment, isolation
 pub mod storage;     // ch14: storage partitioning — NVMe namespace isolation, SR-IOV, exclusive attachment
 pub mod network;     // ch15: network partitioning — SR-IOV VFs, dedicated adapters, paravirt bridge fallback
+pub mod usb;         // ch16: USB controller partitioning, xHCI passthrough, cross-partition input switching
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
