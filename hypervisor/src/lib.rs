@@ -89,6 +89,18 @@ pub mod security;    // ch25: Security — TcbLayer (Hardware/El3Firmware/Hyperv
                      //       SAFETY comment + engineer sign-off), SecurityConfiguration (aggregate
                      //       validate: SMMU active + TerminateGuest policy + Spectre config valid),
                      //       SecuritySummary (all_secure: stage2+smmu+gic+spectre all active)
+pub mod time;        // ch26: Time — CounterFrequency (19.2/24/25 MHz; plausibility check),
+                     //       CnthctlConfig (CNTHCTL_EL2: EL1PCTEN+EL1PCEN=1 mandatory; no timer
+                     //       traps for performance + fingerprint purity), CntpoffConfig
+                     //       (CNTPOFF_EL2=0; non-zero offset is detectable on non-multiplexed
+                     //       cores), TimerPpi (HypervisorPhysical→INTID 26; VirtualEl1→INTID 27;
+                     //       SecurePhysicalEl1→INTID 29; NonSecurePhysicalEl1→INTID 30),
+                     //       CounterPassthroughPolicy (DirectPassthrough safe for static
+                     //       partitioning; TrapAndEmulate rejected), WallClockSource
+                     //       (PlatformRtcAndNtp — hypervisor provides no time services),
+                     //       TimerConfiguration (aggregate validate: plausible frequency + no
+                     //       traps + zero offset + static-partition policy),
+                     //       TimerSummary (timer_ready: passthrough+zero-offset+PPI wired)
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
