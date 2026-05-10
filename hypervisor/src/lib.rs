@@ -52,6 +52,14 @@ pub mod aosp;        // ch21: AOSP And The Android Userspace — PartitionLayout
                      //       (AndroidProperty key/value, ro.build.type=user invariant, ro.adb.secure/
                      //       ro.secure enforcement), ArtConfig (Dalvik heap sizing: start/limit/max,
                      //       GC utilization), AospDeviceConfig (full validated configuration aggregate)
+pub mod microg;      // ch22: The microG Substitution — GmsService coverage map (Authentication/FCM/
+                     //       FusedLocation Full; PlayIntegrity Stub; Pay/Cast/AndroidAuto/MlKit
+                     //       NotImplemented), SignatureSpoofingPolicy (framework patch required),
+                     //       PlayIntegrityMaxVerdict (BasicOnly enforced — MEETS_DEVICE_INTEGRITY
+                     //       unachievable without Google certification), LocationBackend (MLS/Beacondb/
+                     //       GpsOnly), FcmRelay (Direct/SelfHosted), AppStore (FDroid/AuroraStore/
+                     //       Obtainium/ManualSideload), MicrogConfig (default_config: spoofing+FDroid+
+                     //       Aurora validated aggregate)
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
