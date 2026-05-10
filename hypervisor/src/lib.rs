@@ -67,5 +67,14 @@ pub mod play_store;  // ch23: The Play Store Question — PlayCatalogAccess (Ope
                      //       Google Play installation path with disclaimer gate), PlayStoreConfig
                      //       (default: F-Droid + Aurora anonymous; genuine Play Store manual-only)
 
+// Part VII — Cross-Cutting Concerns (Chapters 24–26)
+pub mod performance; // ch24: Performance — SubsystemOverhead (Native/Negligible/Present) per subsystem
+                     //       (CPU/Memory/GPU/Storage/Network/Paravirt), ExitCounter (VM exit
+                     //       instrumentation by ExitReason: WfxTrap/Hvc/Smc/SystemRegister/
+                     //       InstructionFault/DataFault/PhysicalIrq/VirtualTimer/Other; saturating u64
+                     //       counts; gaming threshold check <1 000 exits/s), LargePagePolicy
+                     //       (PreferBlock: 2 MiB block descriptors for TLB efficiency; ForceSmall:
+                     //       4 KiB pages for MMIO slivers), PerformanceSummary (all_native() gate)
+
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
