@@ -46,6 +46,12 @@ pub mod kernel;      // ch20: Linux kernel — ARM64 Image header parser (64-byt
                      //       GKI mandatory config tracker (GkiConfig), KernelState phase machine
                      //       (Init→ImageValidated→DtbPlaced→ConfigVerified→ReadyToLaunch),
                      //       AndroidDtbConfig + build_android_dtb() for the full partition device tree
+pub mod aosp;        // ch21: AOSP And The Android Userspace — PartitionLayout (A/B Android partitions,
+                     //       size validation against NVMe namespace), TrebleManifest (HalInterface:
+                     //       HIDL/AIDL HAL declarations, REQUIRED_HALS check), DeviceProperties
+                     //       (AndroidProperty key/value, ro.build.type=user invariant, ro.adb.secure/
+                     //       ro.secure enforcement), ArtConfig (Dalvik heap sizing: start/limit/max,
+                     //       GC utilization), AospDeviceConfig (full validated configuration aggregate)
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
