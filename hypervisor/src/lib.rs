@@ -37,5 +37,10 @@ pub mod windows;     // ch17: ARM Tier Windows partition config — CPUID hyperv
 pub mod acpi;        // ch18: Windows ACPI tables — RSDP, XSDT, MADT (ARM GIC entries), GTDT, IORT,
                      //       FADT (hardware-reduced); checksums, byte-precise table builders
 
+// Part VI — The Android Partition (Chapters 19–23)
+pub mod bootloader;  // ch19: Android bootloader — AVB2 VBMeta verification, boot image header v3/v4,
+                     //       A/B slot selection (BCB), rollback protection, kernel command line builder,
+                     //       BootloaderLockState (Locked/Unlocked/Orange), KernelLaunchParams
+
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
