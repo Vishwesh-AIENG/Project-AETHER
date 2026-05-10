@@ -75,6 +75,20 @@ pub mod performance; // ch24: Performance — SubsystemOverhead (Native/Negligib
                      //       counts; gaming threshold check <1 000 exits/s), LargePagePolicy
                      //       (PreferBlock: 2 MiB block descriptors for TLB efficiency; ForceSmall:
                      //       4 KiB pages for MMIO slivers), PerformanceSummary (all_native() gate)
+pub mod security;    // ch25: Security — TcbLayer (Hardware/El3Firmware/Hypervisor trusted; Guest/
+                     //       Application untrusted), SmmuSecurityState (Active/Pending/Absent;
+                     //       mandatory DMA isolation boundary), SmmuFaultPolicy (TerminateGuest
+                     //       production-safe; LogAndContinue dev-only), SpectreV2Mitigation
+                     //       (ClrBhb/BhbLoopFlush{iterations}/IcacheFlush/HardwareIsolated; branch
+                     //       predictor flush on every EL1↔EL2 transition), BranchPredictorFlushConfig
+                     //       (flush_on_entry + flush_on_exit), AttackSurfaceEntry (HvcCall/
+                     //       TrappedSysregWrite/SmmuFault/TimerInterrupt; carries_guest_data()),
+                     //       HvcInputValidator (validate_ipa_argument/validate_ipa_range: reject
+                     //       out-of-guest-range addresses before dereference), UnsafeAuditRecord
+                     //       (Reviewed/PendingReview/Unannotated; every unsafe block requires
+                     //       SAFETY comment + engineer sign-off), SecurityConfiguration (aggregate
+                     //       validate: SMMU active + TerminateGuest policy + Spectre config valid),
+                     //       SecuritySummary (all_secure: stage2+smmu+gic+spectre all active)
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
