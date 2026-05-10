@@ -60,6 +60,12 @@ pub mod microg;      // ch22: The microG Substitution — GmsService coverage ma
                      //       GpsOnly), FcmRelay (Direct/SelfHosted), AppStore (FDroid/AuroraStore/
                      //       Obtainium/ManualSideload), MicrogConfig (default_config: spoofing+FDroid+
                      //       Aurora validated aggregate)
+pub mod play_store;  // ch23: The Play Store Question — PlayCatalogAccess (OpenSourceOnly/AnonymousProxy/
+                     //       GenuinePlayStore), LegalTolerance (Clear/ToleranceZone/UserResponsibility),
+                     //       AuroraAccountMode (Anonymous/PersonalAccount), InstallerSpoofMode
+                     //       (Disabled/SpoofAsPlayStore), UserDisclaimer + ManualInstallPath (manual
+                     //       Google Play installation path with disclaimer gate), PlayStoreConfig
+                     //       (default: F-Droid + Aurora anonymous; genuine Play Store manual-only)
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
