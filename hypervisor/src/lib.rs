@@ -41,6 +41,11 @@ pub mod acpi;        // ch18: Windows ACPI tables — RSDP, XSDT, MADT (ARM GIC 
 pub mod bootloader;  // ch19: Android bootloader — AVB2 VBMeta verification, boot image header v3/v4,
                      //       A/B slot selection (BCB), rollback protection, kernel command line builder,
                      //       BootloaderLockState (Locked/Unlocked/Orange), KernelLaunchParams
+pub mod kernel;      // ch20: Linux kernel — ARM64 Image header parser (64-byte header, 0x644D5241 magic),
+                     //       FDT/DTB builder (DtbBuilder: structure+strings blocks, big-endian tokens),
+                     //       GKI mandatory config tracker (GkiConfig), KernelState phase machine
+                     //       (Init→ImageValidated→DtbPlaced→ConfigVerified→ReadyToLaunch),
+                     //       AndroidDtbConfig + build_android_dtb() for the full partition device tree
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
