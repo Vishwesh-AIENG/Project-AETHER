@@ -102,7 +102,7 @@ pub mod time;        // ch26: Time — CounterFrequency (19.2/24/25 MHz; plausib
                      //       traps + zero offset + static-partition policy),
                      //       TimerSummary (timer_ready: passthrough+zero-offset+PPI wired)
 
-// Part VIII — Build System (Chapter 27)
+// Part VIII — Build System (Chapters 27–28)
 pub mod build_system; // ch27: The Build System — three-artifact build (hypervisor EFI / Android
                       //       image / Windows config), HardwareTier (Arm/X86 + Cargo target
                       //       triple), CargoProfile (Release/Debug), HypervisorBuildConfig
@@ -114,6 +114,22 @@ pub mod build_system; // ch27: The Build System — three-artifact build (hyperv
                       //       with parallelism rules: Android ∥ Windows after hypervisor),
                       //       EfiOutputFormat (PE32+ EFI application, tier-matched arch),
                       //       BuildSystemConfig (aggregate validate), BuildSummary (build_ready gate)
+pub mod development_workflow; // ch28: The Development Workflow — TestTier (QemuMinimal/
+                      //       QemuLinuxGuest/RealHardware; per-commit gate + bisection contract),
+                      //       QemuMachineConfig (GICv3 + virtualization=on mandatory; freeze_on_start
+                      //       requires GDB port; TIER1_CI/TIER1_DEBUG presets), GicVersion (V3 only),
+                      //       SerialDebugConfig (PL011 UART at 0x0900_0000 on QEMU virt; primary
+                      //       early-boot debug channel), BreakpointKind (Hardware safe before MMU;
+                      //       Software unsafe in early boot; hbreak vs break GDB prefix),
+                      //       DebuggerConfig (hardware breakpoints for EL2, port 1234),
+                      //       CiStage (CargoCheck per-commit; CargoTestLib+QemuTier1 per-PR;
+                      //       AospCheckBuild nightly; FullReleaseBuild hardware-only),
+                      //       CiPipeline (all three gates required; Tier1 ≤ per-commit budget;
+                      //       AOSP checkbuild NOT per-commit), BisectionConfig (tier1 bisection
+                      //       contract: exit-0/non-zero no human interaction; git bisect run),
+                      //       SnapshotConfig (QEMU savevm/loadvm for Tier 2 acceleration;
+                      //       android_post_boot checkpoint), WorkflowConfig (aggregate validate),
+                      //       WorkflowSummary (workflow_ready gate)
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
