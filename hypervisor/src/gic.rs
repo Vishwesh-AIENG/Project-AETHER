@@ -56,20 +56,20 @@ use crate::arm64::barriers::{dsb_ish, dsb_ishst};
 /// Byte offset from MADT base where IC structure entries begin.
 const MADT_IC_ENTRIES_OFFSET: usize = 44;
 
-/// IC Structure Type 0x09: GIC CPU Interface (one per CPU).
+/// IC Structure Type 0x0B: GIC CPU Interface (one per CPU).
 /// Contains GICV/GICH base addresses and the maintenance interrupt GSIV.
-/// Source: ACPI 6.4 Table 5.56.
-const MADT_TYPE_GICC: u8 = 0x09;
+/// Source: ACPI 6.4 Table 5.56; Linux ACPI_MADT_TYPE_GENERIC_INTERRUPT = 11.
+const MADT_TYPE_GICC: u8 = 0x0B;
 
-/// IC Structure Type 0x0B: GIC Distributor (one per system).
+/// IC Structure Type 0x0C: GIC Distributor (one per system).
 /// Contains the GICD physical base address.
-/// Source: ACPI 6.4 Table 5.57.
-const MADT_TYPE_GICD: u8 = 0x0B;
+/// Source: ACPI 6.4 Table 5.57; Linux ACPI_MADT_TYPE_GENERIC_DISTRIBUTOR = 12.
+const MADT_TYPE_GICD: u8 = 0x0C;
 
-/// IC Structure Type 0x0D: GIC Redistributor Range.
+/// IC Structure Type 0x0E: GIC Redistributor Range.
 /// Contains the base PA of the contiguous GICR range for all PEs.
-/// Source: ACPI 6.4 Table 5.58.
-const MADT_TYPE_GICR: u8 = 0x0D;
+/// Source: ACPI 6.4 Table 5.58; Linux ACPI_MADT_TYPE_GENERIC_REDISTRIBUTOR = 14.
+const MADT_TYPE_GICR: u8 = 0x0E;
 
 /// GIC CPU Interface MADT structure — field byte offsets.
 /// Source: ACPI 6.4 Table 5.56 (total length = 80 bytes).
@@ -723,11 +723,10 @@ pub unsafe fn wake_gicr(gicr_rd_base: u64) {
     let waker = unsafe { ptr::read_volatile(waker_ptr) };
     unsafe { ptr::write_volatile(waker_ptr, waker & !gicr::WAKER_PROCESSOR_SLEEP) };
 
-    // Poll ChildrenAsleep until it clears. On real hardware this is typically
-    // a few cycles; a finite loop would add unnecessary complexity.
-    loop {
+    // Poll ChildrenAsleep until it clears (typically a few cycles on real HW).
+    // Bounded to 1M iterations to avoid hanging if the address is wrong.
+    for _ in 0..1_000_000 {
         unsafe {
-            // DSB ensures the write above is visible to the GIC before the read.
             dsb_ishst();
             let waker = ptr::read_volatile(waker_ptr);
             if waker & gicr::WAKER_CHILDREN_ASLEEP == 0 {
@@ -758,8 +757,8 @@ pub unsafe fn init_gicd(gicd_base: u64) {
     // Disable all groups first while we reconfigure.
     unsafe { ptr::write_volatile(ctlr, 0) };
 
-    // Poll RWP until the disable takes effect.
-    loop {
+    // Poll RWP until the disable takes effect (bounded).
+    for _ in 0..1_000_000 {
         unsafe {
             dsb_ishst();
             if ptr::read_volatile(ctlr) & gicd::CTLR_RWP == 0 {
@@ -801,8 +800,8 @@ pub unsafe fn init_gicd(gicd_base: u64) {
         );
     }
 
-    // Wait for the enable to take effect.
-    loop {
+    // Wait for the enable to take effect (bounded).
+    for _ in 0..1_000_000 {
         unsafe {
             dsb_ish();
             if ptr::read_volatile(ctlr) & gicd::CTLR_RWP == 0 {

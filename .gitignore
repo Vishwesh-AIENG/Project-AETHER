@@ -6,3 +6,5 @@ linux-ref/
 aether-skills/
 README/
 CLAUDE.md
+qemu/efi/
+qemu/ovmf_vars.fd

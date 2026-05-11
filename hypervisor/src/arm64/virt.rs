@@ -649,9 +649,10 @@ pub mod gic_virt {
 //   4. TLBI VMALLS12E1IS + DSB ISH + ISB — flush stale Stage 1+2 TLBs
 //   5. ICH_HCR_EL2.En — enable GIC virtualization extension
 //
-// HCR_EL2 with the VM bit (enabling Stage 2) is written separately at
-// guest entry time (Chapter 7), because it must be set after the Stage 2
-// page tables are populated and not before.
+// HCR_EL2 with GUEST_FLAGS (including VM=1) is written here, after VTTBR_EL2
+// is set and TLBs are flushed. VM=1 only affects EL1/EL0 accesses — EL2
+// hypervisor code is unaffected. Stage 2 tables must be populated first
+// (done in main.rs steps 5 before this call).
 //
 // TLB invalidation rationale:
 //   TLBI VMALLS12E1IS = invalidate all Stage 1 AND Stage 2 TLB entries
@@ -730,7 +731,21 @@ pub unsafe fn configure_el2_virt(s2_root_pa: u64) {
     dsb_ish();
     isb();
 
-    // ── Step 5: ICH_HCR_EL2 — Enable GIC virtualization extension ──────────
+    // ── Step 5: HCR_EL2 — enable Stage 2 and configure guest execution ──────
+    // GUEST_FLAGS: VM=1 activates Stage 2 translation for EL1/EL0.
+    // RW=1 ensures lower EL is AArch64. FMO/IMO/AMO route exceptions to EL2.
+    // ISB required after writing HCR_EL2 to ensure the change takes effect
+    // before any subsequent EL1 activity.
+    unsafe {
+        asm!(
+            "msr hcr_el2, {hcr}",
+            "isb",
+            hcr = in(reg) hcr_el2::GUEST_FLAGS,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    // ── Step 6: ICH_HCR_EL2 — Enable GIC virtualization extension ──────────
     // Setting En=1 activates the virtual CPU interface so the GIC can deliver
     // virtual interrupts to the Android guest without hypervisor intervention
     // on each interrupt delivery.

@@ -314,8 +314,22 @@ fn discover_gic_addresses(
         // Walk XSDT to find the MADT ("APIC" signature).
         if let Some(madt_pa) = unsafe { acpi_find_table(xsdt_pa, b"APIC") } {
             if let Some(gic) = unsafe { discover_gic_from_madt(madt_pa) } {
-                puts(uart, "  GIC discovered via ACPI MADT\r\n");
-                return (gic.gicd_pa, gic.gicr_pa);
+                // Use ACPI GICD; fall back to QEMU default if GICR is absent
+                // or outside the 40-bit IPA space (QEMU OVMF leaves it garbage).
+                let gicr = if gic.gicr_pa != 0 && gic.gicr_pa <= 0xFF_FFFF_FFFF {
+                    gic.gicr_pa
+                } else {
+                    GICR_PA
+                };
+                puts(uart, "  GIC via ACPI MADT — GICD=");
+                puthex64(uart, gic.gicd_pa);
+                puts(uart, " GICR=");
+                puthex64(uart, gicr);
+                if gic.gicr_pa == 0 {
+                    puts(uart, " (GICR fallback to QEMU default)");
+                }
+                puts(uart, "\r\n");
+                return (gic.gicd_pa, gicr);
             }
         }
     }
