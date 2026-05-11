@@ -86,14 +86,29 @@ pub unsafe fn install_vectors() {
 // Each .align 7 produces a 128-byte-aligned entry.
 // The .org at the end of each entry asserts it did not overflow 128 bytes.
 //
-// Save sequence (matches GuestContext layout in context.rs):
-//   1. x0, x1 saved in the vector entry before branching (16 bytes)
-//   2. save_guest_context macro saves x2–x30, sp_el1, elr_el2, spsr_el2
+// A fully-expanded save → call → restore sequence is ~184 bytes, well over
+// the 128-byte slot budget.  To fit, each valid slot does the bare minimum:
 //
-// Total frame = GUEST_CONTEXT_SIZE = 272 bytes.
+//   1. sub  sp, sp, #GUEST_CTX_SIZE     — allocate the guest-context frame
+//   2. stp  x0, x1, [sp, #0]            — save x0/x1 (freeing them as scratch)
+//   3. b    aether_common_<kind>        — branch to the shared trampoline
 //
-// Note: We allocate GUEST_CONTEXT_SIZE bytes on entry for the full frame,
-// but save x0/x1 last (after adjusting SP) to keep the frame contiguous.
+// = 3 instructions × 4 bytes = 12 bytes per slot.  Invalid slots are a single
+// branch-to-self.  All real work happens in the trampolines, which live
+// immediately after the 2 KiB table (no per-slot alignment constraint there).
+//
+// Reference: linux-ref/arch/arm64/kvm/hyp/hyp-entry.S uses the same pattern
+// (kernel_ventry macro) for the same reason.
+//
+// GuestContext layout (272 bytes, from context.rs):
+//   [sp+ 0]: x0  (saved by vector slot)
+//   [sp+ 8]: x1  (saved by vector slot)
+//   [sp+16]: x2  (saved by save_guest_context)
+//   ...
+//   [sp+240]: x30
+//   [sp+248]: sp_el1
+//   [sp+256]: elr_el2
+//   [sp+264]: spsr_el2
 // ─────────────────────────────────────────────────────────────────────────────
 
 global_asm!(
@@ -104,24 +119,10 @@ global_asm!(
     // parser does not allow string literals after named operand declarations.
     ".equ GUEST_CTX_SIZE, {ctx_size}",
 
-    // ─── Common save macro ──────────────────────────────────────────────────
-    // Called from each valid vector entry after x0/x1 are on the stack.
-    // On entry: SP points to saved x0/x1 (lowest address = x0).
-    //           x0 = scratch (caller's x0 already saved at [sp+0])
-    //           x1 = scratch (caller's x1 already saved at [sp+8])
-    //
-    // This macro saves x2–x30, then the three EL2 system registers,
-    // giving a complete GuestContext at the current SP.
-    //
-    // GuestContext layout (from context.rs):
-    //   [sp+ 0]: x0  (already saved by vector entry)
-    //   [sp+ 8]: x1  (already saved by vector entry)
-    //   [sp+16]: x2
-    //   ...
-    //   [sp+240]: x30
-    //   [sp+248]: sp_el1
-    //   [sp+256]: elr_el2
-    //   [sp+264]: spsr_el2
+    // ─── save_guest_context macro ───────────────────────────────────────────
+    // Used by the trampolines below.  On entry, x0/x1 have already been saved
+    // at [sp+0]/[sp+8] by the vector slot.  This macro fills in x2..x30 and
+    // the three EL2 system registers, producing a complete GuestContext at SP.
     ".macro save_guest_context",
     "    stp  x2,  x3,  [sp, #16]",
     "    stp  x4,  x5,  [sp, #32]",
@@ -137,15 +138,15 @@ global_asm!(
     "    stp  x24, x25, [sp, #192]",
     "    stp  x26, x27, [sp, #208]",
     "    stp  x28, x29, [sp, #224]",
-    "    str  x30,      [sp, #240]",  // x30 alone (sp_el1 follows at #248)
+    "    str  x30,      [sp, #240]",
     "    mrs  x9,  sp_el1",
     "    mrs  x10, elr_el2",
     "    mrs  x11, spsr_el2",
-    "    stp  x9,  x10, [sp, #248]", // sp_el1 @ 248, elr_el2 @ 256
-    "    str  x11,      [sp, #264]", // spsr_el2 @ 264
+    "    stp  x9,  x10, [sp, #248]",
+    "    str  x11,      [sp, #264]",
     ".endm",
 
-    // ─── Common restore macro ───────────────────────────────────────────────
+    // ─── restore_guest_context_and_eret macro ───────────────────────────────
     // Mirror of save_guest_context; restores state and issues ERET.
     ".macro restore_guest_context_and_eret",
     "    ldp  x9,  x10, [sp, #248]",
@@ -168,8 +169,18 @@ global_asm!(
     "    ldp  x26, x27, [sp, #208]",
     "    ldp  x28, x29, [sp, #224]",
     "    ldr  x30,      [sp, #240]",
-    "    ldp  x0,  x1,  [sp], #GUEST_CTX_SIZE", // restore x0/x1 and pop frame
+    "    ldp  x0,  x1,  [sp], #GUEST_CTX_SIZE",
     "    eret",
+    ".endm",
+
+    // ─── vec_entry_call macro ───────────────────────────────────────────────
+    // A 12-byte vector-slot body that allocates the GuestContext frame, saves
+    // x0/x1 into it, and branches to the named trampoline.  Each valid slot
+    // expands this with a different trampoline target.
+    ".macro vec_entry_call target",
+    "    sub  sp, sp, #GUEST_CTX_SIZE",
+    "    stp  x0, x1, [sp, #0]",
+    "    b    \\target",
     ".endm",
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -202,17 +213,12 @@ global_asm!(
     ".org aether_vectors + 0x200",
 
     // ── Group 2: EL2 with SP_ELx (EL2h) — AETHER itself ────────────────────
-    // Exceptions while AETHER code is running. Sync is possible (e.g., if
-    // AETHER has a bug). IRQ/FIQ during EL2 should not occur with our
-    // interrupt routing. SError is fatal.
+    // Exceptions while AETHER code is running.  Only Sync is plausible; the
+    // sync handler reports Halt for any EL2-internal fault.  IRQ/FIQ should
+    // not arrive at EL2 with AETHER's routing, and SError is fatal.
 
     ".align 7",                       // entry 4: Sync EL2h — AETHER bug
-    "sub  sp, sp, #GUEST_CTX_SIZE",
-    "stp  x0, x1, [sp, #0]",
-    "save_guest_context",
-    "mov  x0, sp",
-    "bl   aether_handle_sync",        // returns ExitReason; for EL2h bugs, always Halt
-    "restore_guest_context_and_eret", // included for structure; Halt won't return here
+    "vec_entry_call aether_common_sync",
     ".org aether_vectors + 0x280",
 
     ".align 7",                       // entry 5: IRQ EL2h — unexpected
@@ -228,49 +234,26 @@ global_asm!(
     ".org aether_vectors + 0x400",
 
     // ── Group 3: Lower EL AArch64 — guest VM exits ───────────────────────────
-    // This is where all the work happens. Every guest exception that reaches
-    // EL2 lands in one of these four entries.
+    // Every guest exception that reaches EL2 lands here.
 
     ".align 7",                       // entry 8: Sync from AArch64 EL1
-    "sub  sp, sp, #GUEST_CTX_SIZE",
-    "stp  x0, x1, [sp, #0]",
-    "save_guest_context",
-    "mov  x0, sp",                    // first arg = *GuestContext
-    "bl   aether_handle_sync",
-    "restore_guest_context_and_eret",
+    "vec_entry_call aether_common_sync",
     ".org aether_vectors + 0x480",
 
     ".align 7",                       // entry 9: IRQ from AArch64 EL1
-    "sub  sp, sp, #GUEST_CTX_SIZE",
-    "stp  x0, x1, [sp, #0]",
-    "save_guest_context",
-    "mov  x0, sp",
-    "bl   aether_handle_irq",
-    "restore_guest_context_and_eret",
+    "vec_entry_call aether_common_irq",
     ".org aether_vectors + 0x500",
 
     ".align 7",                       // entry 10: FIQ from AArch64 EL1
-    "sub  sp, sp, #GUEST_CTX_SIZE",
-    "stp  x0, x1, [sp, #0]",
-    "save_guest_context",
-    "mov  x0, sp",
-    "bl   aether_handle_irq",         // FIQ uses same handler as IRQ at this stage
-    "restore_guest_context_and_eret",
+    "vec_entry_call aether_common_irq", // FIQ uses same handler as IRQ
     ".org aether_vectors + 0x580",
 
     ".align 7",                       // entry 11: SError from AArch64 EL1
-    "sub  sp, sp, #GUEST_CTX_SIZE",
-    "stp  x0, x1, [sp, #0]",
-    "save_guest_context",
-    "mov  x0, sp",
-    "bl   aether_handle_serror",
-    "restore_guest_context_and_eret",
+    "vec_entry_call aether_common_serror",
     ".org aether_vectors + 0x600",
 
     // ── Group 4: Lower EL AArch32 — AETHER does not support 32-bit guests ───
-    // AETHER supports only 64-bit operating systems (Windows-on-ARM and
-    // Android both run AArch64). HCR_EL2.RW = 1 configures this.
-    // These entries are unreachable in a correct configuration.
+    // HCR_EL2.RW = 1 configures all guests as AArch64; these are unreachable.
 
     ".align 7",                       // entry 12: Sync AArch32 EL1
     "0: b 0b",
@@ -289,6 +272,31 @@ global_asm!(
     ".org aether_vectors + 0x800",
 
     // End of vector table — exactly 2KiB from aether_vectors.
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Trampolines — shared save/call/restore sequences.
+    // Live outside the 2 KiB table; no per-slot alignment constraint here.
+    // Each trampoline expects x0/x1 already saved at [sp+0]/[sp+8] and the
+    // full GUEST_CTX_SIZE frame allocated by the vector slot.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    "aether_common_sync:",
+    "    save_guest_context",
+    "    mov  x0, sp",                // first arg = *GuestContext
+    "    bl   aether_handle_sync",
+    "    restore_guest_context_and_eret",
+
+    "aether_common_irq:",
+    "    save_guest_context",
+    "    mov  x0, sp",
+    "    bl   aether_handle_irq",
+    "    restore_guest_context_and_eret",
+
+    "aether_common_serror:",
+    "    save_guest_context",
+    "    mov  x0, sp",
+    "    bl   aether_handle_serror",
+    "    restore_guest_context_and_eret",
 
     // Named const operand — must be declared after all string literals.
     ctx_size = const GUEST_CONTEXT_SIZE,
