@@ -211,6 +211,33 @@ pub mod roadmap_phase4; // ch32: Phase Four — Performance And Compatibility. P
                         //       Phase4GateCriterion (8 booleans including arm_native_subsystems
                         //       + sensors_within_tolerance + workaround_accepted=false),
                         //       Phase4Config (aggregate validate), Phase4Summary
+pub mod roadmap_phase5; // ch33: Phase Five — Polish And Release. LicenseChoice
+                        //       (GplV2/Mit/Apache2/CcBySa acceptable; Proprietary rejected),
+                        //       LicenseAssignment (RECOMMENDED: hypervisor=GplV2, AOSP=Apache2,
+                        //       docs=CcBySa, installer=Mit — AOSP must be Apache2 to inherit),
+                        //       InstallerCapabilities (REQUIRED: auto_detect_tier +
+                        //       partition_nvme + enroll_secure_boot_keys +
+                        //       register_uefi_boot_entry + flash_android + recovery_image —
+                        //       skipping Secure Boot enrollment weakens the security baseline),
+                        //       DocumentationDeliverables (REQUIRED: user_manual +
+                        //       contributor_guide + architecture_doc + troubleshooting_guide +
+                        //       phase6_roadmap + coverage_report + security_disclosure),
+                        //       SupportInfrastructure (REQUIRED: issue_tracker +
+                        //       security_mailbox + code_review_workflow + cla_or_dco +
+                        //       public_ci_dashboard), CrossPartitionInputSwitch (PRODUCTION:
+                        //       hardware_trigger_active + software_trigger_rejected +
+                        //       xhci_reset_on_reassignment + smmu_required_for_switch — every
+                        //       ch16 invariant re-enforced), SustainabilityPlan (at least one
+                        //       channel — commercial revenue OR contributor base — must be
+                        //       viable; both_channels ideal), Phase5Milestone (9-step:
+                        //       Phase4GateClosed → LicenseAssigned → InstallerFeatureComplete
+                        //       → InputSwitchValidated → ConfigurationToolsShipped →
+                        //       DocumentationDelivered → SupportInfrastructureLive →
+                        //       ReleaseCandidatePublished → PublicReleaseShipped),
+                        //       Phase5TimelineEstimate (README_LOWER 6→12→18 / README_UPPER
+                        //       12→24→36 months), Phase5GateCriterion (7 booleans + no
+                        //       workaround), Phase5Config (aggregate validate),
+                        //       Phase5Summary (phase5_complete: closes the roadmap)
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
