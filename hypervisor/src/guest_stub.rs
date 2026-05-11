@@ -1,16 +1,19 @@
-// AETHER — minimal bare-metal ARM64 guest stub (Test 2)
+// AETHER — minimal bare-metal ARM64 guest stub (Tests 2 + 3)
 //
-// This stub runs at EL1 under Stage 2 address translation. It prints
-// "Guest EL1 OK\r\n" to the PL011 UART at 0x09000000, then halts with WFE.
+// Phase 1 — Test 2: print "Guest EL1 OK\r\n" to PL011 UART to confirm EL1
+//   execution and Stage 2 address translation are working.
+//
+// Phase 2 — Test 3: load from IPA 0x20000000 (deliberately unmapped in Stage 2)
+//   to trigger a Stage 2 Data Abort. AETHER's exception handler at EL2 catches
+//   the fault and prints "Stage 2 fault caught!" — proving memory isolation works.
 //
 // Design constraints:
-//   - Must be position-independent: the stub is copied to an arbitrary PA
-//     and entered via ERET from EL2. We use absolute MMIO addresses via movz/movk
-//     and PC-relative data via adr.
-//   - No stack assumed at entry: all work done in registers.
-//   - UART PA 0x09000000 is mapped Stage 2 DeviceRw (main.rs map_range).
-//   - The stub is linked at 0 but runs wherever it's copied — adr is safe
-//     because the PC-relative offset to the string is fixed regardless of load PA.
+//   - Position-independent: copied to an arbitrary PA and entered via ERET.
+//     Absolute MMIO addresses use movz/movk; string data is PC-relative (adr).
+//   - No stack at entry: all work in registers.
+//   - UART 0x09000000 and unmapped IPA 0x20000000 are both in the EL1 IPA
+//     address space; the UART is Stage 2 mapped DeviceRw, 0x20000000 is not
+//     mapped at all — any access to it produces EC=0x24 DataAbortLow.
 
 use core::arch::global_asm;
 
@@ -21,33 +24,38 @@ global_asm!(
     ".balign 4",
     "guest_stub_start:",
 
+    // ── Phase 1: print "Guest EL1 OK\r\n" via PL011 UART ──────────────────────
     // x1 = PL011 UART DR (data register) = 0x09000000
     "movz x1, #0x0900, lsl #16",
 
-    // Load address of the message string (PC-relative)
-    "adr  x2, 1f",
+    // x2 = PC-relative pointer to the message string (forward reference to str_msg)
+    "adr  x2, 3f",
 
-    // x3 = length of string (13 bytes: "Guest EL1 OK\r\n")
+    // x3 = 14 (length of "Guest EL1 OK\r\n")
     "mov  x3, #14",
 
-    // Loop: write one byte at a time to UART DR
+    // Byte-by-byte transmit loop
     "0:",
-    "ldrb w4, [x2], #1",   // load byte, post-increment pointer
-    "str  w4, [x1]",       // write to PL011 DR (offset 0 = transmit)
+    "ldrb w4, [x2], #1",   // load byte, post-increment
+    "str  w4, [x1]",       // write to PL011 DR
     "subs x3, x3, #1",
     "b.ne 0b",
 
-    // Halt
-    "1:",                   // string is here (reuse label — GNU assembler allows this
-                            // only as a numeric local; branch above uses "0b" not "1b")
-    ".ascii \"Guest EL1 OK\\r\\n\"",
+    // ── Phase 2: access unmapped IPA → Stage 2 Data Abort ────────────────────
+    // 0x20000000 is between the GIC (ends ~0x0A000000) and DRAM (starts 0x40000000).
+    // It is not mapped in Stage 2 — any load or store here triggers EC=0x24 in EL2.
+    "movz x5, #0x2000, lsl #16",
+    "ldr  x6, [x5]",       // Stage 2 Data Abort → AETHER exception handler
 
-    // The WFE loop must come AFTER the string data to avoid executing data.
-    // Place it at a known offset by aligning.
-    ".balign 4",
-    "2:",
+    // Should never reach here (fault is unrecoverable in bring-up).
+    "1:",
     "wfe",
-    "b 2b",
+    "b 1b",
+
+    // String data placed AFTER the halt loop so it is never executed as code.
+    ".balign 4",
+    "3:",
+    ".ascii \"Guest EL1 OK\\r\\n\"",
 
     "guest_stub_end:",
 );

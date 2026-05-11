@@ -307,6 +307,44 @@ pub mod esr_el2 {
     }
 }
 
+/// Read FAR_EL2 — Fault Address Register (EL2).
+///
+/// On a Stage 2 data or instruction abort, FAR_EL2 holds the faulting
+/// virtual address (VA) as seen by EL1. Bits [11:0] are the byte offset
+/// within the faulting page and are valid for computing the IPA offset.
+///
+/// Source: ARM ARM DDI0487 Section D1.10.6
+#[inline]
+pub unsafe fn read_far_el2() -> u64 {
+    let v: u64;
+    unsafe {
+        asm!("mrs {}, far_el2", out(reg) v,
+             options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
+/// Read HPFAR_EL2 — Hypervisor IPA Fault Address Register (EL2).
+///
+/// On a Stage 2 abort, HPFAR_EL2[43:4] holds IPA[47:12] of the faulting
+/// guest physical address (the 4KB page number). To reconstruct the full IPA:
+///
+///   `ipa = (hpfar_el2 & 0x0000_00FF_FFFF_FFF0) << 8 | (far_el2 & 0xFFF)`
+///
+/// The lower 12 bits of the IPA are the page offset from FAR_EL2[11:0].
+/// Verified against Linux kernel arch/arm64/kvm/fault.c `get_fault_ipa()`.
+///
+/// Source: ARM ARM DDI0487 Section D1.10.7
+#[inline]
+pub unsafe fn read_hpfar_el2() -> u64 {
+    let v: u64;
+    unsafe {
+        asm!("mrs {}, hpfar_el2", out(reg) v,
+             options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
 /// Read ESR_EL2.
 ///
 /// # Safety

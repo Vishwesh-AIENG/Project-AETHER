@@ -17,6 +17,8 @@
 // Every variant below is from esr.h, not from training data.
 
 use super::context::GuestContext;
+use super::regs::{read_far_el2, read_hpfar_el2};
+use crate::uart::Uart;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ExceptionType — the four hardware exception categories
@@ -344,11 +346,39 @@ fn handle_wfx(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
 /// EC = 0x24: Stage 2 Data Abort.
 ///
 /// Guest accessed an IPA that has no Stage 2 mapping or that is protected.
-/// The most common operation for AETHER to handle — paravirtualized device
-/// MMIO accesses land here. Full implementation in Chapter 8.
+///
+/// Prints the faulting IPA (from HPFAR_EL2) and ESR to the UART for
+/// Test 3 isolation verification, then halts the guest.
 #[inline]
-fn handle_data_abort(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
-    // Chapter 8: resolve Stage 2 page fault or dispatch MMIO emulation.
+fn handle_data_abort(_ctx: &mut GuestContext, esr: u64) -> ExitReason {
+    // SAFETY: UART_PA is the QEMU virt PL011 address, always identity-mapped
+    // by UEFI and never reclaimed. We are at EL2 in an exception handler;
+    // the UART is accessible unconditionally.
+    let uart = unsafe { Uart::new(0x0900_0000) };
+
+    // FAR_EL2: faulting virtual address (EL1 view).
+    // HPFAR_EL2[43:4]: IPA[47:8]. Reconstruct page-aligned IPA then OR in
+    // the byte offset from FAR_EL2[11:0].
+    // Source: ARM ARM DDI0487 Section D1.10.6 / D1.10.7.
+    let far  = unsafe { read_far_el2() };
+    let hpfar = unsafe { read_hpfar_el2() };
+    // HPFAR_EL2[43:4] = IPA[47:12] (page number, not byte address).
+    // Each HPFAR bit n maps to IPA bit n+8, so shift left 8. FAR[11:0] is
+    // the byte offset within the page (same in VA and IPA for 4KB granule).
+    // Source: ARM ARM DDI0487 D1.10.7; verified against Linux kvm/fault.c.
+    let ipa = ((hpfar & 0x0000_00FF_FFFF_FFF0) << 8) | (far & 0xFFF);
+
+    unsafe {
+        uart.puts("\r\n[EL2] Stage 2 fault caught!\r\n");
+        uart.puts("  IPA =");
+        uart.puthex64(ipa);
+        uart.puts("\r\n  ESR =");
+        uart.puthex64(esr);
+        uart.puts("\r\n  FAR =");
+        uart.puthex64(far);
+        uart.puts("\r\n[EL2] Isolation confirmed — guest halted.\r\n");
+    }
+
     ExitReason::Halt
 }
 
