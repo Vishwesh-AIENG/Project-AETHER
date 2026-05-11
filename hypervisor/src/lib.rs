@@ -150,6 +150,27 @@ pub mod roadmap_phase1; // ch29: Phase One — Foundation (ARM Tier).  ResearchP
                         //       workaround_accepted rejection — "works in QEMU but not on
                         //       hardware" is not a pass), Phase1Config (aggregate validate),
                         //       Phase1Summary (phase1_complete: 5-pillar gate)
+pub mod roadmap_phase2; // ch30: Phase Two — Android Bring-Up (ARM Tier). Phase2Milestone
+                        //       (14-step linear path from Phase1GateClosed →
+                        //       AospSourceSynced → BootloaderVerified → KernelBootsWithDtb →
+                        //       UserspaceReachesBootCompleted → AdrenoVfRendersUi →
+                        //       ParavirtSensorsLive → PhoneBridgeToggleWorking →
+                        //       VirtualModemAttached → MicroGServicesRunning →
+                        //       AppStoreInstallsSucceed → SafetyNetBasicIntegrityPasses →
+                        //       AppCategoryCoverageComplete → AndroidStableOnHardware),
+                        //       Phase2MilestoneState + Phase2Tracker (prerequisite enforcement),
+                        //       AppCategory (7 categories: Communication/MapsNav/WebBrowsing/
+                        //       MediaPlayback/Productivity/BankingAttestation/LightGaming —
+                        //       Banking is recorded but not a hard requirement), AppCategoryCoverage
+                        //       (HARD_REQUIREMENTS_PASS preset; banking left false because
+                        //       attestation failure is expected), Phase2TimelineEstimate
+                        //       (README_LOWER: 6→12→18; README_UPPER: 9→18→27),
+                        //       Phase2GateCriterion (build_type=User invariant +
+                        //       adreno_vf_rendering + microg_basic_integrity +
+                        //       hard_app_categories_pass + soak_passes_on_hardware +
+                        //       claims_device_integrity=false — DeviceIntegrity is unattainable),
+                        //       Phase2Config (aggregate validate: Phase1NotComplete /
+                        //       Phase1GateNotRecorded enforced), Phase2Summary
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
