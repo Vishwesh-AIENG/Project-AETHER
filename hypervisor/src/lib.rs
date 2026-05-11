@@ -102,5 +102,18 @@ pub mod time;        // ch26: Time — CounterFrequency (19.2/24/25 MHz; plausib
                      //       traps + zero offset + static-partition policy),
                      //       TimerSummary (timer_ready: passthrough+zero-offset+PPI wired)
 
+// Part VIII — Build System (Chapter 27)
+pub mod build_system; // ch27: The Build System — three-artifact build (hypervisor EFI / Android
+                      //       image / Windows config), HardwareTier (Arm/X86 + Cargo target
+                      //       triple), CargoProfile (Release/Debug), HypervisorBuildConfig
+                      //       (build-std + build-std-mem required), AndroidBuildVariant (User
+                      //       only in production), AndroidBuildConfig (partition sizes in bytes,
+                      //       4 KiB aligned), WindowsBuildConfig (namespace ≥ RAM + Secure Boot
+                      //       chain), CrossCompileToolchain (nightly + UEFI target + aarch64
+                      //       cross toolchain + rust-src + AOSP env), BuildStep (ordered sequence
+                      //       with parallelism rules: Android ∥ Windows after hypervisor),
+                      //       EfiOutputFormat (PE32+ EFI application, tier-matched arch),
+                      //       BuildSystemConfig (aggregate validate), BuildSummary (build_ready gate)
+
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
