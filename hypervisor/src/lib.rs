@@ -241,3 +241,4 @@ pub mod roadmap_phase5; // ch33: Phase Five — Polish And Release. LicenseChoic
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
+pub mod guest_stub;  // Test 2: minimal bare-metal ARM64 stub guest (prints "Guest EL1 OK", halts)

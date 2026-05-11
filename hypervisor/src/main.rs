@@ -36,8 +36,9 @@ use core::panic::PanicInfo;
 
 use hypervisor::arm64::regs;
 use hypervisor::arm64::virt::{configure_el2_virt, hcr_el2};
-use hypervisor::boot::{acpi_find_table, AcpiRsdp, BootContext, EfiSystemTable};
+use hypervisor::boot::{acpi_find_table, AcpiRsdp, BootContext, EfiSystemTable, GuestLaunch};
 use hypervisor::gic::{discover_gic_from_madt, init_physical_gic};
+use hypervisor::guest_stub;
 use hypervisor::memory::{BumpAllocator, MapKind, SmmuStreamTable, Stage2Tables};
 use hypervisor::uart::Uart;
 
@@ -267,23 +268,58 @@ pub extern "efiapi" fn efi_main(
     puts(&uart, "======================================\r\n");
     puts(&uart, "\r\n");
 
-    // ── Boot guest (when kernel is available) ──────────────────────────────────
-    // Uncomment when a Linux kernel Image is loaded at KERNEL1_PA and a DTB is
-    // at DTB1_PA (either by a loader stub or copied into DRAM before UEFI).
+    // ── Test 2: copy bare-metal ARM64 stub into guest RAM, ERET to EL1 ──────────
+    //
+    // guest_stub_start..guest_stub_end is the position-independent stub assembled
+    // inline in guest_stub.rs. We allocate one page from the bump allocator
+    // (safe region starting at 0x48000000, already covered by the ANDROID_RAM_SIZE
+    // Stage 2 mapping), copy the stub there, then ERET to EL1 at that address.
     //
     // Safety preconditions (all met above):
-    //   - HCR_EL2.VM = 1 ✓    (configure_el2_virt sets this)
-    //   - VTTBR_EL2 set ✓      (configure_el2_virt sets this)
-    //   - VBAR_EL2 set ✓       (install_vectors sets this)
-    //   - KERNEL1_PA mapped ✓  (covered by ANDROID_IPA_BASE + ANDROID_RAM_SIZE)
-    //
-    // unsafe {
-    //     GuestLaunch { entry_pa: KERNEL1_PA, dtb_pa: DTB1_PA }.eret_to_el1();
-    // }
+    //   - HCR_EL2.VM = 1 ✓          (configure_el2_virt)
+    //   - VTTBR_EL2 set ✓            (configure_el2_virt)
+    //   - VBAR_EL2 set ✓             (install_vectors)
+    //   - Stub PA mapped NormalRw ✓  (covered by ANDROID_IPA_BASE + ANDROID_RAM_SIZE)
+    //   - UART PA mapped DeviceRw ✓  (0x09000000 mapped above)
+    let stub_pa = unsafe { alloc.alloc_zeroed_page() }
+        .unwrap_or_else(|| {
+            puts(&uart, "[FATAL] guest stub alloc failed\r\n");
+            hypervisor::boot::halt()
+        });
 
-    // For Test 1 we halt here — QEMU shows "Hypervisor ready." and exits cleanly
-    // when the user presses Ctrl-A X (or QEMU monitor `quit`).
-    hypervisor::boot::halt();
+    let stub_src = guest_stub::stub_start();
+    let stub_bytes = guest_stub::stub_len();
+
+    // Copy stub code to the allocated page. The stub is position-independent
+    // (uses movz for absolute UART address, adr for PC-relative string data),
+    // so it runs correctly at stub_pa without relocation.
+    unsafe {
+        core::ptr::copy_nonoverlapping(stub_src, stub_pa as *mut u8, stub_bytes);
+        // D-cache clean + I-cache invalidate: ensure the copied instructions
+        // are visible as code to the EL1 instruction fetch path.
+        // For QEMU this is unnecessary but it is correct on real hardware.
+        core::arch::asm!(
+            "dc cvau, {p}",     // clean D-cache line by VA to PoU
+            "dsb ish",
+            "ic ivau, {p}",     // invalidate I-cache line by VA to PoU
+            "dsb ish",
+            "isb",
+            p = in(reg) stub_pa,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    puts(&uart, "  Stub at PA=");
+    puthex64(&uart, stub_pa);
+    puts(&uart, " (");
+    puthex64(&uart, stub_bytes as u64);
+    puts(&uart, " bytes) — ERET to EL1\r\n");
+
+    // ERET: ELR_EL2 = stub_pa, SPSR_EL2 = EL1h, DAIF masked.
+    // dtb_pa = 0 (stub ignores x0).
+    unsafe {
+        GuestLaunch { entry_pa: stub_pa, dtb_pa: 0 }.eret_to_el1();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
