@@ -171,6 +171,24 @@ pub mod roadmap_phase2; // ch30: Phase Two — Android Bring-Up (ARM Tier). Phas
                         //       claims_device_integrity=false — DeviceIntegrity is unattainable),
                         //       Phase2Config (aggregate validate: Phase1NotComplete /
                         //       Phase1GateNotRecorded enforced), Phase2Summary
+pub mod roadmap_phase3; // ch31: Phase Three — x86 Tier Foundation. X86VirtualizationFlavor
+                        //       (IntelVtx→VMCS+EPT+VMX-root / AmdSvm→VMCB+NPT+SVM-host),
+                        //       SecondStageTableConfig (INTEL/AMD_PRODUCTION; four_level_paging
+                        //       required, invalidate_on_mapping_change required — stale TLB
+                        //       leaks across guest boundary), FexEmuIntegrationMode
+                        //       (InHypervisor required; HostUserland rejected — would need a
+                        //       host OS, violates No-Boundary), FexEmuConfig (PRODUCTION:
+                        //       persistent JIT + AOT for system apps), Phase3Milestone
+                        //       (10-step linear: Phase2GateClosed → VmxOrSvmAvailable →
+                        //       HypervisorEntersRootMode → VmcsVmcbInitialized → EptOrNptActive
+                        //       → FexEmuExecutesArm64Binary → LinuxKernelBootsThroughDbt →
+                        //       AndroidUserspaceBootsThroughDbt → CoreAppsValidatedThroughDbt
+                        //       → X86TierValidatedOnHardware), Phase3Tracker (prerequisite
+                        //       enforcement), Phase3TimelineEstimate (12→24→36 months —
+                        //       structurally Phase One again on a different ISA),
+                        //       Phase3GateCriterion (Intel AND AMD must both boot;
+                        //       fex_in_hypervisor + ept_npt_invalidation_enforced invariants;
+                        //       no workarounds), Phase3Config (aggregate), Phase3Summary
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
