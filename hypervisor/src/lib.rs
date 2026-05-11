@@ -189,6 +189,28 @@ pub mod roadmap_phase3; // ch31: Phase Three — x86 Tier Foundation. X86Virtual
                         //       Phase3GateCriterion (Intel AND AMD must both boot;
                         //       fex_in_hypervisor + ept_npt_invalidation_enforced invariants;
                         //       no workarounds), Phase3Config (aggregate), Phase3Summary
+pub mod roadmap_phase4; // ch32: Phase Four — Performance And Compatibility. PerformanceTarget
+                        //       (arm_tier_bound ≤ x86_tier_bound invariant — DBT cannot be
+                        //       faster than native), constants FRAME_TIME_P99_MS (17/33),
+                        //       COLD_LAUNCH_P99_MS (800/1800), VM_EXITS_PER_SEC (1k/10k),
+                        //       PerformanceMeasurement (within_target + per-tier validate),
+                        //       SubsystemPerfState (ARM_TARGET: all Native+Negligible;
+                        //       X86_TARGET: CPU=Present from DBT, rest match ARM; arm_native
+                        //       gate), SensorFidelityCheck (ACCEL/GYRO/MAG_REFERENCE matching
+                        //       ch12 BMI160/BMM150 σ values in milli-units; 10% default
+                        //       tolerance), AppCompatibilityReport (README_TARGET_TEMPLATE:
+                        //       1000 apps + 95% pass rate; attestation-only failures excluded
+                        //       from denominator — design issue not bug), Phase4Milestone
+                        //       (9-step: Phase3GateClosed → ArmTierFrameTimeWithinTarget →
+                        //       X86TierFrameTimeWithinTarget → ColdLaunchWithinTarget →
+                        //       VmExitRateWithinTarget → SensorFidelityWithinTolerance →
+                        //       AppCompatibilityTargetMet → AllCompatBugsTriaged →
+                        //       SoakPassesOnBothTiers; perf milestones validate on
+                        //       RealHardware — QEMU perf numbers are meaningless),
+                        //       Phase4TimelineEstimate (12→24→36 months),
+                        //       Phase4GateCriterion (8 booleans including arm_native_subsystems
+                        //       + sensors_within_tolerance + workaround_accepted=false),
+                        //       Phase4Config (aggregate validate), Phase4Summary
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
