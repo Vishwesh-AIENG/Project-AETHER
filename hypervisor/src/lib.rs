@@ -131,5 +131,25 @@ pub mod development_workflow; // ch28: The Development Workflow — TestTier (Qe
                       //       android_post_boot checkpoint), WorkflowConfig (aggregate validate),
                       //       WorkflowSummary (workflow_ready gate)
 
+// Part IX — Roadmap (Chapters 29–33)
+pub mod roadmap_phase1; // ch29: Phase One — Foundation (ARM Tier).  ResearchPhaseStatus
+                        //       (5-item gate: ARM ARM read + KVM/ARM64 studied + QEMU env +
+                        //       experimental code + project journal — mandatory before any
+                        //       Phase 1 work begins), Phase1Milestone (11-step linear critical
+                        //       path: Arm64Substrate → ExceptionHandling → Stage2 → UefiBoot →
+                        //       MemoryIsolation → CpuPartitioning → GicVirt → Passthrough →
+                        //       NvmeNamespace → MinimalLinuxInQemu → MinimalLinuxOnHardware),
+                        //       MilestoneState (NotStarted/InProgress/Validated/Regressed;
+                        //       prerequisite enforcement on advance), Phase1Tracker
+                        //       (fixed-size array, all_validated/first_unvalidated/any_regressed),
+                        //       Phase1TimelineEstimate (optimistic ≤ realistic ≤ pessimistic;
+                        //       REALISTIC_MULTIPLIER=2, PESSIMISTIC_MULTIPLIER=3 — README
+                        //       12-month estimate becomes 24-month realistic), WeeklyHourBudget
+                        //       (DEFAULT_TERM=2h weekday + 6h weekend = 22h/wk; realistic caps:
+                        //       4/8/10 enforced), Phase1GateCriterion (4 functional checks +
+                        //       workaround_accepted rejection — "works in QEMU but not on
+                        //       hardware" is not a pass), Phase1Config (aggregate validate),
+                        //       Phase1Summary (phase1_complete: 5-pillar gate)
+
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
