@@ -369,6 +369,4 @@ Three Tier 1 gate tests pass on every commit:
 *The journey is long. The destination is clear.*  
 *Work begins at the silicon and proceeds upward, layer by layer, exactly as this document describes.*
 
-**[Skills Index](aether-skills/SKILLS_INDEX.md) · [CLAUDE.md](CLAUDE.md) · [Chapter Plan](.claude/plans/melodic-questing-crab.md)**
-
 </div>
