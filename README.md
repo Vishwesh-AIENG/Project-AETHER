@@ -2,7 +2,7 @@
 
 # ⬡ AETHER
 
-**A Type-1 hypervisor that delivers production Android on any ARM64 or x86 PC — native, sovereign, undetectable.**
+**A Type-1 hypervisor that delivers production Android on any ARM64 or x86 PC — native, sovereign,Safe and undetectable.**
 
 [![Rust nightly](https://img.shields.io/badge/rust-nightly-orange?logo=rust)](https://rust-lang.org)
 [![Target](https://img.shields.io/badge/target-aarch64--unknown--uefi-blue)](https://doc.rust-lang.org/nightly/rustc/platform-support.html)
