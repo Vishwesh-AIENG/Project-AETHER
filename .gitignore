@@ -4,7 +4,7 @@ target/
 *.a
 linux-ref/
 aether-skills/
-README/
 CLAUDE.md
+.claude/
 qemu/efi/
 qemu/ovmf_vars.fd
