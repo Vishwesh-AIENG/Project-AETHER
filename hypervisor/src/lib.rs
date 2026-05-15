@@ -48,6 +48,22 @@ pub mod pcie_assignment;  // ch38: PCIe Device Assignment and SMMU Wiring — Fu
                           //       assign_device_with_ecam() — full 7-step pipeline: IOMMU check → FLR →
                           //       core passthrough → ECAM window map → BAR map → SMMU STE (Stage-2-only) →
                           //       BME enable → registry commit. Gate: lspci in guest lists assigned device.
+pub mod gpu_sriov;       // ch39: GPU SR-IOV — Functional Enable. Reads SR-IOV Extended Capability
+                         //       (ID=0x0010) from Adreno GPU PF via ECAM extended config space
+                         //       (walk from 0x100), validates MaxVFs ≥ 2, writes NumVFs=2 then
+                         //       VF_Enable|VF_MSE to SRIOV_CTRL (NumVFs BEFORE VF Enable per
+                         //       PCIe §9.3.3.3.2), DSB ISH. Computes VF BDFs (PF+FirstVFOffset+
+                         //       n×VFStride). Maps each VF's BARs into Stage 2 as DeviceRw
+                         //       (IPA==PA, via scan_bars on VF BDF). Configures SMMU STE per VF
+                         //       StreamID (stage2_only; write_ste enforces words 1–7 → DSB → word 0).
+                         //       Maps ECAM config-space window so Android DRM reads Vendor ID
+                         //       0x17CB (Qualcomm). Registers both VFs in GpuPartitionRegistry.
+                         //       GpuSrIovConfig (pf_addr/ecam_window/vmid/s2ttb_pa/stream_ids),
+                         //       GpuSrIovGate (vendor_id_visible + vf_bars_mapped; passes() gate),
+                         //       GpuSrIovError (SrIovCapNotFound/InsufficientVfs/NoVfBarsFound/
+                         //       MapFailed/RegistryError/StreamIdOutOfRange), compute_vf_addr(),
+                         //       assign_gpu_vfs() — 7-step pipeline. QUALCOMM_VENDOR_ID=0x17CB.
+                         //       Gate: cat /sys/class/drm/card0/device/vendor shows 0x17cb in Android.
 pub mod nvme_namespace;  // ch37: NVMe Namespace — Functional. PCIe ECAM NVMe controller enumeration,
                          //       Admin SQ/CQ bring-up, Identify Controller (CNS=0x01, OACS[3] check),
                          //       Namespace Management Create (opcode 0x0D, sel=0x00, NSZE/NCAP/FLBAS),
