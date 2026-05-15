@@ -479,7 +479,14 @@ pub fn handle_psci_call(
 
         psci::CPU_ON_32 | psci::CPU_ON_64 => {
             // arg1 = target_affinity, arg2 = entry_point, arg3 = context_id
-            partition.cpu_on(arg1, arg2, arg3, caller_mpidr)
+            let result = partition.cpu_on(arg1, arg2, arg3, caller_mpidr);
+            if result == psci::SUCCESS {
+                // Write entry_point into the EL2 spin table and issue SEV.
+                // The secondary core is parked in aether_secondary_core_main
+                // waiting for this signal.
+                crate::smp::wake_secondary_core(arg1, arg2, arg3);
+            }
+            result
         }
 
         psci::CPU_OFF => {

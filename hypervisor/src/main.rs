@@ -37,10 +37,12 @@ use core::panic::PanicInfo;
 use hypervisor::arm64::regs;
 use hypervisor::arm64::virt::{configure_el2_virt, hcr_el2};
 use hypervisor::boot::{acpi_find_table, AcpiRsdp, BootContext, EfiSystemTable, GuestLaunch};
+use hypervisor::cpu::Mpidr;
 use hypervisor::gic::{discover_gic_from_madt, init_physical_gic};
 use hypervisor::kernel::{AndroidDtbConfig, MAX_ANDROID_CPUS, MAX_KERNEL_CMDLINE_LEN};
 use hypervisor::linux_boot::prepare_linux_boot;
 use hypervisor::memory::{BumpAllocator, MapKind, SmmuStreamTable, Stage2Tables};
+use hypervisor::smp;
 use hypervisor::uart::Uart;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,6 +74,10 @@ pub const KERNEL1_PA: u64 = 0x4080_0000;
 
 /// Android device-tree blob address (placed after the 2 MiB text+rodata).
 pub const DTB1_PA: u64 = 0x4400_0000;
+
+/// Number of CPU cores assigned to the Android partition for ch35 SMP test.
+/// QEMU is launched with `-smp 4`; MPIDR Aff0 values: 0 (primary), 1, 2, 3.
+const SMP_CORE_COUNT: usize = 4;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Global static SMMU stream table
@@ -254,14 +260,49 @@ pub extern "efiapi" fn efi_main(
     let (gicd_base, gicr_base) = discover_gic_addresses(&uart, &boot_result);
 
     // Initialize physical GIC: wake all redistributors, configure GICD, ICC.
-    // `online_cores = 1` — boot CPU only. Additional cores are woken by PSCI
-    // (ch09 cpu.rs) as they join the hypervisor.
-    unsafe { init_physical_gic(gicd_base, gicr_base, 1) };
+    // Wake SMP_CORE_COUNT redistributors so the GICD can be enabled before
+    // secondary cores start (GIC spec IHI0069 §12.1: all GICR must be woken
+    // before GICD_CTLR.EnableGrp1A is written).
+    unsafe { init_physical_gic(gicd_base, gicr_base, SMP_CORE_COUNT) };
     puts(&uart, "  GIC: OK (GICD=");
     puthex64(&uart, gicd_base);
     puts(&uart, " GICR=");
     puthex64(&uart, gicr_base);
     puts(&uart, ")\r\n");
+
+    // ── SMP: pre-register all cores, publish shared globals, wake secondaries ─
+    //
+    // Pre-register all SMP_CORE_COUNT cores BEFORE issuing PSCI CPU_ON.
+    // This avoids races in register_core() if secondaries ran it themselves.
+    // Primary core (Aff0=0) registers first; synthethic MPIDRs for secondaries
+    // carry only Aff0 = core_index (QEMU virt topology: one cluster, N cores).
+    {
+        let partition = unsafe { hypervisor::cpu::aether_partition_mut() };
+        for idx in 0..SMP_CORE_COUNT {
+            partition.register_core(Mpidr(idx as u64));
+        }
+    }
+    puts(&uart, "  SMP: ");
+    putdec(&uart, SMP_CORE_COUNT);
+    puts(&uart, " cores pre-registered\r\n");
+
+    // Publish Stage 2 root PA and GICR base so secondary cores can read them
+    // via Acquire loads once they execute aether_secondary_core_main.
+    smp::set_s2_root_pa(s2.root_pa());
+    smp::set_gicr_base(gicr_base);
+
+    // Wake secondary cores via PSCI CPU_ON HVC → QEMU machine model.
+    // Each secondary starts at aether_secondary_entry in AArch64 EL2 mode.
+    let entry_pa = smp::secondary_entry_pa();
+    for idx in 1..SMP_CORE_COUNT {
+        let target_mpidr = idx as u64; // Aff0=idx, all other affinity fields = 0
+        let rc = unsafe { smp::psci_cpu_on_hvc(target_mpidr, entry_pa, 0) };
+        puts(&uart, "  SMP: CPU_ON core ");
+        putdec(&uart, idx);
+        puts(&uart, " -> ");
+        putdec(&uart, rc as usize);
+        puts(&uart, "\r\n");
+    }
 
     // ── Done ──────────────────────────────────────────────────────────────────
     puts(&uart, "======================================\r\n");
@@ -294,19 +335,25 @@ pub extern "efiapi" fn efi_main(
     let cmdline_len = CMDLINE.len();
     cmdline_buf[..cmdline_len].copy_from_slice(CMDLINE);
 
-    // GICv3 redistributor size: 128 KiB × n_cores (1 core here).
-    // Each redistributor consumes two 64 KiB frames (RD_base + SGI_base).
-    const GICR_SIZE_1CORE: u64 = 128 * 1024;
+    // GICv3 redistributor size: 128 KiB × SMP_CORE_COUNT.
+    // Each redistributor frame is two 64 KiB pages (RD_base + SGI_base).
+    // With 4 cores: 4 × 128 KiB = 512 KiB = 0x80000.
+    const GICR_SIZE_PER_CORE: u64 = 128 * 1024;
+    let gicr_size_smp = GICR_SIZE_PER_CORE * SMP_CORE_COUNT as u64;
 
     // PL011 UART SPI on QEMU virt: absolute INTID 33 (DT intid = 33 − 32 = 1).
     // Source: QEMU hw/arm/virt.c VIRT_UART SPI allocation.
     const UART_SPI_INTID: u32 = 33;
 
     let dtb_cfg = AndroidDtbConfig {
-        cpu_count: 1,
+        cpu_count: SMP_CORE_COUNT,
         cpu_mpidr: {
+            // QEMU virt SMP topology: one cluster, N cores.
+            // MPIDR Aff1=0, Aff0=core_index for all cores.
             let mut m = [0u64; MAX_ANDROID_CPUS];
-            m[0] = 0; // primary CPU MPIDR_EL1 affinity = 0
+            for i in 0..SMP_CORE_COUNT {
+                m[i] = i as u64; // Aff0 = core index
+            }
             m
         },
         memory_base: ANDROID_IPA_BASE,
@@ -314,14 +361,14 @@ pub extern "efiapi" fn efi_main(
         gicd_base: GICD_PA,
         gicd_size: 0x10000,
         gicr_base: GICR_PA,
-        gicr_size: GICR_SIZE_1CORE,
+        gicr_size: gicr_size_smp,
         uart_base: UART_PA,
         uart_irq_spi: UART_SPI_INTID,
         cmdline: cmdline_buf,
         cmdline_len,
     };
 
-    puts(&uart, "  ch34: Building Android DTB...\r\n");
+    puts(&uart, "  ch35: Building Android DTB (4-core SMP)...\r\n");
 
     // SAFETY:
     //   - KERNEL1_PA is within ANDROID_RAM_SIZE, mapped NormalRw by Stage 2.

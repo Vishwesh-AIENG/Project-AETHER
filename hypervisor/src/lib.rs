@@ -21,6 +21,7 @@ pub mod boot;        // ch07: UEFI handoff, ExitBootServices, ACPI discovery, gu
 pub mod memory;      // ch08: Stage 2 page tables, bump allocator, SMMU v3 stream table
 pub mod cpu;         // ch09: static CPU partitioning, PSCI dispatch, GIC SPI routing
 pub mod gic;         // ch10: GICv3 init, virtual interrupt injection, maintenance IRQ
+pub mod smp;         // ch35: Multi-Core SMP — secondary core bring-up, spin table, PSCI CPU_ON
 
 // Part IV — Devices (Chapters 11–16)
 pub mod passthrough; // ch11: PCIe device assignment — IOMMU groups, FLR, BAR mapping, SMMU STE
