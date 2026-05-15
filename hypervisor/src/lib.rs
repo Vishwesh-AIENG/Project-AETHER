@@ -22,6 +22,12 @@ pub mod memory;      // ch08: Stage 2 page tables, bump allocator, SMMU v3 strea
 pub mod cpu;         // ch09: static CPU partitioning, PSCI dispatch, GIC SPI routing
 pub mod gic;         // ch10: GICv3 init, virtual interrupt injection, maintenance IRQ
 pub mod smp;         // ch35: Multi-Core SMP — secondary core bring-up, spin table, PSCI CPU_ON
+pub mod irq_forward; // ch36: Physical IRQ Forwarding Validated — timer PPI + UART SPI enable,
+                     //       IrqForwardConfig (INTID classification), IrqForwardingStats (per-
+                     //       category delivery counters: timer/uart/maintenance/dropped),
+                     //       setup_irq_forwarding() (enables INTID 27/30 per-core in GICR,
+                     //       INTID 33 in GICD), record_forwarded_irq() (stats update from EL2
+                     //       handler). Gate: /proc/interrupts ticks on timer + UART lines.
 
 // Part IV — Devices (Chapters 11–16)
 pub mod passthrough; // ch11: PCIe device assignment — IOMMU groups, FLR, BAR mapping, SMMU STE

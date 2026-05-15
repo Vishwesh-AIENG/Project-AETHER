@@ -38,7 +38,8 @@ use hypervisor::arm64::regs;
 use hypervisor::arm64::virt::{configure_el2_virt, hcr_el2};
 use hypervisor::boot::{acpi_find_table, AcpiRsdp, BootContext, EfiSystemTable, GuestLaunch};
 use hypervisor::cpu::Mpidr;
-use hypervisor::gic::{discover_gic_from_madt, init_physical_gic};
+use hypervisor::gic::{aether_vgic_init, discover_gic_from_madt, init_physical_gic};
+use hypervisor::irq_forward;
 use hypervisor::kernel::{AndroidDtbConfig, MAX_ANDROID_CPUS, MAX_KERNEL_CMDLINE_LEN};
 use hypervisor::linux_boot::prepare_linux_boot;
 use hypervisor::memory::{BumpAllocator, MapKind, SmmuStreamTable, Stage2Tables};
@@ -257,7 +258,7 @@ pub extern "efiapi" fn efi_main(
     //
     // ACPI chain: RSDP → XSDT → MADT ("APIC") → GICv3 structures.
     // The RSDP was captured before ExitBootServices (boot.rs captures it first).
-    let (gicd_base, gicr_base) = discover_gic_addresses(&uart, &boot_result);
+    let (gicd_base, gicr_base, maint_intid) = discover_gic_addresses(&uart, &boot_result);
 
     // Initialize physical GIC: wake all redistributors, configure GICD, ICC.
     // Wake SMP_CORE_COUNT redistributors so the GICD can be enabled before
@@ -269,6 +270,26 @@ pub extern "efiapi" fn efi_main(
     puts(&uart, " GICR=");
     puthex64(&uart, gicr_base);
     puts(&uart, ")\r\n");
+
+    // ── 8a. VGicState init ────────────────────────────────────────────────────
+    // Read ICH_VTR_EL2 to discover the number of List Registers and record the
+    // maintenance interrupt INTID. This MUST be called before any guest entry —
+    // without it VGicState::lr_count = 0 and all IRQ injections are silently
+    // dropped (inject_hw returns false because find_free_lr iterates 0 times).
+    //
+    // Source: IHI0069 §8.2.2 (ICH_VTR_EL2.ListRegs field).
+    unsafe { aether_vgic_init(maint_intid) };
+    puts(&uart, "  VGIC: OK (maint_intid=");
+    putdec(&uart, maint_intid as usize);
+    puts(&uart, ")\r\n");
+
+    // ── 8b. IRQ forwarding setup ──────────────────────────────────────────────
+    // Enable timer PPIs (INTID 27, 30) per-core and UART SPI (INTID 33) in GICD.
+    // With HCR_EL2.IMO=1 (set by configure_el2_virt), these interrupt signals
+    // are routed to EL2 where aether_handle_irq forwards them to the guest via
+    // hardware-backed ICH_LRn entries. Gate: /proc/interrupts ticks in guest.
+    unsafe { irq_forward::setup_irq_forwarding(gicd_base, gicr_base, SMP_CORE_COUNT) };
+    puts(&uart, "  IRQ forwarding: timer PPIs + UART SPI enabled\r\n");
 
     // ── SMP: pre-register all cores, publish shared globals, wake secondaries ─
     //
@@ -368,7 +389,7 @@ pub extern "efiapi" fn efi_main(
         cmdline_len,
     };
 
-    puts(&uart, "  ch35: Building Android DTB (4-core SMP)...\r\n");
+    puts(&uart, "  ch36: Building Android DTB (4-core SMP + IRQ forwarding)...\r\n");
 
     // SAFETY:
     //   - KERNEL1_PA is within ANDROID_RAM_SIZE, mapped NormalRw by Stage 2.
@@ -401,17 +422,21 @@ pub extern "efiapi" fn efi_main(
 // GIC address discovery
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Discover GIC base addresses from ACPI MADT, falling back to QEMU defaults.
+/// Discover GIC base addresses and maintenance INTID from ACPI MADT.
+///
+/// Returns `(gicd_pa, gicr_pa, maint_intid)`.
 ///
 /// Order:
 ///   1. Parse ACPI MADT via the RSDP captured before ExitBootServices.
 ///   2. If ACPI is absent or MADT parsing fails, use hardcoded QEMU virt values.
+///
+/// The returned `maint_intid` is passed to `aether_vgic_init()` so the EL2 IRQ
+/// handler can distinguish the VGIC maintenance interrupt from device IRQs.
 fn discover_gic_addresses(
     uart: &Uart,
     boot_result: &hypervisor::boot::BootResult,
-) -> (u64, u64) {
+) -> (u64, u64, u32) {
     if let Some(rsdp_pa) = boot_result.rsdp_pa {
-        // Dereference the RSDP to get the XSDT physical address.
         // SAFETY: rsdp_pa was captured from the EFI config table before
         // ExitBootServices; the ACPI RSDP region survives ExitBootServices per
         // UEFI spec (it is in EfiACPIReclaimMemory or EfiACPIMemoryNVS).
@@ -440,14 +465,16 @@ fn discover_gic_addresses(
                     puts(uart, " (GICR fallback to QEMU default)");
                 }
                 puts(uart, "\r\n");
-                return (gic.gicd_pa, gicr);
+                return (gic.gicd_pa, gicr, gic.maint_intid);
             }
         }
     }
 
     // Fall back to QEMU virt hardcoded addresses.
+    // maint_intid = 25: standard ARM VGIC maintenance PPI for QEMU virt.
+    // Source: QEMU hw/arm/virt.c VIRT_GIC_MAINT_IRQ = 25.
     puts(uart, "  GIC: using QEMU virt defaults\r\n");
-    (GICD_PA, GICR_PA)
+    (GICD_PA, GICR_PA, 25)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
