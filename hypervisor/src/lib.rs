@@ -22,21 +22,31 @@ pub mod memory;      // ch08: Stage 2 page tables, bump allocator, SMMU v3 strea
 pub mod cpu;         // ch09: static CPU partitioning, PSCI dispatch, GIC SPI routing
 pub mod gic;         // ch10: GICv3 init, virtual interrupt injection, maintenance IRQ
 pub mod smp;         // ch35: Multi-Core SMP — secondary core bring-up, spin table, PSCI CPU_ON
-pub mod irq_forward; // ch36: Physical IRQ Forwarding Validated — timer PPI + UART SPI enable,
+pub mod irq_forward;      // ch36: Physical IRQ Forwarding Validated — timer PPI + UART SPI enable,
                      //       IrqForwardConfig (INTID classification), IrqForwardingStats (per-
                      //       category delivery counters: timer/uart/maintenance/dropped),
                      //       setup_irq_forwarding() (enables INTID 27/30 per-core in GICR,
                      //       INTID 33 in GICD), record_forwarded_irq() (stats update from EL2
                      //       handler). Gate: /proc/interrupts ticks on timer + UART lines.
 
-// Part IV — Devices (Chapters 11–16)
+// Part IV — Devices (Chapters 11–16, 37)
 pub mod passthrough; // ch11: PCIe device assignment — IOMMU groups, FLR, BAR mapping, SMMU STE
 pub mod paravirt;    // ch12: paravirtualization — virtual modem (AT/3GPP), MEMS sensor suite (BMI160
                      //       Gaussian noise models), Phone Bridge Mode toggle
 pub mod gpu;         // ch13: GPU partitioning via SR-IOV — VF enumeration, assignment, isolation
 pub mod storage;     // ch14: storage partitioning — NVMe namespace isolation, SR-IOV, exclusive attachment
 pub mod network;     // ch15: network partitioning — SR-IOV VFs, dedicated adapters, paravirt bridge fallback
-pub mod usb;         // ch16: USB controller partitioning, xHCI passthrough, cross-partition input switching
+pub mod usb;             // ch16: USB controller partitioning, xHCI passthrough, cross-partition input switching
+pub mod nvme_namespace;  // ch37: NVMe Namespace — Functional. PCIe ECAM NVMe controller enumeration,
+                         //       Admin SQ/CQ bring-up, Identify Controller (CNS=0x01, OACS[3] check),
+                         //       Namespace Management Create (opcode 0x0D, sel=0x00, NSZE/NCAP/FLBAS),
+                         //       Namespace Attachment (opcode 0x15, sel=0x00, CNTLID=0 controller list).
+                         //       NvmeNamespaceConfig (bdf/bar0_pa/nsid/size_lbas), NvmeNamespaceGate
+                         //       (nvme_list_shows_namespace + dd_write_succeeds). D-cache maintenance
+                         //       (DC CIVAC/IVAC) around every DMA buffer. AdminSqe (64 bytes, CDW0–15),
+                         //       AdminCqe (16 bytes, phase/status/result). Static 4096-aligned queue
+                         //       buffers in BSS. Gate: nvme list shows namespace; dd to /dev/nvme0n1
+                         //       exits 0.
 
 // Part V — The Windows Partition (Chapters 17–18)
 pub mod windows;     // ch17: ARM Tier Windows partition config — CPUID hypervisor leaves, Hyper-V
