@@ -38,7 +38,8 @@ use hypervisor::arm64::regs;
 use hypervisor::arm64::virt::{configure_el2_virt, hcr_el2};
 use hypervisor::boot::{acpi_find_table, AcpiRsdp, BootContext, EfiSystemTable, GuestLaunch};
 use hypervisor::gic::{discover_gic_from_madt, init_physical_gic};
-use hypervisor::guest_stub;
+use hypervisor::kernel::{AndroidDtbConfig, MAX_ANDROID_CPUS, MAX_KERNEL_CMDLINE_LEN};
+use hypervisor::linux_boot::prepare_linux_boot;
 use hypervisor::memory::{BumpAllocator, MapKind, SmmuStreamTable, Stage2Tables};
 use hypervisor::uart::Uart;
 
@@ -268,57 +269,84 @@ pub extern "efiapi" fn efi_main(
     puts(&uart, "======================================\r\n");
     puts(&uart, "\r\n");
 
-    // ── Test 2: copy bare-metal ARM64 stub into guest RAM, ERET to EL1 ──────────
+    // ── ch34: Linux Kernel Boot — build real FDT, ERET to GKI entry ─────────────
     //
-    // guest_stub_start..guest_stub_end is the position-independent stub assembled
-    // inline in guest_stub.rs. We allocate one page from the bump allocator
-    // (safe region starting at 0x48000000, already covered by the ANDROID_RAM_SIZE
-    // Stage 2 mapping), copy the stub there, then ERET to EL1 at that address.
+    // The ARM64 GKI Image is pre-loaded into guest DRAM at KERNEL1_PA by the
+    // QEMU launch script (`qemu/run-ch34.sh`) via:
+    //   -device loader,file=Image,addr=0x40800000,force-raw=on
     //
-    // Safety preconditions (all met above):
-    //   - HCR_EL2.VM = 1 ✓          (configure_el2_virt)
-    //   - VTTBR_EL2 set ✓            (configure_el2_virt)
-    //   - VBAR_EL2 set ✓             (install_vectors)
-    //   - Stub PA mapped NormalRw ✓  (covered by ANDROID_IPA_BASE + ANDROID_RAM_SIZE)
-    //   - UART PA mapped DeviceRw ✓  (0x09000000 mapped above)
-    let stub_pa = unsafe { alloc.alloc_zeroed_page() }
-        .unwrap_or_else(|| {
-            puts(&uart, "[FATAL] guest stub alloc failed\r\n");
-            hypervisor::boot::halt()
-        });
+    // AETHER builds the Android DTB from first principles, copies the blob to
+    // DTB1_PA, validates the kernel header, and ERets to the kernel entry point.
+    //
+    // ARM64 boot protocol (Documentation/arm64/booting.rst):
+    //   x0 = DTB1_PA (physical address of FDT blob)
+    //   x1 = x2 = x3 = 0
+    //   ELR_EL2 = kernel entry IPA (= KERNEL1_PA for text_offset=0 kernels)
+    //   SPSR_EL2 = EL1h, DAIF masked
 
-    let stub_src = guest_stub::stub_start();
-    let stub_bytes = guest_stub::stub_len();
+    // Kernel command line: minimal console config for QEMU serial gate test.
+    // "console=ttyAMA0" → PL011 UART (Linux name for pl011).
+    // "earlycon" → early printk before console driver loads.
+    // "rdinit=/bin/sh" → launch /bin/sh as PID 1 (no Android init needed for gate).
+    const CMDLINE: &[u8] = b"console=ttyAMA0 earlycon rdinit=/bin/sh";
 
-    // Copy stub code to the allocated page. The stub is position-independent
-    // (uses movz for absolute UART address, adr for PC-relative string data),
-    // so it runs correctly at stub_pa without relocation.
+    let mut cmdline_buf = [0u8; MAX_KERNEL_CMDLINE_LEN];
+    let cmdline_len = CMDLINE.len();
+    cmdline_buf[..cmdline_len].copy_from_slice(CMDLINE);
+
+    // GICv3 redistributor size: 128 KiB × n_cores (1 core here).
+    // Each redistributor consumes two 64 KiB frames (RD_base + SGI_base).
+    const GICR_SIZE_1CORE: u64 = 128 * 1024;
+
+    // PL011 UART SPI on QEMU virt: absolute INTID 33 (DT intid = 33 − 32 = 1).
+    // Source: QEMU hw/arm/virt.c VIRT_UART SPI allocation.
+    const UART_SPI_INTID: u32 = 33;
+
+    let dtb_cfg = AndroidDtbConfig {
+        cpu_count: 1,
+        cpu_mpidr: {
+            let mut m = [0u64; MAX_ANDROID_CPUS];
+            m[0] = 0; // primary CPU MPIDR_EL1 affinity = 0
+            m
+        },
+        memory_base: ANDROID_IPA_BASE,
+        memory_size: ANDROID_RAM_SIZE,
+        gicd_base: GICD_PA,
+        gicd_size: 0x10000,
+        gicr_base: GICR_PA,
+        gicr_size: GICR_SIZE_1CORE,
+        uart_base: UART_PA,
+        uart_irq_spi: UART_SPI_INTID,
+        cmdline: cmdline_buf,
+        cmdline_len,
+    };
+
+    puts(&uart, "  ch34: Building Android DTB...\r\n");
+
+    // SAFETY:
+    //   - KERNEL1_PA is within ANDROID_RAM_SIZE, mapped NormalRw by Stage 2.
+    //   - DTB1_PA is within ANDROID_RAM_SIZE, mapped NormalRw by Stage 2.
+    //   - The GKI Image is pre-loaded at KERNEL1_PA by the QEMU loader device.
+    //   - KERNEL1_PA is 2 MiB-aligned (0x4080_0000 = DRAM_BASE + 8 MiB).
+    let load_cfg = unsafe {
+        prepare_linux_boot(KERNEL1_PA, DTB1_PA, &dtb_cfg)
+    }.unwrap_or_else(|_| {
+        puts(&uart, "[FATAL] prepare_linux_boot failed\r\n");
+        hypervisor::boot::halt()
+    });
+
+    let entry_ipa = load_cfg.kernel_load_ipa; // text_offset=0 for GKI; validated above
+
+    puts(&uart, "  DTB at IPA=");
+    puthex64(&uart, DTB1_PA);
+    puts(&uart, "  Kernel entry IPA=");
+    puthex64(&uart, entry_ipa);
+    puts(&uart, "\r\n");
+    puts(&uart, "  ERET to Linux kernel EL1...\r\n");
+
+    // ERET: ELR_EL2 = kernel entry IPA, x0 = DTB IPA (ARM64 boot protocol).
     unsafe {
-        core::ptr::copy_nonoverlapping(stub_src, stub_pa as *mut u8, stub_bytes);
-        // D-cache clean + I-cache invalidate: ensure the copied instructions
-        // are visible as code to the EL1 instruction fetch path.
-        // For QEMU this is unnecessary but it is correct on real hardware.
-        core::arch::asm!(
-            "dc cvau, {p}",     // clean D-cache line by VA to PoU
-            "dsb ish",
-            "ic ivau, {p}",     // invalidate I-cache line by VA to PoU
-            "dsb ish",
-            "isb",
-            p = in(reg) stub_pa,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-
-    puts(&uart, "  Stub at PA=");
-    puthex64(&uart, stub_pa);
-    puts(&uart, " (");
-    puthex64(&uart, stub_bytes as u64);
-    puts(&uart, " bytes) — ERET to EL1\r\n");
-
-    // ERET: ELR_EL2 = stub_pa, SPSR_EL2 = EL1h, DAIF masked.
-    // dtb_pa = 0 (stub ignores x0).
-    unsafe {
-        GuestLaunch { entry_pa: stub_pa, dtb_pa: 0 }.eret_to_el1();
+        GuestLaunch { entry_pa: entry_ipa, dtb_pa: DTB1_PA }.eret_to_el1();
     }
 }
 
