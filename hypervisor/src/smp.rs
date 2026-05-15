@@ -201,6 +201,7 @@ pub fn secondary_entry_pa() -> u64 {
 ///
 /// # Safety
 /// Called exactly once per secondary core from the assembly trampoline.
+#[cfg(target_os = "uefi")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn aether_secondary_core_main(mpidr_raw: u64) -> ! {
     let mpidr = crate::cpu::Mpidr(mpidr_raw);

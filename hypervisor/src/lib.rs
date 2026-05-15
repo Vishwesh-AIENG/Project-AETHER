@@ -37,6 +37,17 @@ pub mod gpu;         // ch13: GPU partitioning via SR-IOV — VF enumeration, as
 pub mod storage;     // ch14: storage partitioning — NVMe namespace isolation, SR-IOV, exclusive attachment
 pub mod network;     // ch15: network partitioning — SR-IOV VFs, dedicated adapters, paravirt bridge fallback
 pub mod usb;             // ch16: USB controller partitioning, xHCI passthrough, cross-partition input switching
+pub mod pcie_assignment;  // ch38: PCIe Device Assignment and SMMU Wiring — Functional.
+                          //       EcamWindow (MCFG base + bus range; window_pa/window_size/bdf_config_pa),
+                          //       ECAM_PER_BUS_SIZE (1MiB = 32×8×4KiB), map_ecam_window() (DeviceRw
+                          //       identity map of config-space window into guest Stage 2), enable_bus_master()
+                          //       (re-asserts BME=bit2 of Command reg cleared by FLR), PcieAssignmentConfig
+                          //       (group/guest/addr/ecam_window/vmid/s2ttb_pa + validate()), PcieAssignmentGate
+                          //       (ecam_mapped + device_visible_in_lspci; passes() gate), AssignmentError
+                          //       (Passthrough(AssignError)/InvalidBusRange/EcamWindowOverflow),
+                          //       assign_device_with_ecam() — full 7-step pipeline: IOMMU check → FLR →
+                          //       core passthrough → ECAM window map → BAR map → SMMU STE (Stage-2-only) →
+                          //       BME enable → registry commit. Gate: lspci in guest lists assigned device.
 pub mod nvme_namespace;  // ch37: NVMe Namespace — Functional. PCIe ECAM NVMe controller enumeration,
                          //       Admin SQ/CQ bring-up, Identify Controller (CNS=0x01, OACS[3] check),
                          //       Namespace Management Create (opcode 0x0D, sel=0x00, NSZE/NCAP/FLBAS),

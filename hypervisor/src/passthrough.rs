@@ -385,7 +385,7 @@ pub unsafe fn trigger_flr(ecam: &PcieEcam, addr: PcieAddr) -> Result<(), AssignE
 pub const MAX_GROUP_MEMBERS: usize = 32;
 
 /// An IOMMU group: the set of StreamIDs that must be assigned together.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct IommuGroup {
     pub stream_ids: [u32; MAX_GROUP_MEMBERS],
     pub count: usize,
