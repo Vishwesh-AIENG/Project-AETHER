@@ -274,23 +274,6 @@ hypervisor/src/
 └── config-app/ (Ch 60)       ← Host Tauri configuration app
 ```
 
----
-
-## Skills Reference
-
-Each folder in `aether-skills/` primes Claude with domain knowledge before implementation:
-
-| Folder | Covers | Key Surfaces |
-|--------|--------|-------------|
-| `p1-hypervisor-core/` | Ch 1–16 | ARM64 EL2, Stage 2, SMMU, GICv3, PCIe passthrough |
-| `p2-android-design/` | Ch 17–33 | ACPI tables, AVB2, GKI kernel, AOSP build, microG |
-| `p3-arm-implementation/` | Ch 34–49 | FDT boot, NVMe MMIO, GPU SR-IOV functional, Android bring-up |
-| `p4-x86-tier/` | Ch 50–54 | VT-x VMCS/EPT, AMD-V VMCB/NPT, FEX-Emu `no_std` |
-| `p5-installer-ui/` | Ch 55–64 | Secure Boot shim+MOK, UEFI EFI apps, Tauri 2, HVC ABI |
-| `p6-hardening-release/` | Ch 65–70 | Unsafe audit, Spectre v2, HVC fuzzing, fingerprint detection |
-
----
-
 ## Critical Path
 
 ```
