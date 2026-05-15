@@ -48,6 +48,24 @@ pub mod pcie_assignment;  // ch38: PCIe Device Assignment and SMMU Wiring — Fu
                           //       assign_device_with_ecam() — full 7-step pipeline: IOMMU check → FLR →
                           //       core passthrough → ECAM window map → BAR map → SMMU STE (Stage-2-only) →
                           //       BME enable → registry commit. Gate: lspci in guest lists assigned device.
+pub mod network_passthrough; // ch40: Network Passthrough — Functional. Probes NIC PF for SR-IOV
+                         //       Extended Capability (ID=0x0010; walk from 0x100), validates
+                         //       MaxVFs ≥ AETHER_NIC_NUM_VFS (2), writes NumVFs=2 then
+                         //       VF_Enable|VF_MSE to SRIOV_CTRL (NumVFs BEFORE VF Enable per
+                         //       PCIe §9.3.3.3.2), DSB ISH. Computes Android VF BDF
+                         //       (PF+FirstVFOffset+0×VFStride). Maps VF 0 BARs as DeviceRw
+                         //       (IPA==PA) into Stage 2. Configures SMMU STEs for both stream
+                         //       IDs (stage2_only; write_ste enforces words 1–7 → DSB → word 0).
+                         //       Maps ECAM window for VF config-space visibility. Asserts Bus
+                         //       Master Enable (Command reg bit 2) on VF 0. Registers Android VF
+                         //       in NetworkPartitionRegistry with locally-administered MAC.
+                         //       NetworkPassthroughConfig (pf_addr/ecam_window/vmid/s2ttb_pa/
+                         //       stream_ids/android_vf_mac), NetworkPassthroughGate
+                         //       (mac_visible + dhcp_ready; passes() gate),
+                         //       NetworkPassthroughError (SrIovCapNotFound/InsufficientVfs/
+                         //       NoVfBarsFound/MapFailed/SmmuStreamIdOutOfRange/MacError),
+                         //       assign_nic_vf() — 10-step pipeline. AETHER_NIC_NUM_VFS=2.
+                         //       Gate: ip addr shows interface with valid MAC; DHCP succeeds.
 pub mod gpu_sriov;       // ch39: GPU SR-IOV — Functional Enable. Reads SR-IOV Extended Capability
                          //       (ID=0x0010) from Adreno GPU PF via ECAM extended config space
                          //       (walk from 0x100), validates MaxVFs ≥ 2, writes NumVFs=2 then
