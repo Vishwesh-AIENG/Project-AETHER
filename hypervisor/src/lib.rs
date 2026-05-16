@@ -136,6 +136,22 @@ pub mod aosp;        // ch21: AOSP And The Android Userspace — PartitionLayout
                      //       (AndroidProperty key/value, ro.build.type=user invariant, ro.adb.secure/
                      //       ro.secure enforcement), ArtConfig (Dalvik heap sizing: start/limit/max,
                      //       GC utilization), AospDeviceConfig (full validated configuration aggregate)
+pub mod aosp_build;  // ch42: AOSP Device Configuration and Build — DeviceMk (PRODUCT_PACKAGES,
+                     //       PRODUCT_COPY_FILES, PRODUCT_PROPERTY_OVERRIDES), BoardConfigMk
+                     //       (TARGET_ARCH=arm64, BoardPartitionSizes, SelinuxPolicyType::Enforcing,
+                     //       AvbKeySource, avb_enabled), AndroidBp (SoongModule HAL services +
+                     //       gralloc + prebuilts), MicrogIntegration (GmsCore/FakeStore/GsfProxy/
+                     //       UnifiedNlp at source level; SignatureSpoofingPolicy::Enabled required),
+                     //       MicrogLocationBackend (MLS/Beacondb/GpsOnly), LunchTarget
+                     //       (aether_arm64-user; AETHER_LUNCH_TARGET), OutputImage (Boot/System/
+                     //       Vendor/Vbmeta/Userdata required; Dtbo/Product optional),
+                     //       ImageGateState (produced/non_empty/within_size_limit; passes()),
+                     //       AospBuildGate (lunch_target_registered + avb_verified + all required
+                     //       images pass(); gate: lunch aether_arm64-user && m produces bootable
+                     //       partition images), AospBuildConfig (device_mk/board_config/android_bp/
+                     //       microg/lunch_target + validate(); default_aether() constructor).
+                     //       Gate: lunch aether_arm64-user && m → boot.img system.img vendor.img
+                     //       vbmeta.img userdata.img; avbtool verify_image passes.
 pub mod microg;      // ch22: The microG Substitution — GmsService coverage map (Authentication/FCM/
                      //       FusedLocation Full; PlayIntegrity Stub; Pay/Cast/AndroidAuto/MlKit
                      //       NotImplemented), SignatureSpoofingPolicy (framework patch required),
