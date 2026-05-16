@@ -37,6 +37,28 @@ pub mod gpu;         // ch13: GPU partitioning via SR-IOV — VF enumeration, as
 pub mod storage;     // ch14: storage partitioning — NVMe namespace isolation, SR-IOV, exclusive attachment
 pub mod network;     // ch15: network partitioning — SR-IOV VFs, dedicated adapters, paravirt bridge fallback
 pub mod usb;             // ch16: USB controller partitioning, xHCI passthrough, cross-partition input switching
+pub mod usb_passthrough; // ch41: USB Controller and Input Switch — Functional. Implements the xHCI
+                         //       hardware pipeline: BAR scan → Stage 2 DeviceRw mapping (IPA==PA),
+                         //       SMMU STEs (stage2_only; write_ste enforces words 1–7 → DSB → word 0),
+                         //       ECAM window mapping, BME enable, HCRST (halt → USBCMD.HCRST=1 →
+                         //       poll HCRST=0), registry commit (smmu_configured=true/reset=Clean).
+                         //       Event ring interception: poll_event_ring() reads Transfer Event TRBs
+                         //       (type 32, completion code 1) from the EL2-private ring segment
+                         //       (EL2_EVENT_RING_BUF, 16 TRBs); Normal TRB data buffer pointer carries
+                         //       the 8-byte USB HID boot-protocol keyboard report; DC IVAC before read.
+                         //       Input switch: execute_xhci_input_switch() — halt → HCRST → rewrite
+                         //       SMMU STEs (new VMID/S2TTB) → execute_switch() ownership transfer →
+                         //       mark_reset_clean(). Hardware-only trigger; SoftwareSwitchForbidden on
+                         //       any hypercall path. UsbPassthroughConfig (ctrl_addr/ecam_window/
+                         //       bar0_pa/vmid/s2ttb_pa/stream_ids/kind + validate()), UsbPassthroughGate
+                         //       (keyboard_enumerated + input_switch_ready; passes() gate),
+                         //       UsbPassthroughError (BarNotFound/MapFailed/SmmuStreamIdOutOfRange/
+                         //       HcrstTimeout/HaltTimeout/RegistryError), XhciTrb (16B; cycle_bit/
+                         //       trb_type/completion_code), XhciInterrupterState (dequeue_pa/cycle_bit/
+                         //       segment), XhciErstEntry (64B; segment_base_pa/segment_size),
+                         //       assign_xhci_controller() — 7-step pipeline, init_el2_event_ring(),
+                         //       poll_event_ring(), execute_xhci_input_switch(). HidReport (8B).
+                         //       Gate: USB keyboard works in Android; Ctrl+Alt+Tab switches input.
 pub mod pcie_assignment;  // ch38: PCIe Device Assignment and SMMU Wiring — Functional.
                           //       EcamWindow (MCFG base + bus range; window_pa/window_size/bdf_config_pa),
                           //       ECAM_PER_BUS_SIZE (1MiB = 32×8×4KiB), map_ecam_window() (DeviceRw
