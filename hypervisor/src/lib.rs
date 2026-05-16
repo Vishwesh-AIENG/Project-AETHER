@@ -121,7 +121,7 @@ pub mod windows;     // ch17: ARM Tier Windows partition config — CPUID hyperv
 pub mod acpi;        // ch18: Windows ACPI tables — RSDP, XSDT, MADT (ARM GIC entries), GTDT, IORT,
                      //       FADT (hardware-reduced); checksums, byte-precise table builders
 
-// Part VI — The Android Partition (Chapters 19–23)
+// Part VI — The Android Partition (Chapters 19–45)
 pub mod bootloader;  // ch19: Android bootloader — AVB2 VBMeta verification, boot image header v3/v4,
                      //       A/B slot selection (BCB), rollback protection, kernel command line builder,
                      //       BootloaderLockState (Locked/Unlocked/Orange), KernelLaunchParams
@@ -130,6 +130,41 @@ pub mod kernel;      // ch20: Linux kernel — ARM64 Image header parser (64-byt
                      //       GKI mandatory config tracker (GkiConfig), KernelState phase machine
                      //       (Init→ImageValidated→DtbPlaced→ConfigVerified→ReadyToLaunch),
                      //       AndroidDtbConfig + build_android_dtb() for the full partition device tree
+pub mod avb_boot;    // ch43: Android Bootloader — Functional AVB. NVMe I/O queue setup (Create I/O CQ
+                     //       opcode 0x05, Create I/O SQ opcode 0x01 via admin queue), I/O Read (opcode
+                     //       0x02) for misc/vbmeta/boot partitions. AVB2 pipeline: BCB parse → A/B slot
+                     //       select → VBMeta key check → signature structural check → rollback index
+                     //       enforce → BootImageHeader v3/v4 parse → kernel cmdline build →
+                     //       KernelLaunchParams for ERET. AvbAdminState (bar0/sq_tail/cq_head/cq_phase/
+                     //       cid/dstrd; from_ch37_defaults), AvbPartitionLayout (misc/vbmeta_a/vbmeta_b/
+                     //       boot_a/boot_b; aether_defaults), AvbBootConfig (nsid/layout/trust_anchor/
+                     //       rollback_store/lock_state/kernel_load_ipa/dtb_ipa/initrd_ipa + validate()),
+                     //       AvbBootGate (header_parsed/rollback_accepted/cmdline_built/eret_ready;
+                     //       passes()), AvbBootResult (launch + gate), AvbBootError enum,
+                     //       run_avb_boot_pipeline() — 10-step pipeline. NvmeIoSqe (64B), NvmeIoCqe (16B).
+                     //       Static 4KiB-aligned BSS queue buffers. D-cache maintenance (DC CIVAC/IVAC)
+                     //       around every SQE/CQE/data buffer access.
+                     //       Gate: AVB2 verified Android slot boots; rollback_index enforced.
+pub mod kernel_defconfig; // ch44: Android Kernel and Device Tree. AETHER_GKI_DEFCONFIG — complete aarch64
+                     //       GKI defconfig (48 CONFIG_ entries: tmpfs/devtmpfs/unix/binderfs/ext4-security/
+                     //       psi/seccomp/keys/dm-crypt/netfilter/namespaces/cgroups/pstore-ram + disabled:
+                     //       VT/MAGIC_SYSRQ/CPU_BIG_ENDIAN/ANDROID_LOW_MEMORY_KILLER). Critical omissions
+                     //       that cause 70% of Android boot failures documented per entry. DefconfigEntry
+                     //       (name/DefconfigValue: Enabled/Module/Disabled), AetherGkiDefconfigValidator
+                     //       (apply: records all entries to GkiConfig; gate: AetherDefconfigGate),
+                     //       AetherDefconfigGate (all_required_enabled + gki_satisfied; passes()).
+                     //       ProductionDtbExtras (initrd_start/end_ipa/uart_clock_hz/ramoops_base/size/
+                     //       record_size; aether_defaults; validate()), ProductionDtbGate
+                     //       (dtb_built/fstab_present/initrd_addresses_present/ramoops_present; passes()),
+                     //       ProductionDtbError (RamoopsSizeNotPowerOfTwo/TooSmall/RecordSizeNotPowerOfTwo/
+                     //       SizeTooSmallForRecords/InitrdRangeInvalid/Kernel(KernelError)),
+                     //       build_production_android_dtb() — full production DTB: all ch20 nodes +
+                     //       clock-frequency on PL011 + linux,initrd-{start,end} in /chosen +
+                     //       /firmware/android/fstab/{system,vendor} (first_stage_mount/slotselect/avb) +
+                     //       /reserved-memory/ramoops@ (compatible=ramoops/reg/record-size/console-size/
+                     //       no-map). ProdDtbBuilder (8KiB struct / 1KiB strings capacity).
+                     //       Gate: build_production_android_dtb() returns Ok; dtc -I dtb -O dts confirms
+                     //       all four required node paths present; logcat shows Zygote launch.
 pub mod aosp;        // ch21: AOSP And The Android Userspace — PartitionLayout (A/B Android partitions,
                      //       size validation against NVMe namespace), TrebleManifest (HalInterface:
                      //       HIDL/AIDL HAL declarations, REQUIRED_HALS check), DeviceProperties
