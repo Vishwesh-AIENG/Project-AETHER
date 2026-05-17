@@ -165,6 +165,46 @@ pub mod kernel_defconfig; // ch44: Android Kernel and Device Tree. AETHER_GKI_DE
                      //       no-map). ProdDtbBuilder (8KiB struct / 1KiB strings capacity).
                      //       Gate: build_production_android_dtb() returns Ok; dtc -I dtb -O dts confirms
                      //       all four required node paths present; logcat shows Zygote launch.
+pub mod adreno_render;  // ch46: Adreno GPU — Rendering. Integrates Mesa freedreno (Turnip Vulkan +
+                        //       freedreno OpenGL ES) into the AOSP vendor partition. Wires Gralloc
+                        //       and HWC (drm_hwcomposer) HALs for the Adreno VF assigned in ch39.
+                        //       GpuDriverSource (MesaFreedrenoOpen / QualcommProprietary),
+                        //       GrallocVersion (Hidl4 / Aidl2), HwcImplementation (DrmHwcomposer /
+                        //       QualcommProprietary / SoftwareFallback), DisplayPipeline
+                        //       (KernelModeSetting / VirtioGpuQemu), VulkanIcdConfig
+                        //       (icd_json_path = /vendor/etc/vulkan/icd.d/freedreno.json,
+                        //       library_path = /vendor/lib64/hw/vulkan.freedreno.so, api_version
+                        //       1.3.0), GrallocHalConfig (render_node_path=/dev/dri/renderD128,
+                        //       dma_heap_path=/dev/dma_heap/system), AdrenoRenderConfig
+                        //       (aether_defaults: MesaFreedrenoOpen + DrmHwcomposer + Vulkan 1.3;
+                        //       validate: rejects proprietary/SoftwareFallback/wrong-path/old-VkAPI),
+                        //       AdrenoRenderError (ProprietaryDriverNotRedistributable/
+                        //       HwcIncompatibleWithDriverSource/SoftwareFallbackForbiddenInProduction/
+                        //       VulkanApiVersionTooOld/GrallocRenderNodePathEmpty/
+                        //       GrallocDmaHeapPathEmpty/VulkanIcdPathNotInVendor/
+                        //       VulkanLibraryNotInVendor), AdrenoRenderPhase (NotStarted→
+                        //       DrmDriverBound→GrallocReady→HwcReady→VulkanReady→
+                        //       RenderingActive→GatePassed), AdrenoRenderGate
+                        //       (vulkan_shows_adreno + glmark2_es2_runs + youtube_1080p_plays;
+                        //       passes() gate; gpu_visible() partial check),
+                        //       AdrenoRenderState (phase + gate; process_line()/gate()),
+                        //       ADRENO_RENDER_DEFCONFIG (12 entries: DRM/DRM_KMS_HELPER/DRM_MSM/
+                        //       SYNC_FILE/DMA_SHARED_BUFFER/DMABUF_HEAPS/DMABUF_HEAPS_SYSTEM/
+                        //       DRM_DISPLAY_CONNECTOR/MEDIA_SUPPORT/VIDEO_DEV/MEDIA_CONTROLLER
+                        //       required + CONFIG_FB disabled; each with silent_failure doc),
+                        //       ADRENO_SELINUX_RULES (7 TE rules: gralloc_default/
+                        //       hal_graphics_composer_default/system_server/untrusted_app/
+                        //       mediacodec; each with silent_failure doc),
+                        //       ADRENO_AOSP_BUILD_VARS (5: BOARD_GPU_DRIVERS/
+                        //       BOARD_USES_DRM_HWCOMPOSER/TARGET_USES_GRALLOC4/
+                        //       TARGET_USES_HWC2/BOARD_USES_OPENGL_RENDERER),
+                        //       ADRENO_PRODUCT_PACKAGES (8: allocator-V2-service/mapper/
+                        //       composer/libEGL_mesa/libGLESv1_mesa/libGLESv2_mesa/
+                        //       vulkan.freedreno/libvulkan_freedreno),
+                        //       RENDER_UART_* signatures (5 byte-pattern constants),
+                        //       init_adreno_render_pipeline(), contains_bytes().
+                        //       Gate: vulkaninfo shows Adreno 0x17CB; glmark2-es2 runs;
+                        //       YouTube plays 1080p with hardware decode.
 pub mod userspace_boot; // ch45: Android Userspace Boot. UART-based boot failure diagnostics,
                      //       SELinux policy violation detection, and HAL startup failure
                      //       classification for the Android partition boot sequence.
