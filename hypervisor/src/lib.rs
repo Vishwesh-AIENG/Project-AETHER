@@ -165,6 +165,40 @@ pub mod kernel_defconfig; // ch44: Android Kernel and Device Tree. AETHER_GKI_DE
                      //       no-map). ProdDtbBuilder (8KiB struct / 1KiB strings capacity).
                      //       Gate: build_production_android_dtb() returns Ok; dtc -I dtb -O dts confirms
                      //       all four required node paths present; logcat shows Zygote launch.
+pub mod userspace_boot; // ch45: Android Userspace Boot. UART-based boot failure diagnostics,
+                     //       SELinux policy violation detection, and HAL startup failure
+                     //       classification for the Android partition boot sequence.
+                     //       UserspaceBootPhase (KernelHandoff→FirstStageInit→SecondStageInit→
+                     //       SystemDaemonsStarted→HalsRegistered→ZygoteReady→HomeScreenRendered),
+                     //       BootFailureKind (FirstStageMountFailed/InitBinaryNotFound/
+                     //       SelinuxPolicyLoadFailed/SelinuxAvcDenial/HalStartupFailed/
+                     //       ZygoteCrashLoop/SystemServerCrash/SurfaceFlingerCrash/SmmuFault),
+                     //       SelinuxViolationKind (GrallocDmaBuf/SensorsIioDevice/AetherHwbinder/
+                     //       VoldNvmeDevice/UeventdDevNode/Other), SelinuxViolation + required_fix(),
+                     //       SelinuxPolicyFix (AllowGrallocDmaBuf/AllowSensorsIioDevice/
+                     //       BinderCallAetherHal/AllowVoldNvme/AllowUeventdDevNode/ReviewRequired)
+                     //       + te_source(), HalName (GraphicsAllocator/GraphicsComposer/Sensors/
+                     //       Audio/Radio/Health/Power) + interface_name()/binary_path()/
+                     //       is_critical_path(), HalStartupFailure + HalFailureCause
+                     //       (DeviceNodeMissing/SmmuFault/SelinuxDenial/BinaryNotFound/
+                     //       RegistrationFailed), UART log signature constants
+                     //       (UART_SIG_FIRST_STAGE_FAIL/INIT_NOT_FOUND/SELINUX_FAIL/AVC_DENIAL/
+                     //       ZYGOTE_READY/HOME_SCREEN/SETTINGS/BUILD_TYPE_USER/SMMU_FAULT +
+                     //       AVC sub-signatures), scan_uart_line() (byte-pattern matching,
+                     //       no heap, no regex), contains_bytes() (O(n×m) window scan),
+                     //       UserspaceBootConfig (uart_pa/max_zygote_restarts/require_all_hals/
+                     //       expected_build_type; aether_defaults(); validate()),
+                     //       UserspaceBootError (InvalidUartAddress/BuildTypeNotUser/
+                     //       FirstStageFailed/SelinuxPolicyFailed/CriticalHalFailed/
+                     //       ZygoteCrashLoop/SystemServerCrashed/BootStalled),
+                     //       UserspaceBootState (phase/zygote_restarts/avc_denial_count/
+                     //       home_screen_seen/settings_seen/build_type_user_seen/last_failure;
+                     //       new()/process_line()/gate()), UserspaceBootGate
+                     //       (home_screen_rendered + settings_opens + build_type_user; passes()),
+                     //       AetherSepolicyFix (kind/source_file/te_rule),
+                     //       AETHER_SEPOLICY_FIXES (5-entry table: gralloc/sensors/hwbinder/
+                     //       vold/ueventd TE rules), init_userspace_boot_diagnostics() pipeline.
+                     //       Gate: home screen renders; Settings opens; ro.build.type=user.
 pub mod aosp;        // ch21: AOSP And The Android Userspace — PartitionLayout (A/B Android partitions,
                      //       size validation against NVMe namespace), TrebleManifest (HalInterface:
                      //       HIDL/AIDL HAL declarations, REQUIRED_HALS check), DeviceProperties
