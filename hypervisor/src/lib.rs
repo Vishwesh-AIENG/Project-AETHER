@@ -543,6 +543,48 @@ pub mod roadmap_phase5; // ch33: Phase Five — Polish And Release. LicenseChoic
                         //       workaround), Phase5Config (aggregate validate),
                         //       Phase5Summary (phase5_complete: closes the roadmap)
 
+// Part X — x86 Tier (Chapters 50–54)
+pub mod vtx;         // ch50: Intel VT-x Foundation — VMX detection (CPUID.1.ECX[5]),
+                     //       IA32_FEATURE_CONTROL enable/lock, VMXON (enter VMX root mode),
+                     //       VMCLEAR + VMPTRLD (per-vCPU VMCS initialization), VMCS host/guest
+                     //       state fields (exact encodings from Intel SDM §24.11.2), VM-execution
+                     //       controls (primary/secondary/exit/entry), EPT 4-level setup with WB
+                     //       RAM and UC MMIO leaf entries, EPTP construction (WB memtype, 4-level
+                     //       walk), INVEPT single-context after every EPT mapping change,
+                     //       UNRESTRICTED_GUEST in secondary controls (allows pre-paging guest),
+                     //       VtxExitReason decoder (EXIT_REASON HLT=12/EPT_VIOLATION=48/CPUID=10),
+                     //       handle_vm_exit() dispatcher (HLT: advance RIP by 1, record gate;
+                     //       CPUID: advance RIP by 2; EPT_VIOLATION: terminate),
+                     //       VmxCpuFeatures (vmx_supported/true_controls_supported),
+                     //       Ia32FeatureControlMsr (locked/vmx_outside_smx; enable_and_lock()),
+                     //       VmxBasicMsr (revision_id/vmxon_region_size/true_controls),
+                     //       VmxonRegion (4 KiB, 4 KiB-aligned; revision_id in dword 0),
+                     //       VmcsRegion (4 KiB, 4 KiB-aligned; bit 31 cleared — no shadow VMCS),
+                     //       EptTable (512 × u64, 4 KiB-aligned), Eptp (WB memtype, 4-level walk,
+                     //       from_pml4_pa()), EptLeafEntry (normal_ram=WB/device_mmio=UC),
+                     //       EptTableEntry (pointing_to()), InveptDescriptor,
+                     //       invept_single_context(), VmcsGuestConfig (long_mode/real_mode),
+                     //       vmcs_write_host_state() (CR0/CR3/CR4/RSP/RIP/EFER/PAT/segments),
+                     //       vmcs_write_guest_state() (64-bit long mode or real mode entry),
+                     //       vmcs_write_exec_controls() (EPT+UNRESTRICTED_GUEST+HLT_EXIT),
+                     //       VtxFoundationConfig (vmxon_pa/vmcs_pa/ept_pml4_pa/kernel_entry_pa/
+                     //       guest_ram_base/guest_ram_size/mmio_base/mmio_size/guest_64bit;
+                     //       aether_defaults()/validate()),
+                     //       VtxFoundationGate (hlt_handled+vmresume_succeeded+vmxon_succeeded+
+                     //       ept_active+!ept_violation_seen; passes()),
+                     //       VtxFoundationPhase (NotStarted→VmxDetected→FeatureControlSet→
+                     //       VmxonComplete→VmcsInitialized→EptActive→GatePassed),
+                     //       VtxFoundationState (record_hlt_exit()/gate()/is_gate_passed()),
+                     //       VtxError (VmxNotSupported/FeatureControlLocked/VmxonFailed/
+                     //       VmclearFailed/VmptrldFailed/VmwriteHostStateFailed/
+                     //       VmwriteGuestStateFailed/VmwriteControlsFailed/Unaligned*/
+                     //       ZeroGuestRamSize/VmlaunchFailed/VmresumeFailed),
+                     //       init_vtx_foundation() — 8-step pipeline.
+                     //       Gate: first VM exit EXIT_REASON=12 (HLT); VMRESUME returns to guest.
+                     //       Raw x86 helpers: rdmsr/wrmsr/read_cr0/read_cr3/read_cr4/write_cr4,
+                     //       vmwrite/vmread/vmxon/vmclear/vmptrld (all cfg(target_arch="x86_64")).
+                     //       All non-x86_64 targets compile as no-ops (ARM64 host build safe).
+
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
 pub mod guest_stub;  // Test 2: minimal bare-metal ARM64 stub guest (prints "Guest EL1 OK", halts)
