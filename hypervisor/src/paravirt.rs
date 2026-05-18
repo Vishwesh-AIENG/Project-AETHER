@@ -504,7 +504,9 @@ impl VirtualModem {
             imei,
             operator: "T-Mobile",
             rssi_asu: 15, // −83 dBm; mid-range signal, plausible for indoors
-            reg_state: RegistrationState::HomeNetwork,
+            // NotRegistered: no SIM inserted → Android status bar shows "No SIM".
+            // Ch47 gate: gsm.sim.state=ABSENT; AT+CPIN? → SIM NOT INSERTED.
+            reg_state: RegistrationState::NotRegistered,
         })
     }
 
@@ -622,6 +624,22 @@ impl VirtualModem {
                 self.push(resp, &mut p, b"\r\nOK\r\n")?;
                 Ok(p)
             }
+
+            // AT+CPIN? — SIM PIN status (3GPP TS 27.007 §8.12)
+            // Reports SIM NOT INSERTED because AETHER has no physical SIM.
+            // Android RIL maps this to gsm.sim.state=ABSENT and shows "No SIM"
+            // in the status bar — the gate criterion for ch47.
+            b"+CPIN?" => {
+                let mut p = 0usize;
+                self.push(resp, &mut p, b"\r\n+CPIN: SIM NOT INSERTED\r\n")?;
+                self.push(resp, &mut p, b"\r\nOK\r\n")?;
+                Ok(p)
+            }
+
+            // AT+CIMI — request IMSI (3GPP TS 27.007 §5.4.7)
+            // Returns ERROR because there is no SIM from which to read an IMSI.
+            // Android RIL treats this as SIM absent (consistent with AT+CPIN?).
+            b"+CIMI" => self.write_error(resp),
 
             // AT+CMGF=1 — set SMS text mode (RIL init sequence; accepted, not acted on)
             b"+CMGF=1" => self.write_ok(resp),
@@ -1060,8 +1078,8 @@ mod tests {
         let mut resp = [0u8; AT_RESP_SIZE];
         let n = m.process_command(b"AT+CREG?", &mut resp).unwrap();
         let s = core::str::from_utf8(&resp[..n]).unwrap();
-        // HomeNetwork = 1
-        assert!(s.contains("+CREG: 0,1"), "AT+CREG? must report HomeNetwork (1)");
+        // Default is NotRegistered = 0 (no SIM → ch47 gate "phone shows No SIM").
+        assert!(s.contains("+CREG: 0,0"), "AT+CREG? must report NotRegistered (0)");
         assert!(s.ends_with("OK\r\n"), "AT+CREG? must end with OK terminator");
     }
 

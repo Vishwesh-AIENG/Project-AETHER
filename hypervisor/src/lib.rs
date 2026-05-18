@@ -205,6 +205,29 @@ pub mod adreno_render;  // ch46: Adreno GPU — Rendering. Integrates Mesa freed
                         //       init_adreno_render_pipeline(), contains_bytes().
                         //       Gate: vulkaninfo shows Adreno 0x17CB; glmark2-es2 runs;
                         //       YouTube plays 1080p with hardware decode.
+pub mod virtual_sensors_modem; // ch47: Virtual Sensors and Modem — Live. AETHER HVC vendor range
+                     //       (0x8600_0001–0x8600_0006): GET_VERSION, BRIDGE_MODE_GET/SET,
+                     //       SENSOR_READ, UPDATE_STAGE (stub), DIAG_LOG_READ (stub).
+                     //       SENSOR_READ HVC: x1=HvcSensorId (0=Accel/1=Gyro/2=Mag/3=Prox);
+                     //       returns x0=0 (ok), x1=x_bits, x2=y_bits, x3=z_bits (f32 bit
+                     //       patterns). Paravirt modem: 4 KiB shared page at AETHER_MODEM_IPA
+                     //       (0x0B00_0000); layout: cmd_ready(u32)/cmd_len(u32)/cmd_buf(256B)
+                     //       at 0x000, resp_ready(u32)/resp_len(u32)/resp_buf(256B) at 0x200.
+                     //       Polled on every WFI exit via poll_modem_on_wfi() → VirtualModem::
+                     //       process_command() (ch12 AT command set + AT+CPIN?/AT+CIMI for
+                     //       No-SIM state). VirtualSensorsAndModemConfig (imei/prng_seed/
+                     //       modem_ipa/sensor_odr_hz=100 + validate()), VirtualSensorsAndModemGate
+                     //       (accel_visible + gyro_visible + mag_visible + no_sim_shown; passes()),
+                     //       VirtualSensorsAndModemError (InvalidImei/InvalidOdr/ModemIpaNotAligned/
+                     //       ZeroPrngSeed), VirtualSensorsAndModemPhase (NotStarted→HvcRegistered→
+                     //       SensorHalStarted→ModemAttached→GatePassed), VirtualSensorsAndModemState
+                     //       (process_line()/gate()/phase()), UART_SIG_* byte pattern constants,
+                     //       is_aether_hvc(), dispatch_aether_hvc(), poll_modem_on_wfi(),
+                     //       init_virtual_sensors_and_modem(). SENSOR_KERNEL_CONFIG (4 entries:
+                     //       HVC_DRIVER/MISC_DEVICES/IIO/IIO_BUFFER), SENSOR_SELINUX_RULES (3 TE
+                     //       rules: hal_sensors_default/sensorservice/system_server→aether_device),
+                     //       SENSOR_PRODUCT_PACKAGES (3: sensors HAL service + aether_ril).
+                     //       Gate: dumpsys sensorservice shows accel/gyro/mag; phone shows No SIM.
 pub mod userspace_boot; // ch45: Android Userspace Boot. UART-based boot failure diagnostics,
                      //       SELinux policy violation detection, and HAL startup failure
                      //       classification for the Android partition boot sequence.

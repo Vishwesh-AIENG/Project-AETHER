@@ -285,17 +285,28 @@ pub unsafe extern "C" fn aether_handle_serror(_ctx: *mut GuestContext) -> ExitRe
 
 /// EC = 0x16: HVC — hypervisor call.
 ///
-/// Dispatches PSCI calls (CPU_ON / CPU_OFF / AFFINITY_INFO etc.) to
-/// `cpu::handle_psci_call`.  The SMCCC convention places the function
-/// identifier in x0 and arguments in x1–x3; the return value goes back
-/// into x0.  ELR_EL2 already points past the HVC instruction so no PC
-/// adjustment is needed here.
+/// Dispatch order:
+///   1. AETHER vendor range (0x8600_0001–0x8600_0006) → ch47 sensor/modem HVCs.
+///   2. All other function IDs → PSCI dispatch (CPU_ON / CPU_OFF / etc.).
+///
+/// The SMCCC convention places the function identifier in x0 and arguments
+/// in x1–x3; results go back into x0 (status) and optionally x1–x3 (data).
+/// ELR_EL2 already points past the HVC instruction so no PC adjustment is needed.
 #[inline]
 fn handle_hvc(ctx: &mut GuestContext, _esr: u64) -> ExitReason {
     let func_id = ctx.regs[0];
     let arg1    = ctx.regs[1];
     let arg2    = ctx.regs[2];
     let arg3    = ctx.regs[3];
+
+    // Route AETHER vendor HVCs (ch47) before PSCI so they are never
+    // misinterpreted as PSCI calls (different OEN in bits[29:24]).
+    if crate::virtual_sensors_modem::is_aether_hvc(func_id) {
+        // SAFETY: called from EL2 exception handler (IRQs masked, single core).
+        // AETHER_PARAVIRT_STATE is initialised before any guest runs.
+        unsafe { crate::virtual_sensors_modem::dispatch_aether_hvc(&mut ctx.regs) };
+        return ExitReason::ReturnToGuest;
+    }
 
     // SAFETY: mrs mpidr_el1 is always valid at EL2; aether_partition_mut
     // returns the single mutable reference to the static partition table,
@@ -335,11 +346,16 @@ fn handle_smc(ctx: &mut GuestContext, _esr: u64) -> ExitReason {
 
 /// EC = 0x01: WFI/WFE trapped from EL1.
 ///
-/// Guest is idle. AETHER can park the CPU or schedule other work.
-/// Static partitioning (Chapter 9) means the CPU stays with this guest.
+/// Guest is idle. Poll the paravirt modem shared page (ch47) on every WFI
+/// exit so that AT commands from Android's RIL are processed with
+/// sub-millisecond latency. Static CPU partitioning (ch09) means this CPU
+/// stays with this guest; there is no scheduler to call.
 #[inline]
 fn handle_wfx(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
-    // Chapter 9: CPU partitioning — for now just return to let guest re-execute.
+    // SAFETY: called from EL2 exception handler (IRQs masked). The paravirt
+    // state was initialised by init_virtual_sensors_and_modem() before this
+    // guest's first ERET; poll_modem_on_wfi() is a no-op until then.
+    unsafe { crate::virtual_sensors_modem::poll_modem_on_wfi() };
     ExitReason::ReturnToGuest
 }
 
