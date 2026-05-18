@@ -201,16 +201,12 @@ AETHER constructs device tree blobs describing Android's assigned hardware exact
 Stage 2 page tables are programmed at boot to map Android's IPA space to its assigned PA regions. Any out-of-bounds access traps to EL2, where AETHER terminates it. Each device's interrupt lines are configured to route only to Android's assigned cores via GICv3 virtualization extension. AETHER configures this once at boot; hardware enforces it thereafter.\
 \
 Chapter 18. x86 Tier \'97 DBT And VMCS Configuration\
-\pard\pardeftab560\slleading20\partightenfactor0
-
-\f2\b0\fs26 \cf0 On x86 Tier hardware (Intel or AMD), AETHER boots in VMX/SVM root mode directly on silicon with no host OS. The VMCS or VMCB is initialized with host state fields (AETHER's register state restored on every VM exit), guest state fields (Android's initial register state), VM-execution controls, and the EPT or NPT root pointing to Android's assigned physical memory region.\
+On x86 Tier hardware (Intel or AMD), AETHER boots in VMX/SVM root mode directly on silicon with no host OS. The VMCS or VMCB is initialized with host state fields (AETHER's register state restored on every VM exit), guest state fields (Android's initial register state), VM-execution controls, and the EPT or NPT root pointing to Android's assigned physical memory region.\
 FEX-Emu is initialized as the DBT engine inside the hypervisor. The JIT translation cache is allocated in hypervisor memory, inaccessible to Android. On first execution of each ARM64 basic block, DBT translates it to x86 and caches the result. Subsequent executions use the cached translation with no re-translation overhead. ARM64 system register accesses are emulated by the DBT engine to return correct values for the emulated CPU model (Cortex-X4).\
 The Android kernel and all userspace code run as ARM64 software throughout. They read ARM64 system registers, execute ARM64 instructions, and receive ARM64 exception semantics. The x86 hardware underneath is completely invisible.\
 \
 Chapter 19. The Bootloader\
-\pard\pardeftab560\slleading20\partightenfactor0
-
-\f2\b0\fs26 \cf0 The Android partition begins its life with an Android-compliant bootloader, specifically a port of U-Boot or a custom bootloader following the Android Verified Boot specification. AETHER loads the bootloader into the Android partition's memory at the entry point Android expects, and execution begins there at EL1 inside the Android partition's context.\
+The Android partition begins its life with an Android-compliant bootloader, specifically a port of U-Boot or a custom bootloader following the Android Verified Boot specification. AETHER loads the bootloader into the Android partition's memory at the entry point Android expects, and execution begins there at EL1 inside the Android partition's context.\
 The bootloader performs the same operations it would on a real Android device. It initializes its view of the platform \'97 which AETHER has prepared to look like a specific Android device, complete with device tree, ACPI-equivalent hardware description, and verified boot keys. It verifies the cryptographic signature of the Android boot image. It loads the Linux kernel into memory, places the device tree blob at the address the kernel expects, and transfers execution to the kernel entry point.\
 The verified boot subsystem reports a "locked" bootloader state, which is the state real Android devices ship in and the state SafetyNet and similar attestation systems expect. AETHER's bootloader is not actually unlocked \'97 it cryptographically verifies the Android image it loads, using keys controlled by AETHER's build system. Because AETHER is the entity that built the Android image and signed it, the verification succeeds, and the bootloader truthfully reports a locked state.\
 \pard\pardeftab560\sa40\partightenfactor0
@@ -515,7 +511,7 @@ The journey is long. The destination is clear. The work begins at the silicon an
 \f0\b\fs32 \cf0 Chapter 48: Phone Bridge Mode \'97 End to End\
 \pard\pardeftab560\slleading20\partightenfactor0
 
-\f2\b0\fs26 \cf0 Connect Android phone via USB-C. Hypervisor reads USB packets from phone\'92s ADB interface, routes real sensor and identity data via HVC response. Gate: toggle ON/OFF changes data source with no gap in stream.\
+\f2\b0\fs26 \cf0 Connect Android phone via USB-C. Hypervisor reads USB packets from phone\'92s ADB interface, Phone model for OEM identity strings (manufacturer+bootloader), routes real sensor and identity data via HVC response. Gate: toggle ON/OFF changes data source with no gap in stream.\
 \pard\pardeftab560\sa40\partightenfactor0
 
 \f0\b\fs32 \cf0 Chapter 49: App Compatibility Validation\
@@ -552,7 +548,7 @@ The journey is long. The destination is clear. The work begins at the silicon an
 \f0\b\fs32 \cf0 Chapter 53: Android on x86 \'97 Userspace\
 \pard\pardeftab560\slleading20\partightenfactor0
 
-\f2\b0\fs26 \cf0 Android kernel (ARM64 GKI) boots through DBT. x86 GPU passthrough via EPT/NPT. Gate: home screen visible on Intel/AMD hardware; glmark2-es2 runs; nproc shows all cores.\
+\f2\b0\fs26 \cf0 Android kernel (ARM64 GKI) boots through DBT via FEX-Emu (ch52). No virtio drivers in the Android kernel \'97 GPU is assigned directly to the Android partition via EPT/NPT BAR mapping and VT-d/AMD-IOMMU page tables, identical to the PCIe device assignment pipeline from ch38. The Android kernel believes it is talking to real GPU silicon; there is no paravirtualization layer and no virtio-gpu device. The hypervisor reads the GPU\'92s PCI Vendor ID from config space at boot and records which of three hardware paths is present. NVIDIA (Vendor ID 0x10DE): the Android kernel loads the nouveau DRM driver; the x86 AOSP vendor partition ships the Mesa NVK Vulkan ICD (libvulkan_nouveau.so + nouveau.icd.json at /vendor/etc/vulkan/icd.d/). AMD (Vendor ID 0x1002): the Android kernel loads the amdgpu DRM driver; the vendor partition ships the Mesa RADV Vulkan ICD (libvulkan_radv.so + radeon.icd.json). Intel Arc (Vendor ID 0x8086, PCI class 03h/02h, xe-compatible Device IDs): the Android kernel loads the xe DRM driver; the vendor partition ships the Mesa ANV Vulkan ICD (libvulkan_intel.so + intel.icd.json). All three ICDs are compiled into the x86 AOSP vendor image unconditionally; Android\'92s Vulkan loader (libvulkan.so) selects the correct ICD at runtime by matching the GPU\'92s PCI Device ID against each ICD\'92s JSON manifest \'97 only the matching ICD initialises. Gralloc and drm_hwcomposer are GPU-agnostic: they use standard DRM/KMS kernel interfaces (drmOpen, drmModeGetResources, GEM buffer allocation) and require no per-vendor HAL modifications. The x86 AOSP BoardConfig.mk sets BOARD_GPU_DRIVERS := nouveau amdgpu xe and adds the three Mesa ICD packages and their kernel module dependencies to PRODUCT_PACKAGES. EPT/NPT invalidation (INVEPT/INVLPGA) is called on every GPU BAR mapping change to prevent stale translations. The x86 GKI defconfig enables CONFIG_DRM_NOUVEAU, CONFIG_DRM_AMDGPU, and CONFIG_DRM_XE as modules; the correct module is loaded by ueventd on PCI device discovery. Gate: home screen visible on Intel/AMD/NVIDIA hardware; glmark2-es2 runs with hardware Vulkan; nproc shows all cores.\
 \pard\pardeftab560\sa40\partightenfactor0
 
 \f0\b\fs32 \cf0 Chapter 54: x86 Tier Hardware Validation\
