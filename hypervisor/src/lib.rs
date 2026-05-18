@@ -205,7 +205,39 @@ pub mod adreno_render;  // ch46: Adreno GPU — Rendering. Integrates Mesa freed
                         //       init_adreno_render_pipeline(), contains_bytes().
                         //       Gate: vulkaninfo shows Adreno 0x17CB; glmark2-es2 runs;
                         //       YouTube plays 1080p with hardware decode.
-pub mod virtual_sensors_modem; // ch47: Virtual Sensors and Modem — Live. AETHER HVC vendor range
+pub mod virtual_sensors_modem; // ch47: Virtual Sensors and Modem — Live.
+pub mod phone_bridge;    // ch48: Phone Bridge Mode — End to End. Connects a real Android phone via
+                         //       USB-C and routes its live sensor data and OEM identity strings to
+                         //       the AETHER Android partition. Layers AETHER Bridge Protocol
+                         //       (magic 0xAE_CA_FE_48; FRAME_TYPE_SENSOR/IDENTITY/HANDSHAKE) on
+                         //       top of ADB WRTE USB bulk transfers. PhoneSensorFrame (accel/gyro/
+                         //       mag + timestamp_lo; is_valid() rejects NaN/Inf), PhoneIdentity
+                         //       (manufacturer/model/bootloader 64-byte ASCII fields; is_loaded()),
+                         //       parse_bridge_frame() (magic check → type dispatch → payload decode;
+                         //       BridgeFrameResult: Sensor/Identity/Handshake/Discard/TruncatedPayload/
+                         //       VersionMismatch/MalformedPayload). ToggleBuffer (virtual_accel/gyro/
+                         //       mag + bridge_accel/gyro/mag caches; read_accel/gyro/mag(mode) prefers
+                         //       active source then falls back to the other → gap-free toggle guarantee;
+                         //       update_virtual()/update_bridge()/has_bridge_sample()/bridge_frame_count).
+                         //       PhoneBridgeReader (BRIDGE_RX_BUF_MAX accumulation buffer; process_rx_bytes
+                         //       → parse loop with re-sync on magic mismatch; partial frame carry-forward;
+                         //       handshake_complete / reset()). Global EL2 state: AETHER_TOGGLE_BUF /
+                         //       AETHER_BRIDGE_READER / AETHER_PHONE_IDENTITY (addr_of_mut! safe).
+                         //       on_bridge_usb_data() — entry from xHCI event ring (ch41).
+                         //       bridge_read_accel/gyro/mag(mode) — called by HVC SENSOR_READ handler.
+                         //       update_virtual_cache() — keeps ToggleBuffer fresh even when bridge active.
+                         //       PhoneBridgeConfig (xhci_bar0_pa/stream_ids/stream_id_count + validate()),
+                         //       PhoneBridgeGate (toggle_source_changes + no_timestamp_gap + identity_loaded;
+                         //       passes()), PhoneBridgeError (InvalidUsbBase/NoStreamIds/TooManyStreamIds),
+                         //       PhoneBridgePhase (NotStarted→UsbReady→AdbConnected→SensorStreamActive→
+                         //       IdentityLoaded→GatePassed), UART_SIG_BRIDGE_* byte-pattern constants,
+                         //       PhoneBridgeState (process_line()/gate()/phase()), BRIDGE_KERNEL_CONFIG
+                         //       (4 entries: USB_CONFIGFS/F_FS/G_ANDROID/F_ACCESSORY), BRIDGE_SELINUX_RULES
+                         //       (3 TE rules: aether_bridge_service/hal_sensors_default/system_server),
+                         //       BRIDGE_PRODUCT_PACKAGES (3: aether_bridge_service/libaetherbridge/
+                         //       AetherCompanionApp.apk), init_phone_bridge() — resets global state +
+                         //       validates config → PhoneBridgePhase::UsbReady.
+                         //       Gate: toggle ON/OFF changes data source with no gap in stream. AETHER HVC vendor range
                      //       (0x8600_0001–0x8600_0006): GET_VERSION, BRIDGE_MODE_GET/SET,
                      //       SENSOR_READ, UPDATE_STAGE (stub), DIAG_LOG_READ (stub).
                      //       SENSOR_READ HVC: x1=HvcSensorId (0=Accel/1=Gyro/2=Mag/3=Prox);
