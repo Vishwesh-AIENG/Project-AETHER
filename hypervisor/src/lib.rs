@@ -206,6 +206,46 @@ pub mod adreno_render;  // ch46: Adreno GPU — Rendering. Integrates Mesa freed
                         //       Gate: vulkaninfo shows Adreno 0x17CB; glmark2-es2 runs;
                         //       YouTube plays 1080p with hardware decode.
 pub mod virtual_sensors_modem; // ch47: Virtual Sensors and Modem — Live.
+pub mod app_compat;      // ch49: App Compatibility Validation. Automated test harness that installs
+                         //       the top-1000 Android APKs, runs UI Automator smoke tests against each
+                         //       one, and records pass/fail. Fixes compatibility bugs found during the
+                         //       run. AppTestCategory (13 categories: Messaging/SocialMedia/WebBrowsing/
+                         //       MediaPlayback/MapsNavigation/Productivity/Shopping/Photography/
+                         //       LightGaming/HeavyGaming/Utilities/HealthFitness/BankingPayment;
+                         //       is_attestation_sensitive/uses_sensors/is_gpu_intensive),
+                         //       SmokeTestStep (Launch/WaitForUi/TapFirstInteractive/AssertProcessAlive/
+                         //       AssertNoCrashDialog/ForceStop; SMOKE_TEST_SEQUENCE 6-step fixed sequence;
+                         //       SMOKE_TEST_WAIT_MS=5000), UiAutomatorOutcome (Passed/TimedOut/Crashed/
+                         //       CrashDialogShown/InstallFailed; is_passing/needs_triage),
+                         //       CompatFailureKind (AttestationRequired/MissingGmsService/CameraHalAbsent/
+                         //       NfcRequired/BluetoothLeRequired/WidevineLevelOneRequired/
+                         //       HypervisorDetected/FingerprintMismatch/NativeAbiMismatch/ArtJitAnomaly/
+                         //       AndroidIdInconsistency/Unknown; is_attestation_only/requires_fix),
+                         //       CompatBugSeverity (Critical/Major/Minor/Cosmetic; must_be_resolved),
+                         //       CompatBugFix (SystemPropertyOverride/ManifestFeatureStub/CameraStubHal/
+                         //       WidevineL3Config/SelinuxCompatRule/ArtJitWorkaround/AndroidIdPersistence/
+                         //       MicrogGsfNoopDefer; description()), CompatBugRecord (package/category/
+                         //       failure/severity/fix/resolved; needs_resolution()),
+                         //       COMPAT_KNOWN_BUG_FIXES (8-entry table; all resolved=true),
+                         //       COMPAT_SELINUX_RULES (4 TE rules: untrusted_app→aether_virtual_device/
+                         //       aether_camera_stub_device/mediadrm_device/proc_cpuinfo; each with
+                         //       silent_failure doc), COMPAT_PRODUCT_PACKAGES (4: AetherCompatHarness/
+                         //       aether_camera_stub/aether_compat_props/AuroraStore),
+                         //       AppCompatConfig (top_app_count=1000/required_pass_rate_tenths=950/
+                         //       max_consecutive_timeouts=10/smoke_test_timeout_ms=5000 + validate()),
+                         //       AppCompatGate (report_meets_target+no_unresolved_compat_bugs+
+                         //       build_type_user; passes()), AppCompatPhase (NotStarted→HarnessReady→
+                         //       ApksInstalled→SmokeTestsRunning→BugsTriaged→GatePassed),
+                         //       AppCompatState (phase/apps_passing/apps_failing/apps_attestation/
+                         //       consecutive_timeouts/bugs_resolved/build_type_user/gate_passed;
+                         //       new()/process_line()/gate()/mark_harness_ready()/should_abort()/
+                         //       total_tested()), UART_SIG_COMPAT_PASS/FAIL/ATTEST/HARNESS_INSTALLED/
+                         //       HARNESS_COMPLETE/BUGS_RESOLVED/GATE_PASS/GATE_FAIL/FATAL_EXCEPTION/
+                         //       ANR/BUILD_TYPE_USER byte-pattern constants, init_app_compat_validation(),
+                         //       AppCompatError (ZeroAppCount/PassRateExceedsOneThousand/ZeroPassRate/
+                         //       ZeroTimeoutLimit/ZeroSmokeTimeout), contains_bytes().
+                         //       Gate: ≥950/1000 apps pass (attestation-only excluded); all Critical/
+                         //       Major compat bugs resolved; ro.build.type=user.
 pub mod phone_bridge;    // ch48: Phone Bridge Mode — End to End. Connects a real Android phone via
                          //       USB-C and routes its live sensor data and OEM identity strings to
                          //       the AETHER Android partition. Layers AETHER Bridge Protocol
