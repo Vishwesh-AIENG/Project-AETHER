@@ -585,6 +585,47 @@ pub mod vtx;         // ch50: Intel VT-x Foundation — VMX detection (CPUID.1.E
                      //       vmwrite/vmread/vmxon/vmclear/vmptrld (all cfg(target_arch="x86_64")).
                      //       All non-x86_64 targets compile as no-ops (ARM64 host build safe).
 
+pub mod svm;         // ch51: AMD-V Foundation — SVM detection (CPUID.80000001h.ECX[2]),
+                     //       VM_CR.SVMDIS check (firmware lock guard), EFER.SVME enable,
+                     //       HSAVE_PA MSR (4 KiB host state save area for VMRUN/VMEXIT),
+                     //       VMCB byte-array layout (4 KiB, 4 KiB-aligned; control area 0x000–
+                     //       0x3FF + state save area 0x400–; explicit offset constants from AMD APM
+                     //       Table B-2), NPT 4-level paging (WB RAM + UC MMIO leaf entries;
+                     //       AMD64 long-mode format), TLB flush via VMCB TLB_CTL (AMD has no
+                     //       INVNPT; flush is ASID-based through TLB_CTL=FLUSH_ALL before VMRUN),
+                     //       VMCB intercepts (HLT=misc1[24] + CPUID=misc1[18] + VMRUN=misc2[0] +
+                     //       VMMCALL=misc2[1] + SHUTDOWN=misc1[31]), NP_ENABLE (nested_ctl bit 0) +
+                     //       N_CR3 (nested_cr3 = NPT PML4 PA), guest ASID=1, VMCB_CLEAN=0 (all dirty),
+                     //       SvmCpuFeatures (svm_supported/npt_supported/asid_count/decode_assists/
+                     //       is_amd_vendor; detect() reads CPUID.80000001h + 8000000Ah + vendor string),
+                     //       SvmVmCrMsr (svmdis; read()), svm_enable_svme(),
+                     //       VmcbRegion (4 KiB byte array; read/write u8/u16/u32/u64 at explicit
+                     //       offsets; write_seg(); exit_code()/next_rip()/guest_rip()/set_guest_rip();
+                     //       request_npt_tlb_flush() sets TLB_CTL=FLUSH_ALL + CLEAN=0),
+                     //       SvmHsaveRegion (4 KiB; processor-managed layout),
+                     //       NptTable (512 × u64, 4 KiB-aligned), NptLeafEntry (normal_ram=WB/
+                     //       device_mmio=UC), NptTableEntry (pointing_to()),
+                     //       vmcb_write_guest_state() (64-bit long mode or real mode; 16-byte
+                     //       AMD VMCB segment descriptor format: sel+attrib+limit+base),
+                     //       vmcb_write_intercepts(), vmcb_write_npt(),
+                     //       handle_vm_exit() (HLT→nRIP-then-manual-fallback; CPUID; VMMCALL;
+                     //       NPF→Terminate; INVALID→Terminate),
+                     //       SvmFoundationConfig (vmcb_pa/hsave_pa/npt_pml4_pa/kernel_entry_pa/
+                     //       guest_ram_base/guest_ram_size/mmio_base/mmio_size/guest_64bit;
+                     //       aether_defaults()/validate()),
+                     //       SvmFoundationGate (hlt_handled+vmrun_succeeded+svme_enabled+
+                     //       npt_active+!npt_fault_seen; passes()),
+                     //       SvmFoundationPhase (NotStarted→SvmDetected→SvmeEnabled→
+                     //       HsaveConfigured→VmcbInitialized→NptActive→GatePassed),
+                     //       SvmFoundationState (gate()/is_gate_passed()),
+                     //       SvmError (SvmNotSupported/SvmDisabledByFirmware/NptNotSupported/
+                     //       InsufficientAsids/Unaligned*/ZeroGuestRamSize/VmrunFailed/
+                     //       NptFaultOnFirstEntry/NotAmdVendor),
+                     //       init_svm_foundation() — 8-step pipeline.
+                     //       Gate: first VMEXIT exit_code=0x58 (HLT); VMRUN returns to hypervisor.
+                     //       Raw x86 helpers: rdmsr/wrmsr/read_cr0/read_cr3/read_cr4, vmrun
+                     //       (all cfg(target_arch="x86_64")). ARM64 build compiles as no-ops.
+
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
 pub mod guest_stub;  // Test 2: minimal bare-metal ARM64 stub guest (prints "Guest EL1 OK", halts)
