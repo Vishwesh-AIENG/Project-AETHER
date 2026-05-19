@@ -626,6 +626,83 @@ pub mod svm;         // ch51: AMD-V Foundation — SVM detection (CPUID.80000001
                      //       Raw x86 helpers: rdmsr/wrmsr/read_cr0/read_cr3/read_cr4, vmrun
                      //       (all cfg(target_arch="x86_64")). ARM64 build compiles as no-ops.
 
+pub mod android_x86_userspace; // ch53: Android on x86 — Userspace. Wires the AOSP x86 vendor partition
+                         //       for three GPU paths — NVIDIA (nouveau + Mesa NVK), AMD (amdgpu +
+                         //       Mesa RADV), and Intel Arc (xe + Mesa ANV) — with the Android kernel
+                         //       believing it talks to real GPU silicon (no virtio, no paravirt
+                         //       layer). PCI vendor classification: GpuVendor (Nvidia / Amd /
+                         //       IntelArc / Unsupported), GpuDetectionResult::classify() reads
+                         //       Vendor ID + Class Code + Sub-class from ECAM. Vendor ID constants:
+                         //       NVIDIA_VENDOR_ID=0x10DE, AMD_VENDOR_ID=0x1002, INTEL_VENDOR_ID=
+                         //       0x8086. PCI_CLASS_DISPLAY=0x03, subclass 0x00=VGA / 0x02=3D
+                         //       (Intel Arc Alchemist/Battlemage) / 0x80=Display Other. Integrated
+                         //       Intel routes to Unsupported then to IntegratedIntelNotSupported
+                         //       error — ch53 covers discrete Arc only (xe driver), not i915.
+                         //       DrmKernelDriver enum (Nouveau / Amdgpu / Xe) with module_name()
+                         //       and kconfig_symbol() (CONFIG_DRM_NOUVEAU / DRM_AMDGPU / DRM_XE
+                         //       all =m so ueventd loads exactly one at PCI device probe).
+                         //       MesaIcd: vendor + library_path (/vendor/lib64/hw/vulkan.*.so) +
+                         //       icd_json_path (/vendor/etc/vulkan/icd.d/*_icd.x86_64.json) +
+                         //       api_version (Vulkan 1.3.0 = (1<<22)|(3<<12)) + aosp_package.
+                         //       MESA_ICD_NVK / MESA_ICD_RADV / MESA_ICD_ANV constants;
+                         //       MESA_ICDS_X86 slice carries all three; bundled unconditionally
+                         //       in vendor.img so runtime selection picks one. IcdSelector
+                         //       (select() / select_or_fail()) mirrors libvulkan loader walk of
+                         //       /vendor/etc/vulkan/icd.d/. X86GpuPassthroughHook (bar_index /
+                         //       bar_pa / bar_size / TlbInvalidationKind {IntelInvept |
+                         //       AmdInvlpgaOrTlbCtl} / invalidation_ack + mark_invalidated() /
+                         //       is_safe()): every BAR mapping change MUST acknowledge the
+                         //       matching TLB invalidation (vtx::invept_single_context for Intel,
+                         //       svm::VmcbRegion::request_npt_tlb_flush for AMD — AMD has no
+                         //       INVNPT; AMD-Tier uses VMCB TLB_CTL FLUSH_ALL or INVLPGA per
+                         //       page). Forgetting invalidation = stale TLB = silent isolation
+                         //       break (most dangerous AI mistake on this surface).
+                         //       X86_GKI_GPU_DEFCONFIG (14 entries: CONFIG_DRM=y + DRM_KMS_HELPER=y
+                         //       + DRM_NOUVEAU=m + DRM_AMDGPU=m + DRM_XE=m + DRM_FBDEV_EMULATION=y
+                         //       + FB=n + VT=n + SYNC_FILE=y + DMA_SHARED_BUFFER=y + DMABUF_HEAPS=y
+                         //       + MTRR=y + X86_PAT=y + AGP=n; every entry documents its silent_
+                         //       failure for triage). X86_BOARD_CONFIG_VARS (6 entries:
+                         //       BOARD_GPU_DRIVERS=nouveau amdgpu xe / TARGET_USES_GRALLOC4=true /
+                         //       TARGET_USES_HWC2=true / BOARD_USES_DRM_HWCOMPOSER=true /
+                         //       TARGET_ARCH=arm64 / BOARD_KERNEL_CMDLINE_OVERRIDES — image is ARM64,
+                         //       FEX translates at runtime). X86_PRODUCT_PACKAGES (14 packages:
+                         //       vulkan.nouveau / vulkan.radv / vulkan.intel + graphics.allocator-V2 /
+                         //       mapper / composer3 + libdrm{,_intel,_amdgpu,_nouveau} +
+                         //       drm_hwcomposer.aether + libEGL_mesa / libGLESv{1,2}_mesa).
+                         //       X86_SELINUX_RULES (8 TE rules: hal_graphics_composer_default /
+                         //       gralloc_default / untrusted_app / mediacodec / surfaceflinger /
+                         //       ueventd / init / dma_heap_device; each documents silent_failure).
+                         //       UART signatures: X86_UART_SIG_GPU_DETECTED / NOUVEAU_BOUND /
+                         //       AMDGPU_BOUND / XE_BOUND / VULKAN_INIT / HWC_READY / HOME_SCREEN /
+                         //       GLMARK2_RUNNING / NPROC_ALL_CORES / FEX_GRAPHICS_LIVE.
+                         //       AndroidX86Config (aether_defaults: every flag true; validate()
+                         //       enforces MissingDrmDriver / MissingVulkanIcd / MissingIcdManifest /
+                         //       SelinuxAvcDenial / InvalidConfig with precise error per missing
+                         //       piece), AndroidX86Gate (home_screen_visible + glmark2_es2_runs +
+                         //       vulkan_hw_active + nproc_all_cores + build_type_user + no_software_
+                         //       fallback; passes() requires ALL six; graphics_stack_live() partial
+                         //       check), AndroidX86Error (NoDisplayController / UnknownGpuVendor /
+                         //       IntegratedIntelNotSupported / MissingDrmDriver / MissingVulkanIcd /
+                         //       MissingIcdManifest / BarMappingFailed / InvalidationNotAcknowledged
+                         //       — explicit error if INVEPT/INVLPGA forgotten / SoftwareRendering
+                         //       Forbidden — Swiftshader/Lavapipe rejected in production /
+                         //       SelinuxAvcDenial / Glmark2DidNotUseHardware / NprocDoesNotMatch
+                         //       Host / InvalidConfig), AndroidX86Phase (NotStarted → GpuVendor
+                         //       Detected → KernelModulesLoaded → DrmDeviceVisible → IcdSelected →
+                         //       VulkanInitialized → DrmHwcLaunched → HomeScreenRendered →
+                         //       GatePassed; strictly ordered), AndroidX86State (process_line() /
+                         //       record_bar_mapping() / mark_invalidation_acked() / all_invalidations_
+                         //       acked() / gate() / is_gate_passed()), init_android_x86_userspace()
+                         //       — 9-step pipeline (validate config → classify vendor → reject
+                         //       Unsupported / integrated Intel → select DRM driver → verify kernel
+                         //       has module → select Mesa ICD → mark IcdSelected → reject software
+                         //       fallback → enable no_software_fallback gate bit). pre_flight_
+                         //       summary() emits banner counts for the build system.
+                         //       Gate: home screen visible on Intel/AMD/NVIDIA hardware; glmark2-
+                         //       es2 runs with hardware Vulkan; nproc shows all cores; vk
+                         //       GetPhysicalDeviceProperties returns matching vendor's PCI ID; no
+                         //       software-rendering fallback; ro.build.type=user.
+
 pub mod fex_integration; // ch52: FEX-Emu Integration in Hypervisor — embeds FEX-Emu (ARM64 → x86_64
                          //       dynamic binary translator) into the EFI image as a no_std static
                          //       library. Host OS dependencies (malloc/free, pthread, file I/O)
