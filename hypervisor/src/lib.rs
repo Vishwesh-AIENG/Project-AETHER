@@ -14,14 +14,21 @@ pub mod fingerprint; // ch02: fingerprint sources and elimination strategies
 pub mod partition;   // ch03: non-negotiables encoded as types
 
 // Part II — The Silicon (Chapters 4–6)
+#[cfg(target_arch = "aarch64")]
 pub mod arm64; // ch04: ARM64 substrate — regs, barriers, paging constants
 
 // Part III — The Hypervisor (Chapters 7–11)
+#[cfg(target_arch = "aarch64")]
 pub mod boot;        // ch07: UEFI handoff, ExitBootServices, ACPI discovery, guest ERET
+#[cfg(target_arch = "aarch64")]
 pub mod memory;      // ch08: Stage 2 page tables, bump allocator, SMMU v3 stream table
+#[cfg(target_arch = "aarch64")]
 pub mod cpu;         // ch09: static CPU partitioning, PSCI dispatch, GIC SPI routing
+#[cfg(target_arch = "aarch64")]
 pub mod gic;         // ch10: GICv3 init, virtual interrupt injection, maintenance IRQ
+#[cfg(target_arch = "aarch64")]
 pub mod smp;         // ch35: Multi-Core SMP — secondary core bring-up, spin table, PSCI CPU_ON
+#[cfg(target_arch = "aarch64")]
 pub mod irq_forward;      // ch36: Physical IRQ Forwarding Validated — timer PPI + UART SPI enable,
                      //       IrqForwardConfig (INTID classification), IrqForwardingStats (per-
                      //       category delivery counters: timer/uart/maintenance/dropped),
@@ -30,13 +37,19 @@ pub mod irq_forward;      // ch36: Physical IRQ Forwarding Validated — timer P
                      //       handler). Gate: /proc/interrupts ticks on timer + UART lines.
 
 // Part IV — Devices (Chapters 11–16, 37)
+#[cfg(target_arch = "aarch64")]
 pub mod passthrough; // ch11: PCIe device assignment — IOMMU groups, FLR, BAR mapping, SMMU STE
 pub mod paravirt;    // ch12: paravirtualization — virtual modem (AT/3GPP), MEMS sensor suite (BMI160
                      //       Gaussian noise models), Phone Bridge Mode toggle
+#[cfg(target_arch = "aarch64")]
 pub mod gpu;         // ch13: GPU partitioning via SR-IOV — VF enumeration, assignment, isolation
+#[cfg(target_arch = "aarch64")]
 pub mod storage;     // ch14: storage partitioning — NVMe namespace isolation, SR-IOV, exclusive attachment
+#[cfg(target_arch = "aarch64")]
 pub mod network;     // ch15: network partitioning — SR-IOV VFs, dedicated adapters, paravirt bridge fallback
+#[cfg(target_arch = "aarch64")]
 pub mod usb;             // ch16: USB controller partitioning, xHCI passthrough, cross-partition input switching
+#[cfg(target_arch = "aarch64")]
 pub mod usb_passthrough; // ch41: USB Controller and Input Switch — Functional. Implements the xHCI
                          //       hardware pipeline: BAR scan → Stage 2 DeviceRw mapping (IPA==PA),
                          //       SMMU STEs (stage2_only; write_ste enforces words 1–7 → DSB → word 0),
@@ -59,6 +72,7 @@ pub mod usb_passthrough; // ch41: USB Controller and Input Switch — Functional
                          //       assign_xhci_controller() — 7-step pipeline, init_el2_event_ring(),
                          //       poll_event_ring(), execute_xhci_input_switch(). HidReport (8B).
                          //       Gate: USB keyboard works in Android; Ctrl+Alt+Tab switches input.
+#[cfg(target_arch = "aarch64")]
 pub mod pcie_assignment;  // ch38: PCIe Device Assignment and SMMU Wiring — Functional.
                           //       EcamWindow (MCFG base + bus range; window_pa/window_size/bdf_config_pa),
                           //       ECAM_PER_BUS_SIZE (1MiB = 32×8×4KiB), map_ecam_window() (DeviceRw
@@ -70,6 +84,7 @@ pub mod pcie_assignment;  // ch38: PCIe Device Assignment and SMMU Wiring — Fu
                           //       assign_device_with_ecam() — full 7-step pipeline: IOMMU check → FLR →
                           //       core passthrough → ECAM window map → BAR map → SMMU STE (Stage-2-only) →
                           //       BME enable → registry commit. Gate: lspci in guest lists assigned device.
+#[cfg(target_arch = "aarch64")]
 pub mod network_passthrough; // ch40: Network Passthrough — Functional. Probes NIC PF for SR-IOV
                          //       Extended Capability (ID=0x0010; walk from 0x100), validates
                          //       MaxVFs ≥ AETHER_NIC_NUM_VFS (2), writes NumVFs=2 then
@@ -88,6 +103,7 @@ pub mod network_passthrough; // ch40: Network Passthrough — Functional. Probes
                          //       NoVfBarsFound/MapFailed/SmmuStreamIdOutOfRange/MacError),
                          //       assign_nic_vf() — 10-step pipeline. AETHER_NIC_NUM_VFS=2.
                          //       Gate: ip addr shows interface with valid MAC; DHCP succeeds.
+#[cfg(target_arch = "aarch64")]
 pub mod gpu_sriov;       // ch39: GPU SR-IOV — Functional Enable. Reads SR-IOV Extended Capability
                          //       (ID=0x0010) from Adreno GPU PF via ECAM extended config space
                          //       (walk from 0x100), validates MaxVFs ≥ 2, writes NumVFs=2 then
@@ -104,6 +120,7 @@ pub mod gpu_sriov;       // ch39: GPU SR-IOV — Functional Enable. Reads SR-IOV
                          //       MapFailed/RegistryError/StreamIdOutOfRange), compute_vf_addr(),
                          //       assign_gpu_vfs() — 7-step pipeline. QUALCOMM_VENDOR_ID=0x17CB.
                          //       Gate: cat /sys/class/drm/card0/device/vendor shows 0x17cb in Android.
+#[cfg(target_arch = "aarch64")]
 pub mod nvme_namespace;  // ch37: NVMe Namespace — Functional. PCIe ECAM NVMe controller enumeration,
                          //       Admin SQ/CQ bring-up, Identify Controller (CNS=0x01, OACS[3] check),
                          //       Namespace Management Create (opcode 0x0D, sel=0x00, NSZE/NCAP/FLBAS),
@@ -130,6 +147,7 @@ pub mod kernel;      // ch20: Linux kernel — ARM64 Image header parser (64-byt
                      //       GKI mandatory config tracker (GkiConfig), KernelState phase machine
                      //       (Init→ImageValidated→DtbPlaced→ConfigVerified→ReadyToLaunch),
                      //       AndroidDtbConfig + build_android_dtb() for the full partition device tree
+#[cfg(target_arch = "aarch64")]
 pub mod avb_boot;    // ch43: Android Bootloader — Functional AVB. NVMe I/O queue setup (Create I/O CQ
                      //       opcode 0x05, Create I/O SQ opcode 0x01 via admin queue), I/O Read (opcode
                      //       0x02) for misc/vbmeta/boot partitions. AVB2 pipeline: BCB parse → A/B slot
@@ -205,6 +223,7 @@ pub mod adreno_render;  // ch46: Adreno GPU — Rendering. Integrates Mesa freed
                         //       init_adreno_render_pipeline(), contains_bytes().
                         //       Gate: vulkaninfo shows Adreno 0x17CB; glmark2-es2 runs;
                         //       YouTube plays 1080p with hardware decode.
+#[cfg(target_arch = "aarch64")]
 pub mod virtual_sensors_modem; // ch47: Virtual Sensors and Modem — Live.
 pub mod app_compat;      // ch49: App Compatibility Validation. Automated test harness that installs
                          //       the top-1000 Android APKs, runs UI Automator smoke tests against each
@@ -246,6 +265,7 @@ pub mod app_compat;      // ch49: App Compatibility Validation. Automated test h
                          //       ZeroTimeoutLimit/ZeroSmokeTimeout), contains_bytes().
                          //       Gate: ≥950/1000 apps pass (attestation-only excluded); all Critical/
                          //       Major compat bugs resolved; ro.build.type=user.
+#[cfg(target_arch = "aarch64")]
 pub mod phone_bridge;    // ch48: Phone Bridge Mode — End to End. Connects a real Android phone via
                          //       USB-C and routes its live sensor data and OEM identity strings to
                          //       the AETHER Android partition. Layers AETHER Bridge Protocol
@@ -837,6 +857,8 @@ pub mod fex_integration; // ch52: FEX-Emu Integration in Hypervisor — embeds F
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
+#[cfg(target_arch = "aarch64")]
 pub mod guest_stub;  // Test 2: minimal bare-metal ARM64 stub guest (prints "Guest EL1 OK", halts)
+#[cfg(target_arch = "aarch64")]
 pub mod linux_boot;  // ch34: Linux kernel boot — DtbBuilder wiring, FDT emit, KernelState phase
                      //       machine, ERET to ARM64 GKI entry point. Gate: GKI boots to shell.

@@ -157,18 +157,26 @@ pub fn wake_secondary_core(target_affinity: u64, entry_point: u64, context_id: u
 /// - Must not be called for a core that is already executing.
 /// - Must be called from the primary core's EL2 context during boot.
 pub unsafe fn psci_cpu_on_hvc(target_mpidr: u64, entry_pa: u64, ctx: u64) -> i64 {
-    let result: i64;
-    unsafe {
-        asm!(
-            "hvc #0",
-            inout("x0") crate::cpu::psci::CPU_ON_64 as u64 => result,
-            in("x1") target_mpidr,
-            in("x2") entry_pa,
-            in("x3") ctx,
-            options(nomem, nostack),
-        );
+    #[cfg(target_arch = "aarch64")]
+    {
+        let result: i64;
+        unsafe {
+            asm!(
+                "hvc #0",
+                inout("x0") crate::cpu::psci::CPU_ON_64 as u64 => result,
+                in("x1") target_mpidr,
+                in("x2") entry_pa,
+                in("x3") ctx,
+                options(nomem, nostack),
+            );
+        }
+        result
     }
-    result
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = (target_mpidr, entry_pa, ctx);
+        crate::cpu::psci::SUCCESS
+    }
 }
 
 /// Physical address of the `aether_secondary_entry` assembly trampoline.
@@ -248,6 +256,7 @@ pub unsafe extern "C" fn aether_secondary_core_main(mpidr_raw: u64) -> ! {
             // ARM64 boot protocol (Documentation/arm64/booting.rst):
             //   x0 = context_id (device tree / secondary boot data)
             //   x1 = x2 = x3 = 0 (Linux checks these are zero)
+            #[cfg(target_arch = "aarch64")]
             unsafe {
                 asm!(
                     "msr elr_el2,  {elr}",
@@ -263,8 +272,13 @@ pub unsafe extern "C" fn aether_secondary_core_main(mpidr_raw: u64) -> ! {
                     options(noreturn, nomem, nostack),
                 );
             }
+            #[cfg(not(target_arch = "aarch64"))]
+            { let _ = (ep, ctx); }
         }
+        #[cfg(target_arch = "aarch64")]
         unsafe { asm!("wfe", options(nomem, nostack, preserves_flags)); }
+        #[cfg(not(target_arch = "aarch64"))]
+        core::hint::spin_loop();
     }
 }
 

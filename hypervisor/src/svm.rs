@@ -709,9 +709,13 @@ impl SvmCpuFeatures {
         let edx: u32;
         unsafe {
             core::arch::asm!(
+                "mov {tmp:r}, rbx",
                 "mov eax, 0",
                 "cpuid",
-                out("ebx") ebx,
+                "mov {ebx_out:e}, ebx",
+                "mov rbx, {tmp:r}",
+                tmp = out(reg) _,
+                ebx_out = out(reg) ebx,
                 out("ecx") ecx,
                 out("edx") edx,
                 out("eax") _,
@@ -728,11 +732,13 @@ impl SvmCpuFeatures {
         let ecx1: u32;
         unsafe {
             core::arch::asm!(
+                "mov {tmp:r}, rbx",
                 "mov eax, 0x80000001",
                 "cpuid",
+                "mov rbx, {tmp:r}",
+                tmp = out(reg) _,
                 out("ecx") ecx1,
                 out("eax") _,
-                out("ebx") _,
                 out("edx") _,
                 options(nomem, nostack)
             );
@@ -746,10 +752,14 @@ impl SvmCpuFeatures {
             let edx_svm: u32;
             unsafe {
                 core::arch::asm!(
+                    "mov {tmp:r}, rbx",
                     "mov eax, 0x8000000A",
                     "cpuid",
+                    "mov {ebx_out:e}, ebx",
+                    "mov rbx, {tmp:r}",
+                    tmp = out(reg) _,
+                    ebx_out = out(reg) ebx_svm,
                     out("eax") eax_svm,
-                    out("ebx") ebx_svm,
                     out("ecx") _,
                     out("edx") edx_svm,
                     options(nomem, nostack)

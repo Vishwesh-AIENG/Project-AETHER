@@ -377,11 +377,13 @@ impl VmxCpuFeatures {
         let ecx: u32;
         unsafe {
             core::arch::asm!(
+                "mov {tmp:r}, rbx",
                 "mov eax, 1",
                 "cpuid",
+                "mov rbx, {tmp:r}",
+                tmp = out(reg) _,
                 out("ecx") ecx,
                 out("eax") _,
-                out("ebx") _,
                 out("edx") _,
                 options(nomem, nostack)
             );
@@ -1108,8 +1110,8 @@ pub unsafe fn vmcs_write_host_state(host_rsp: u64, host_rip: u64) -> bool {
     { cs_sel = 0; ss_sel = 0; ds_sel = 0; es_sel = 0; fs_sel = 0; gs_sel = 0; tr_sel = 0; }
 
     // GDT and IDT base addresses.
-    let gdtr = [0u8; 10];
-    let idtr = [0u8; 10];
+    let mut gdtr = [0u8; 10];
+    let mut idtr = [0u8; 10];
     #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!("sgdt [{0}]", in(reg) gdtr.as_mut_ptr(), options(nostack));
