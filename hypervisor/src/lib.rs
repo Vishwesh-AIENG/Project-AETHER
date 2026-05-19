@@ -626,6 +626,68 @@ pub mod svm;         // ch51: AMD-V Foundation — SVM detection (CPUID.80000001
                      //       Raw x86 helpers: rdmsr/wrmsr/read_cr0/read_cr3/read_cr4, vmrun
                      //       (all cfg(target_arch="x86_64")). ARM64 build compiles as no-ops.
 
+pub mod fex_integration; // ch52: FEX-Emu Integration in Hypervisor — embeds FEX-Emu (ARM64 → x86_64
+                         //       dynamic binary translator) into the EFI image as a no_std static
+                         //       library. Host OS dependencies (malloc/free, pthread, file I/O)
+                         //       replaced with bare-metal equivalents: FexHostBindings (bump arena
+                         //       + FexSpinLock atomic test-and-set) feed FEX's allocator/lock FFI.
+                         //       JIT code cache (FEX_JIT_CACHE_SIZE = 16 MiB) lives in hypervisor
+                         //       memory; FexJitCache.guest_invisible invariant — region must never
+                         //       appear in EPT (Intel) or NPT (AMD) page tables. JIT cache leaking
+                         //       into guest = arbitrary x86_64 injection into VMX root / SVM host
+                         //       = instant hypervisor compromise. ELF64 parser (Elf64Header /
+                         //       Elf64ProgramHeader / Elf64ArmBinary): validates magic (7F 45 4C
+                         //       46), class=ELFCLASS64, data=ELFDATA2LSB, machine=EM_AARCH64 (183;
+                         //       NOT 40 which is 32-bit EM_ARM), type=ET_EXEC|ET_DYN, e_phentsize=
+                         //       56, at least one PT_LOAD segment with PF_X set. FexBlockHashTable
+                         //       (FEX_BLOCK_HASH_BUCKETS=8192, multiplicative hash with 0x9E37
+                         //       _79B9_7F4A_7C15, 8-slot linear probe): ARM64 VA → x86_64 host PA
+                         //       + length, dispatcher consults on every guest branch. extern "C"
+                         //       FFI surface to libfex.a: fex_init / fex_load_arm64_elf / fex_
+                         //       translate_block / fex_dispatch_block / fex_shutdown (FexResult
+                         //       enum). Stubbed when fex_linked feature is off so cargo check
+                         //       passes without upstream FEX in the source tree. AotPreTranslation
+                         //       Queue (FEX_AOT_QUEUE_CAPACITY=64): AOT_DEFAULT_LIBRARIES (21
+                         //       entries — libc / libm / libdl / libart / libartbase / libart
+                         //       palette / libhwui / libgui / libsurfaceflinger / libui / lib
+                         //       binder / libbinder_ndk / libutils / libcutils / libandroid_
+                         //       runtime / libvulkan / libEGL / libGLESv2 / libsqlite / libssl /
+                         //       libcrypto), pre-translated at first boot to keep ≤ 33 ms p99
+                         //       frame time during gaming workloads. LIBC_FORBIDDEN_SYMBOLS
+                         //       (malloc / calloc / realloc / free / pthread_* / fopen / fclose /
+                         //       fread / fwrite / printf / open / close / read / write / mmap /
+                         //       munmap / mprotect / exit / abort / __libc_start_main): the link
+                         //       step rejects any hypervisor.efi whose symbol table contains any
+                         //       entry from this list — single source of truth shared with build_
+                         //       system.rs. symbol_is_forbidden() + contains_bytes() helpers.
+                         //       UART signature constants FEX_HELLO_WORLD_SIGNATURE ("Hello,
+                         //       AETHER") + FEX_BLOCK_TRANSLATED_SIGNATURE ("[fex] translated
+                         //       block at pc=") + FEX_DISPATCHER_STALL_SIGNATURE ("[fex]
+                         //       dispatcher stalled"). FexIntegrationConfig (jit_cache_base_pa /
+                         //       jit_cache_size / bump_arena_base_pa / bump_arena_size / run_in_
+                         //       hypervisor / enable_aot + aether_defaults() + validate()),
+                         //       FexIntegrationGate (fex_linked + allocator_bound + jit_cache_
+                         //       ready + arm64_elf_validated + hello_world_observed + no_libc_
+                         //       symbols; passes() / hypervisor_side_ready()),
+                         //       FexIntegrationError (HostUserlandRejected — No-Boundary enforcement
+                         //       per Chapter 3 / Unaligned* / JitCacheTooSmall / BumpArenaTooSmall
+                         //       / JitBumpOverlap / NotX86_64Host / Elf* / FexLibNotLinked /
+                         //       FexInitFailed / TranslationFailed / DispatchFailed / Guest
+                         //       VisibleJitCache / LibcSymbolDetected / HelloWorldNotObserved),
+                         //       FexIntegrationPhase (NotStarted → FexLinked → AllocatorBound →
+                         //       JitCacheReady → ArmElfLoaded → BlockTranslated → HelloWorld
+                         //       Executed → GatePassed; strictly ordered),
+                         //       FexIntegrationState (process_line() / record_block_translation()
+                         //       / record_block_cache_hit() / gate() / is_gate_passed()),
+                         //       init_fex_integration() — 8-step pipeline: validate config → x86_64
+                         //       target guard → verify libfex.a linkage → bind host bindings →
+                         //       construct JIT cache + isolation check → load AOT queue → libc
+                         //       symbol guard → return state at JitCacheReady. process_elf_load()
+                         //       advances phase machine to ArmElfLoaded after parsing hello-world.
+                         //       Gate: ARM64 hello-world ELF runs through FEX on x86 hardware and
+                         //       prints "Hello, AETHER" on PL011 UART; no libc/pthread symbols in
+                         //       hypervisor.efi; JIT cache never mapped into guest EPT/NPT.
+
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
 pub mod guest_stub;  // Test 2: minimal bare-metal ARM64 stub guest (prints "Guest EL1 OK", halts)

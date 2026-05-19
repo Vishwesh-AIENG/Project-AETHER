@@ -12,3 +12,10 @@ path = "src/main.rs"
 name = "hypervisor"
 path = "src/lib.rs"
 
+[features]
+# ch52: link against libfex.a (FEX-Emu static archive built no_std-style).
+# When this feature is off, the extern "C" FEX FFI surface is stubbed so
+# `cargo check` succeeds without the upstream FEX dependency in the tree.
+default = []
+fex_linked = []
+
