@@ -703,6 +703,76 @@ pub mod android_x86_userspace; // ch53: Android on x86 — Userspace. Wires the 
                          //       GetPhysicalDeviceProperties returns matching vendor's PCI ID; no
                          //       software-rendering fallback; ro.build.type=user.
 
+pub mod x86_hw_validation; // ch54: x86 Tier Hardware Validation — capstone of the x86 tier
+                         //       (Ch50–54). Both Intel (Core Ultra 7 165H, Family=0x06 Model=0xAA)
+                         //       AND AMD (Ryzen 9 7950X, Family=0x19 Model=0x61) must independently
+                         //       boot Android through FEX-Emu before this gate passes.
+                         //       Phase3GateCriterion: intel_passed AND amd_passed AND fex_in_
+                         //       hypervisor AND no_workaround_accepted AND build_type_user — all five
+                         //       must hold simultaneously; a single false collapses the gate.
+                         //       CPUID vendor detection: CPUID_VENDOR_INTEL=b"GenuineIntel" (12 B,
+                         //       CPUID leaf 0 EBX+EDX+ECX) / CPUID_VENDOR_AMD=b"AuthenticAMD" (12 B);
+                         //       CpuVendor::from_cpuid_string() matches raw CPUID output.
+                         //       Hardware target tables: X86_INTEL_HW_TARGETS (Core Ultra 7 165H —
+                         //       Meteor Lake-H; stepping 0x04; codename MeteorLakeH) /
+                         //       X86_AMD_HW_TARGETS (Ryzen 9 7950X — Raphael; stepping 0x02;
+                         //       codename Raphael); X86HwTarget {vendor / cpu_family / cpu_model /
+                         //       stepping / name}.
+                         //       Per-vendor accounting: X86HwValidationPair {vendor / foundation_gate_
+                         //       passed / android_booted / mapping_changes / invalidations_acked /
+                         //       fex_confirmed / no_workaround}; is_valid() requires all flags +
+                         //       mapping_changes==invalidations_acked; record_mapping_change() /
+                         //       mark_invalidation_acked() enforce the EPT/NPT invariant at runtime.
+                         //       EPT/NPT invalidation invariant: every guest mapping change MUST be
+                         //       followed by INVEPT single-context (Intel, vtx::invept_single_context)
+                         //       or TLB_CTL FLUSH_ALL before VMRUN (AMD, svm::VmcbRegion::request_npt_
+                         //       tlb_flush); AMD has no INVNPT; forgetting invalidation = stale TLB =
+                         //       silent isolation break (most dangerous mistake on this surface).
+                         //       X86HwValidationGate: intel_passed / amd_passed / fex_in_hypervisor /
+                         //       no_workaround_accepted / build_type_user; passes() requires all five;
+                         //       hypervisor_side_ready() checks fex_in_hypervisor + no_workaround_accepted.
+                         //       X86HwValidationConfig (8 fields: intel_vtx_gate_passed / amd_svm_gate_
+                         //       passed / fex_integration_gate_passed / android_x86_intel_gate_passed /
+                         //       android_x86_amd_gate_passed / ept_npt_invalidation_enforced /
+                         //       workaround_accepted / build_type_user; aether_defaults() all true
+                         //       except workaround_accepted=false; validate() emits one distinct error
+                         //       per failing check — 8 error variants).
+                         //       X86HwValidationError (13 variants: IntelVtxGateNotPassed /
+                         //       AmdSvmGateNotPassed / FexNotInHypervisor / AndroidX86IntelNotPassed /
+                         //       AndroidX86AmdNotPassed / EptNptInvalidationMissing / Workaround
+                         //       Accepted / BuildTypeNotUser / IntelAndroidBootFailed /
+                         //       AmdAndroidBootFailed / EptMappingNotInvalidated /
+                         //       NptMappingNotFlushed / InvalidConfig).
+                         //       X86HwValidationPhase (9 phases, strictly ordered via PartialOrd/Ord:
+                         //       NotStarted → IntelVtxVerified → AmdSvmVerified → BothVendorsVerified
+                         //       → FexModeConfirmed → EptNptInvalidationsVerified → IntelAndroid
+                         //       Booted → AmdAndroidBooted → GatePassed); process_line() advances
+                         //       forward-only — never regresses.
+                         //       UART signature constants (12, all 7-bit ASCII): UART_SIG_INTEL_VTX_
+                         //       VALIDATED / AMD_SVM_VALIDATED / FEX_IN_HYPERVISOR / EPT_INVALIDATIONS_
+                         //       COMPLETE / NPT_INVALIDATIONS_COMPLETE / ANDROID_BOOT_INTEL_OK /
+                         //       ANDROID_BOOT_AMD_OK / X86_HW_GATE_PASSED / WORKAROUND_ACCEPTED /
+                         //       HOME_SCREEN / BUILD_TYPE_USER / FEX_GRAPHICS_LIVE.
+                         //       X86_HW_VALIDATION_DEFCONFIG (10 kernel config entries: CONFIG_HZ_1000
+                         //       / CONFIG_PREEMPT / CONFIG_NO_HZ_FULL / CONFIG_CPU_FREQ_DEFAULT_GOV_
+                         //       PERFORMANCE / CONFIG_CRASH_DUMP / CONFIG_KEXEC / CONFIG_HAVE_KVM /
+                         //       CONFIG_HAVE_KVM_IRQCHIP / CONFIG_DEBUG_INFO_NONE /
+                         //       CONFIG_FTRACE=n; each with silent_failure for triage).
+                         //       X86_HW_VALIDATION_BUILD_VARS (5 BoardConfig vars: TARGET_BOARD_
+                         //       PLATFORM=x86_hw_validation / BOARD_VALIDATED_CPU_VENDORS /
+                         //       BOARD_EPT_NPT_INVALIDATION_ENFORCED / BOARD_FEX_MODE /
+                         //       BOARD_PHASE3_GATE; each with note documenting enforcement).
+                         //       init_x86_hw_validation() — 8-step pipeline: (1) validate config,
+                         //       (2) build Intel pair at IntelVtxVerified, (3) build AMD pair at
+                         //       AmdSvmVerified, (4) advance to BothVendorsVerified, (5) confirm FEX
+                         //       in-hypervisor → FexModeConfirmed, (6) set no_workaround_accepted,
+                         //       (7) set build_type_user, (8) return state at FexModeConfirmed.
+                         //       contains_bytes() O(n×m) window scan — no heap, no regex, mirrors
+                         //       pattern from ch53/ch52/ch45/ch49.
+                         //       No-Boundary Compliance: FEX must run InHypervisor mode; HostUserland
+                         //       violates Ch3. Gate: Intel AND AMD independently boot Android via FEX;
+                         //       EPT/NPT invalidation enforced on every mapping change; no workarounds.
+
 pub mod fex_integration; // ch52: FEX-Emu Integration in Hypervisor — embeds FEX-Emu (ARM64 → x86_64
                          //       dynamic binary translator) into the EFI image as a no_std static
                          //       library. Host OS dependencies (malloc/free, pthread, file I/O)
