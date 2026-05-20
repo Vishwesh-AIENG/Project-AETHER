@@ -81,7 +81,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 55 | Hardware Compatibility Checker | ✅ Complete |
 | 56 | AETHER Installer CLI | ✅ Complete |
 | 57 | Secure Boot Integration | ✅ Complete |
-| 58 | UEFI Boot Selector | ⬜ Not started |
+| 58 | UEFI Boot Selector | ✅ Complete |
 | 59 | Setup Wizard — GUI Frontend | ⬜ Not started |
 | 60 | Configuration App | ⬜ Not started |
 | 61 | OTA Update System | ⬜ Not started |
@@ -95,7 +95,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 69 | Documentation | ⬜ Not started |
 | 70 | Public Release | ⬜ Not started |
 
-**Progress: 57 / 70 chapters complete (81%)**
+**Progress: 58 / 70 chapters complete (83%)**
 
 ---
 
@@ -667,6 +667,35 @@ hypervisor/src/
 │                              ro.build.type=user.
 │
 │   — Part XI: Installer & Management (Chapters 55–64) —
+├── uefi_boot_selector.rs ← ch58: UEFI Boot Selector — 5-second countdown menu on GOP
+│                              framebuffer. [A]ndroid / [W]indows / [S]ettings. Default
+│                              stored in AetherDefaultTarget UEFI variable (NV+BS+RT).
+│                              OTA rollback guard via AetherBootAttempt counter (u8;
+│                              incremented pre-chainload; reset on "Hypervisor ready.").
+│                              Fires rollback when count ≥ BOOT_ATTEMPT_ROLLBACK_THRESHOLD=3.
+│                              Android chainloads \EFI\AETHER\hypervisor.efi; Windows
+│                              chainloads \EFI\Microsoft\Boot\bootmgfw.efi; Settings is
+│                              in-process (no chainload). BootTarget (Android/Windows/
+│                              Settings; to/from_variable_byte; efi_path; display_name),
+│                              BootAttemptCounter (from_raw/incremented/reset/
+│                              is_rollback_needed), OtaRollbackGuard (boot_attempt_count/
+│                              rollback_triggered/hypervisor_confirmed; on_hypervisor_ready/
+│                              pre_chainload_count), SelectorConfig (timeout_secs=5/
+│                              default_target=Android/selector_path/hypervisor_path/
+│                              windows_bootmgr_path/rollback_threshold=3; aether_defaults
+│                              +validate), SelectorGate (menu_displayed+android_chainloads
+│                              +windows_chainloads+timeout_boots_default+
+│                              default_target_persists; passes+android_path_ready),
+│                              SelectorError (12 variants), SelectorPhase (9 phases,
+│                              strictly ordered: NotStarted→SelectorStarted→VariablesRead
+│                              →FramebufferReady→MenuDisplayed→TargetSelected→
+│                              ChainloadInitiated→TargetRunning→GatePassed),
+│                              SelectorState (process_line/gate/phase/rollback_guard/
+│                              is_gate_passed), AETHER_VARIABLE_GUID, UEFI_VAR_ATTRS_NV_BS_RT,
+│                              8 UART signature constants, contains_bytes(),
+│                              init_uefi_boot_selector() 8-step pipeline.
+│                              Gate: menu_displayed+android_chainloads+windows_chainloads
+│                              +timeout_boots_default+default_target_persists.
 ├── secure_boot.rs      ← ch57: Secure Boot Integration — shim + MOK path. Installer
 │                              generates RSA-2048 key pair, signs hypervisor.efi with PE
 │                              Authenticode, writes MokNew (DER cert) + MokAuth (32 zero

@@ -728,6 +728,46 @@ pub mod android_x86_userspace; // ch53: Android on x86 — Userspace. Wires the 
 pub mod x86_hw_validation; // ch54: x86 Tier Hardware Validation
 
 // Part V — Installer & Management (Chapters 55–64)
+pub mod uefi_boot_selector; // ch58: UEFI Boot Selector — 5-second countdown menu
+                         //       ([A]ndroid / [W]indows / [S]ettings) on GOP framebuffer.
+                         //       Default stored in AetherDefaultTarget UEFI variable (NV+BS+RT).
+                         //       OTA rollback guard via AetherBootAttempt counter (u8; incremented
+                         //       before every Android chainload; zeroed on "Hypervisor ready.").
+                         //       Fires rollback when count ≥ BOOT_ATTEMPT_ROLLBACK_THRESHOLD (3).
+                         //       BootTarget (Android/Windows/Settings; to/from_variable_byte;
+                         //       efi_path(); display_name()), BootAttemptCounter (from_raw /
+                         //       incremented / reset / is_rollback_needed),
+                         //       OtaRollbackGuard (boot_attempt_count / rollback_triggered /
+                         //       hypervisor_confirmed; on_hypervisor_ready() / pre_chainload_count()),
+                         //       SelectorConfig (timeout_secs=5 / default_target=Android /
+                         //       selector_path / hypervisor_path / windows_bootmgr_path /
+                         //       rollback_threshold=3; aether_defaults() + validate()),
+                         //       SelectorGate (menu_displayed + android_chainloads +
+                         //       windows_chainloads + timeout_boots_default +
+                         //       default_target_persists; passes() + android_path_ready()),
+                         //       SelectorError (12 variants: InvalidTimeout / SelectorPathEmpty /
+                         //       HypervisorPathEmpty / WindowsBootmgrPathEmpty /
+                         //       SettingsCannotBeDefault / ZeroRollbackThreshold /
+                         //       VariableReadError / VariableWriteError / FramebufferClearFailed /
+                         //       ConOutRenderFailed / ChainloadLoadFailed / ChainloadStartFailed),
+                         //       SelectorPhase (9 phases: NotStarted→SelectorStarted→VariablesRead→
+                         //       FramebufferReady→MenuDisplayed→TargetSelected→ChainloadInitiated→
+                         //       TargetRunning→GatePassed; strictly ordered via PartialOrd/Ord),
+                         //       SelectorState (process_line() UART scanner / gate() / phase() /
+                         //       rollback_guard() / is_gate_passed()), UEFI_VAR_AETHER_DEFAULT_TARGET
+                         //       / UEFI_VAR_AETHER_BOOT_ATTEMPT / UEFI_VAR_ATTRS_NV_BS_RT /
+                         //       AETHER_VARIABLE_GUID (AE580001-0001-4E58-AE00-000000000058),
+                         //       AETHER_SELECTOR_EFI_PATH / AETHER_HYPERVISOR_EFI_PATH /
+                         //       WINDOWS_BOOTMGR_EFI_PATH / SELECTOR_TIMEOUT_SECS=5 /
+                         //       BOOT_ATTEMPT_ROLLBACK_THRESHOLD=3,
+                         //       UART signatures: SELECTOR_UART_SIG_STARTED / MENU_DISPLAYED /
+                         //       ANDROID_CHAINLOAD / WINDOWS_CHAINLOAD / SETTINGS_ENTERED /
+                         //       DEFAULT_SAVED / ROLLBACK_TRIGGERED / ATTEMPT_RESET (8 constants),
+                         //       contains_bytes() O(n×m) window scan (no heap, no regex),
+                         //       init_uefi_boot_selector() — 8-step pipeline.
+                         //       Gate: menu_displayed + android_chainloads + windows_chainloads +
+                         //       timeout_boots_default + default_target_persists; AetherDefaultTarget
+                         //       survives reboot; OTA rollback guard fires at attempt count ≥ 3.
 pub mod secure_boot;     // ch57: Secure Boot Integration — shim + MOK path.
                          //       installer generates RSA-2048 keypair, signs hypervisor.efi
                          //       with PE Authenticode, writes MokNew (DER cert) + MokAuth
