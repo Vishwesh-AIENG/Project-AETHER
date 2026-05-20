@@ -37,9 +37,11 @@
 //   - linux-ref/arch/arm64/include/asm/efi.h
 //   - linux-ref/drivers/firmware/efi/libstub/arm64-stub.c
 
+#[cfg(target_arch = "aarch64")]
 use core::arch::asm;
 use core::ffi::c_void;
 
+#[cfg(target_arch = "aarch64")]
 use crate::arm64::regs::{spsr_el2, write_elr_el2, write_spsr_el2};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -952,6 +954,7 @@ impl GuestLaunch {
     /// GUEST_ENTRY_EL1H masks FIQ, IRQ, SError, and Debug. The guest kernel
     /// is expected to unmask interrupts during its early boot sequence once
     /// its interrupt controller is initialised.
+    #[cfg(target_arch = "aarch64")]
     pub unsafe fn eret_to_el1(&self) -> ! {
         unsafe {
             // Write guest entry point into ELR_EL2.

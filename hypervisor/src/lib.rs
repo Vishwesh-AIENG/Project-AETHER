@@ -18,8 +18,10 @@ pub mod partition;   // ch03: non-negotiables encoded as types
 pub mod arm64; // ch04: ARM64 substrate — regs, barriers, paging constants
 
 // Part III — The Hypervisor (Chapters 7–11)
-#[cfg(target_arch = "aarch64")]
 pub mod boot;        // ch07: UEFI handoff, ExitBootServices, ACPI discovery, guest ERET
+#[cfg(target_arch = "x86_64")]
+pub mod boot_x86;    // x86_64 boot pipeline: ExitBootServices -> EPT/NPT build ->
+                     //       init_vtx/svm_foundation -> VMLAUNCH/VMRUN -> first VMEXIT.
 #[cfg(target_arch = "aarch64")]
 pub mod memory;      // ch08: Stage 2 page tables, bump allocator, SMMU v3 stream table
 #[cfg(target_arch = "aarch64")]

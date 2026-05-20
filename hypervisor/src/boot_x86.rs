@@ -1,0 +1,460 @@
+// AETHER x86_64 boot pipeline
+//
+// Mirrors arm64_entry::efi_main but with x86_64 privilege semantics:
+//
+//   1. UEFI calls efi_main (ring 0, long mode, paging on, NOT yet in
+//      VMX root / SVM host mode).
+//   2. We capture CPU vendor via CPUID leaf 0.
+//   3. We capture the ACPI RSDP from the EFI config table.
+//   4. ExitBootServices (BootContext::run — same as ARM path).
+//   5. ConOut is gone. Switch to direct COM1 serial output (0x3F8).
+//   6. Build a minimal EPT (Intel) or NPT (AMD) identity map covering
+//      the static `GUEST_RAM` 2 MiB region.
+//   7. Place a guest payload (single `hlt` instruction) at guest RAM
+//      offset 0.
+//   8. Branch on vendor:
+//        Intel -> init_vtx_foundation -> VMLAUNCH
+//        AMD   -> init_svm_foundation -> VMRUN
+//   9. First VMEXIT (HLT) is observed at the host VMEXIT handler
+//      (Intel) or at the instruction after VMRUN (AMD); we print the
+//      exit reason via COM1 and halt.
+//
+// Gate: serial output reads "[x86] vmexit reason=0x0C" (HLT_EXIT for
+// Intel, exit_code 0x78 for AMD).
+
+#![cfg(target_arch = "x86_64")]
+
+use core::ffi::c_void;
+use core::ptr;
+
+use crate::boot::{BootContext, EfiSystemTable};
+use crate::svm::{
+    init_svm_foundation, vmrun, NptTable, NptTableEntry,
+    SvmFoundationConfig, VmcbRegion,
+};
+use crate::vtx::{
+    init_vtx_foundation, vmread, EptTable, EptTableEntry,
+    VmcsRegion, VmxonRegion, VtxFoundationConfig,
+};
+use crate::x86_hw_validation::CpuVendor;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COM1 serial (0x3F8) — post-ExitBootServices debug output.
+// 16550 UART register layout (legacy PC).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const COM1_BASE: u16 = 0x3F8;
+const COM1_THR:  u16 = COM1_BASE + 0; // Transmit Holding Register
+const COM1_DLL:  u16 = COM1_BASE + 0; // Divisor Latch Low (when DLAB=1)
+const COM1_DLM:  u16 = COM1_BASE + 1; // Divisor Latch High (when DLAB=1)
+const COM1_IER:  u16 = COM1_BASE + 1; // Interrupt Enable Register
+const COM1_FCR:  u16 = COM1_BASE + 2; // FIFO Control Register
+const COM1_LCR:  u16 = COM1_BASE + 3; // Line Control Register
+const COM1_MCR:  u16 = COM1_BASE + 4; // Modem Control Register
+const COM1_LSR:  u16 = COM1_BASE + 5; // Line Status Register
+
+#[inline]
+unsafe fn outb(port: u16, value: u8) {
+    unsafe {
+        core::arch::asm!(
+            "out dx, al",
+            in("dx") port,
+            in("al") value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+#[inline]
+unsafe fn inb(port: u16) -> u8 {
+    let v: u8;
+    unsafe {
+        core::arch::asm!(
+            "in al, dx",
+            in("dx") port,
+            out("al") v,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    v
+}
+
+/// Initialize COM1 for 115200 8N1 polled TX. Safe to call after
+/// ExitBootServices: no UEFI dependencies.
+pub unsafe fn com1_init() {
+    unsafe {
+        outb(COM1_IER, 0x00);            // disable interrupts
+        outb(COM1_LCR, 0x80);            // enable DLAB
+        outb(COM1_DLL, 0x01);            // divisor low  = 1  (115200 baud)
+        outb(COM1_DLM, 0x00);            // divisor high = 0
+        outb(COM1_LCR, 0x03);            // 8N1, DLAB cleared
+        outb(COM1_FCR, 0xC7);            // enable + clear FIFOs, 14-byte threshold
+        outb(COM1_MCR, 0x0B);            // DTR + RTS + OUT2
+    }
+}
+
+/// Poll-wait until the Transmit Holding Register is empty, then write byte.
+#[inline]
+unsafe fn com1_putb(b: u8) {
+    unsafe {
+        // LSR bit 5 (THRE) = Transmit Holding Register Empty.
+        while inb(COM1_LSR) & 0x20 == 0 {
+            core::hint::spin_loop();
+        }
+        outb(COM1_THR, b);
+    }
+}
+
+pub unsafe fn com1_puts(s: &[u8]) {
+    for &b in s {
+        if b == b'\n' {
+            unsafe { com1_putb(b'\r'); }
+        }
+        unsafe { com1_putb(b); }
+    }
+}
+
+pub unsafe fn com1_puthex64(mut v: u64) {
+    unsafe { com1_puts(b"0x"); }
+    let mut buf = [0u8; 16];
+    for i in 0..16 {
+        let nib = ((v >> (60 - i * 4)) & 0xF) as u8;
+        buf[i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+    }
+    let _ = &mut v;
+    unsafe { com1_puts(&buf); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Static aligned regions
+//
+// All 4 KiB-aligned via repr(C, align(4096)). They live in .bss and the UEFI
+// loader marks the image's BSS pages as R/W; we keep them mapped post-EBS
+// because UEFI's page tables remain in CR3 until we replace them (we don't —
+// we reuse the firmware-set identity map).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[repr(C, align(4096))]
+struct Page4K([u8; 4096]);
+
+static mut VMXON_REGION:  VmxonRegion = VmxonRegion::new();
+static mut VMCS_REGION:   VmcsRegion  = VmcsRegion::new();
+static mut VMCB_REGION:   VmcbRegion  = VmcbRegion::new();
+static mut HSAVE_REGION:  Page4K      = Page4K([0u8; 4096]);
+
+// EPT/NPT page-table hierarchy: PML4 -> PDPT -> PD -> PT (4 levels for 4 KiB).
+static mut EPT_PML4:      Page4K      = Page4K([0u8; 4096]);
+static mut EPT_PDPT:      Page4K      = Page4K([0u8; 4096]);
+static mut EPT_PD:        Page4K      = Page4K([0u8; 4096]);
+static mut EPT_PT:        Page4K      = Page4K([0u8; 4096]);
+
+static mut NPT_PML4:      Page4K      = Page4K([0u8; 4096]);
+static mut NPT_PDPT:      Page4K      = Page4K([0u8; 4096]);
+static mut NPT_PD:        Page4K      = Page4K([0u8; 4096]);
+static mut NPT_PT:        Page4K      = Page4K([0u8; 4096]);
+
+// Host stack used as VMCS_HOST_RSP. 4 KiB; grows downward.
+static mut HOST_STACK:    Page4K      = Page4K([0u8; 4096]);
+
+// Guest RAM — 4 KiB, 4 KiB-aligned.  Offset 0 holds the guest payload (a
+// single HLT byte 0xF4).  Using 4 KiB EPT/NPT pages avoids the LLVM
+// codegen issue triggered by 2 MiB-aligned statics in the PE32+ section
+// layout for this target.
+static mut GUEST_RAM:     Page4K      = Page4K([0u8; 4096]);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EPT identity map for the GUEST_RAM 2 MiB region.
+//
+// Intel EPT format (SDM Vol. 3C Table 28-1):
+//   PML4E / PDPTE / PDE non-leaf: bits [2:0]=R/W/X, [51:12]=next-level PFN.
+//   PDE leaf (2 MiB):             bits [2:0]=R/W/X, [5:3]=memtype (6=WB),
+//                                  bit 7=PS=1,     [51:21]=page frame.
+// ─────────────────────────────────────────────────────────────────────────────
+
+unsafe fn build_ept_identity_map(guest_ram_pa: u64) {
+    let pml4 = unsafe { &mut *(ptr::addr_of_mut!(EPT_PML4) as *mut EptTable) };
+    let pdpt = unsafe { &mut *(ptr::addr_of_mut!(EPT_PDPT) as *mut EptTable) };
+    let pd   = unsafe { &mut *(ptr::addr_of_mut!(EPT_PD)   as *mut EptTable) };
+    let pt   = unsafe { &mut *(ptr::addr_of_mut!(EPT_PT)   as *mut EptTable) };
+
+    let pdpt_pa = ptr::addr_of!(EPT_PDPT) as u64;
+    let pd_pa   = ptr::addr_of!(EPT_PD)   as u64;
+    let pt_pa   = ptr::addr_of!(EPT_PT)   as u64;
+
+    pml4.set(0, EptTableEntry::pointing_to(pdpt_pa).0);
+    pdpt.set(0, EptTableEntry::pointing_to(pd_pa).0);
+    pd.set(0,   EptTableEntry::pointing_to(pt_pa).0);
+
+    // EPT PTE (4 KiB leaf) for guest_ram_pa:
+    //   bits[2:0]   = 7 (R+W+X)
+    //   bits[5:3]   = 6 (memtype WB)
+    //   bits[51:12] = PA
+    let leaf_4k: u64 = (guest_ram_pa & !0xFFFu64) | 0x07 | (6 << 3);
+    pt.set(0, leaf_4k);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NPT identity map (AMD).  Same shape as EPT but AMD format.
+// AMD APM Vol 2 §15.25.5.
+// ─────────────────────────────────────────────────────────────────────────────
+
+unsafe fn build_npt_identity_map(guest_ram_pa: u64) {
+    let pml4 = unsafe { &mut *(ptr::addr_of_mut!(NPT_PML4) as *mut NptTable) };
+    let pdpt = unsafe { &mut *(ptr::addr_of_mut!(NPT_PDPT) as *mut NptTable) };
+    let pd   = unsafe { &mut *(ptr::addr_of_mut!(NPT_PD)   as *mut NptTable) };
+    let pt   = unsafe { &mut *(ptr::addr_of_mut!(NPT_PT)   as *mut NptTable) };
+
+    let pdpt_pa = ptr::addr_of!(NPT_PDPT) as u64;
+    let pd_pa   = ptr::addr_of!(NPT_PD)   as u64;
+    let pt_pa   = ptr::addr_of!(NPT_PT)   as u64;
+
+    pml4.set(0, NptTableEntry::pointing_to(pdpt_pa).0);
+    pdpt.set(0, NptTableEntry::pointing_to(pd_pa).0);
+    pd.set(0,   NptTableEntry::pointing_to(pt_pa).0);
+    // NPT PTE (4 KiB): PRESENT | WRITABLE | USER, no PS.
+    let leaf_4k: u64 = (guest_ram_pa & !0xFFFu64) | 0x07;
+    pt.set(0, leaf_4k);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Host VMEXIT handler (Intel path)
+//
+// vmcs_write_host_state writes host_rip = address of this function. The
+// processor jumps here on every VMEXIT with:
+//   - All host state restored from VMCS host fields (CR0/CR3/CR4/EFER, ...).
+//   - RSP = VMCS_HOST_RSP (our HOST_STACK top).
+//   - Interrupts disabled (RFLAGS.IF=0).
+//
+// We do not VMRESUME here — we read the exit reason via VMREAD, print it,
+// and HLT. That is the Ch50 gate: "first VMEXIT observed."
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Host VMEXIT entry — written by VMCS_HOST_RIP.  CPU jumps here on VMEXIT
+// with all host state restored from VMCS host fields (CR0/CR3/CR4, segments,
+// EFER, RSP).  Interrupts are masked.  We read VMCS_EXIT_REASON via VMREAD,
+// print the result via COM1, and halt.  This is NOT a naked function: VMCS
+// sets RSP to a valid host stack so a normal prologue is safe.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn host_vmexit_entry() -> ! {
+    unsafe {
+        const VMCS_EXIT_REASON: u32 = 0x4402;
+        let (exit_reason, _ok) = vmread(VMCS_EXIT_REASON);
+
+        com1_puts(b"[x86] VMEXIT reason=");
+        com1_puthex64(exit_reason);
+        if exit_reason & (1u64 << 31) != 0 {
+            com1_puts(b" (VM-entry failure)\n");
+        } else {
+            let basic = exit_reason & 0xFFFF;
+            match basic {
+                0x0C => com1_puts(b" HLT_EXIT (Ch50 gate PASSED)\n"),
+                0x00 => com1_puts(b" EXCEPTION_NMI\n"),
+                0x01 => com1_puts(b" EXTERNAL_INTERRUPT\n"),
+                0x30 => com1_puts(b" EPT_VIOLATION\n"),
+                _    => com1_puts(b"\n"),
+            }
+        }
+        com1_puts(b"[x86] Hypervisor in VMX root mode. Halting.\n");
+        loop {
+            core::arch::asm!("cli; hlt", options(nomem, nostack));
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level x86 boot pipeline.
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub unsafe fn boot_x86_hypervisor(
+    image_handle: *mut c_void,
+    system_table: *const c_void,
+    vendor: Option<CpuVendor>,
+) -> ! {
+    // ── 1. ExitBootServices (capture RSDP first; same as ARM path) ───────────
+    let boot_ctx = unsafe {
+        BootContext::from_uefi(
+            image_handle as *mut _,
+            system_table as *const EfiSystemTable,
+        )
+    };
+    let _boot_result = unsafe { boot_ctx.run() };
+
+    // ── 2. ConOut is dead. Switch to COM1. ───────────────────────────────────
+    unsafe {
+        com1_init();
+        com1_puts(b"\n[x86] ExitBootServices: OK\n");
+    }
+
+    // ── 3. Compute physical addresses of our static regions ─────────────────
+    // UEFI leaves CR3 = firmware page tables (identity map for the lower 4 GiB
+    // on every UEFI implementation that ships an x86_64 firmware).  Therefore
+    // virtual address == physical address for all .bss statics in our image.
+    let vmxon_pa     = ptr::addr_of!(VMXON_REGION) as u64;
+    let vmcs_pa      = ptr::addr_of!(VMCS_REGION)  as u64;
+    let vmcb_pa      = ptr::addr_of!(VMCB_REGION)  as u64;
+    let hsave_pa     = ptr::addr_of!(HSAVE_REGION) as u64;
+    let ept_pml4_pa  = ptr::addr_of!(EPT_PML4)     as u64;
+    let npt_pml4_pa  = ptr::addr_of!(NPT_PML4)     as u64;
+    let guest_ram_pa = ptr::addr_of!(GUEST_RAM)    as u64;
+    let host_stack_top =
+        ptr::addr_of!(HOST_STACK) as u64 + 4096u64;
+    let host_rip     = host_vmexit_entry as *const () as u64;
+
+    unsafe {
+        com1_puts(b"[x86] VMXON region PA = "); com1_puthex64(vmxon_pa); com1_puts(b"\n");
+        com1_puts(b"[x86] VMCS region PA  = "); com1_puthex64(vmcs_pa);  com1_puts(b"\n");
+        com1_puts(b"[x86] EPT PML4 PA     = "); com1_puthex64(ept_pml4_pa); com1_puts(b"\n");
+        com1_puts(b"[x86] Guest RAM PA    = "); com1_puthex64(guest_ram_pa); com1_puts(b"\n");
+        com1_puts(b"[x86] Host RIP        = "); com1_puthex64(host_rip);  com1_puts(b"\n");
+    }
+
+    // ── 4. Place guest payload: a single HLT (0xF4) at guest RAM offset 0 ───
+    unsafe {
+        let guest = ptr::addr_of_mut!(GUEST_RAM) as *mut u8;
+        *guest = 0xF4;  // HLT
+    }
+
+    // ── 5. Branch on vendor ─────────────────────────────────────────────────
+    match vendor {
+        Some(CpuVendor::Intel) => unsafe { boot_intel(
+            vmxon_pa, vmcs_pa, ept_pml4_pa, guest_ram_pa,
+            host_stack_top, host_rip,
+        ) },
+        Some(CpuVendor::Amd) => unsafe { boot_amd(
+            vmcb_pa, hsave_pa, npt_pml4_pa, guest_ram_pa,
+        ) },
+        None => {
+            unsafe { com1_puts(b"[x86] Unsupported CPU vendor. Halting.\n"); }
+            halt();
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Intel: VMXON -> init_vtx_foundation -> VMLAUNCH
+// ─────────────────────────────────────────────────────────────────────────────
+
+unsafe fn boot_intel(
+    vmxon_pa: u64,
+    vmcs_pa: u64,
+    ept_pml4_pa: u64,
+    guest_ram_pa: u64,
+    host_stack_top: u64,
+    host_rip: u64,
+) -> ! {
+    unsafe {
+        com1_puts(b"[x86] Intel path: building EPT identity map...\n");
+        build_ept_identity_map(guest_ram_pa);
+
+        let cfg = VtxFoundationConfig {
+            vmxon_pa,
+            vmcs_pa,
+            ept_pml4_pa,
+            kernel_entry_pa: guest_ram_pa, // HLT byte at offset 0
+            guest_ram_base:  guest_ram_pa,
+            guest_ram_size:  4096,         // 4 KiB
+            mmio_base:       0,
+            mmio_size:       0,
+            guest_64bit:     false,        // real mode -> single HLT
+        };
+
+        com1_puts(b"[x86] init_vtx_foundation()...\n");
+        let vmxon = &mut *(ptr::addr_of_mut!(VMXON_REGION));
+        let vmcs  = &mut *(ptr::addr_of_mut!(VMCS_REGION));
+        match init_vtx_foundation(&cfg, vmxon, vmcs, host_stack_top, host_rip) {
+            Ok(state) => {
+                com1_puts(b"[x86] init_vtx_foundation: phase=");
+                com1_puthex64(state.phase as u64);
+                com1_puts(b" (EPT active)\n");
+            }
+            Err(_) => {
+                com1_puts(b"[x86] init_vtx_foundation FAILED. Check BIOS VT-x.\n");
+                halt();
+            }
+        }
+
+        com1_puts(b"[x86] VMLAUNCH...\n");
+        // VMLAUNCH transfers control: on entry the guest runs (HLT -> VMEXIT);
+        // host_rip catches the VMEXIT.  If VMLAUNCH itself fails (e.g. invalid
+        // VMCS), CF/ZF are set and execution continues past it — we halt.
+        core::arch::asm!(
+            "vmlaunch",
+            "jmp 2f",
+            "2: ",
+            options(nostack),
+        );
+        com1_puts(b"[x86] VMLAUNCH returned - VMCS validation failed.\n");
+        const VMCS_VM_INSTR_ERROR: u32 = 0x4400;
+        let (err, _ok) = vmread(VMCS_VM_INSTR_ERROR);
+        com1_puts(b"[x86] VM_INSTRUCTION_ERROR = ");
+        com1_puthex64(err);
+        com1_puts(b"\n");
+        halt();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AMD: init_svm_foundation -> VMRUN.  VMRUN is round-trip: control returns to
+// the instruction after `vmrun` on every VMEXIT, with host state restored from
+// HSAVE.  No separate host_rip handler is required.
+// ─────────────────────────────────────────────────────────────────────────────
+
+unsafe fn boot_amd(
+    vmcb_pa: u64,
+    hsave_pa: u64,
+    npt_pml4_pa: u64,
+    guest_ram_pa: u64,
+) -> ! {
+    unsafe {
+        com1_puts(b"[x86] AMD path: building NPT identity map...\n");
+        build_npt_identity_map(guest_ram_pa);
+
+        let cfg = SvmFoundationConfig {
+            vmcb_pa,
+            hsave_pa,
+            npt_pml4_pa,
+            kernel_entry_pa: guest_ram_pa,
+            guest_ram_base:  guest_ram_pa,
+            guest_ram_size:  4096,
+            mmio_base:       0,
+            mmio_size:       0,
+            guest_64bit:     false,
+        };
+
+        com1_puts(b"[x86] init_svm_foundation()...\n");
+        let vmcb = &mut *(ptr::addr_of_mut!(VMCB_REGION));
+        match init_svm_foundation(&cfg, vmcb) {
+            Ok(state) => {
+                com1_puts(b"[x86] init_svm_foundation: phase=");
+                com1_puthex64(state.phase as u64);
+                com1_puts(b" (NPT active)\n");
+            }
+            Err(_) => {
+                com1_puts(b"[x86] init_svm_foundation FAILED. Check BIOS SVM.\n");
+                halt();
+            }
+        }
+
+        com1_puts(b"[x86] VMRUN...\n");
+        vmrun(vmcb_pa);
+        com1_puts(b"[x86] VMRUN returned (VMEXIT observed).\n");
+
+        let exit_code = vmcb.exit_code();
+        com1_puts(b"[x86] VMCB exit_code = ");
+        com1_puthex64(exit_code);
+        if exit_code == 0x78 {
+            com1_puts(b" HLT (Ch51 gate PASSED)\n");
+        } else {
+            com1_puts(b"\n");
+        }
+        com1_puts(b"[x86] Hypervisor in SVM host mode. Halting.\n");
+        halt();
+    }
+}
+
+#[inline(never)]
+fn halt() -> ! {
+    loop {
+        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
+    }
+}

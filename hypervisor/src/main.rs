@@ -424,22 +424,7 @@ mod x86_entry {
 
     use hypervisor::vtx::VmxCpuFeatures;
     use hypervisor::svm::SvmCpuFeatures;
-    use hypervisor::fex_integration::{
-        FexIntegrationConfig, FexHostBindings, FexJitCache, AotPreTranslationQueue,
-        init_fex_integration, FexError,
-    };
-    use hypervisor::x86_hw_validation::{
-        X86HwValidationConfig, init_x86_hw_validation,
-    };
-
-    // ── Pinned static regions for VMXON / VMCS / EPT PML4 ────────────────────
-    // 4 KiB-aligned via repr(C, align(4096)) on the underlying types.  These
-    // live in .bss; UEFI maps the entire image as RWX so they are addressable
-    // immediately.  Their PA == VA because UEFI uses an identity-mapped page
-    // table during the boot-services phase.
-    #[repr(C, align(4096))]
-    struct AlignedPage([u8; 4096]);
-    static mut EPT_PML4: AlignedPage = AlignedPage([0u8; 4096]);
+    use hypervisor::boot_x86::boot_x86_hypervisor;
 
     // UTF-16LE banner strings (literal, NUL-terminated).
     static BANNER:        &[u16] = &utf16_z!("\r\nAETHER Hypervisor (x86_64) starting...\r\n");
@@ -452,26 +437,14 @@ mod x86_entry {
     static MSG_SVM_OK:    &[u16] = &utf16_z!("  AMD-V (SVM) supported (CPUID.80000001h.ECX[2])\r\n");
     static MSG_SVM_NO:    &[u16] = &utf16_z!("  AMD-V (SVM) NOT supported / disabled in BIOS\r\n");
     static MSG_EPT_OK:    &[u16] = &utf16_z!("  EPT (Extended Page Tables) supported\r\n");
-    static MSG_EPT_NO:    &[u16] = &utf16_z!("  EPT NOT supported by this Intel CPU\r\n");
     static MSG_NPT_OK:    &[u16] = &utf16_z!("  NPT (Nested Page Tables) supported\r\n");
     static MSG_NPT_NO:    &[u16] = &utf16_z!("  NPT NOT supported by this AMD CPU\r\n");
 
-    static MSG_FEX_HDR:   &[u16] = &utf16_z!("\r\n[Ch52] FEX-Emu binary translation pipeline\r\n");
-    static MSG_FEX_OK:    &[u16] = &utf16_z!("  FEX init: ready (libfex.a linked)\r\n");
-    static MSG_FEX_NOLIB: &[u16] = &utf16_z!("  FEX init: libfex.a not linked (build with --features fex_linked)\r\n");
-    static MSG_FEX_HOSTUSER: &[u16] = &utf16_z!("  FEX init: rejected HostUserland (No-Boundary per Ch3) - OK\r\n");
-    static MSG_FEX_OTHER: &[u16] = &utf16_z!("  FEX init: returned other error\r\n");
-
-    static MSG_HW_HDR:    &[u16] = &utf16_z!("\r\n[Ch54] x86 Tier Hardware Validation gate\r\n");
-    static MSG_HW_PASS:   &[u16] = &utf16_z!("  Gate: PASS (Intel + AMD + FEX in-hypervisor + no workaround + user build)\r\n");
-    static MSG_HW_FAIL:   &[u16] = &utf16_z!("  Gate: FAIL (Phase3GateCriterion not met)\r\n");
-    static MSG_HW_ERR:    &[u16] = &utf16_z!("  Gate: config validate() rejected\r\n");
-
-    static MSG_DONE:      &[u16] = &utf16_z!("\r\nReturning to firmware.\r\n");
+    static MSG_HANDOFF:   &[u16] = &utf16_z!("  Handing off to boot_x86_hypervisor (ExitBootServices)\r\n");
 
     #[unsafe(no_mangle)]
     pub extern "efiapi" fn efi_main(
-        _image_handle: *mut c_void,
+        image_handle: *mut c_void,
         system_table: *const c_void,
     ) -> usize {
         let st = system_table as *const EfiSystemTable;
@@ -494,18 +467,12 @@ mod x86_entry {
             }
         }
 
-        // ── 2. Virtualization-extension probe ────────────────────────────────
-        // CPUID.1.ECX[5]            = VMX (Intel)
-        // CPUID.80000001h.ECX[2]    = SVM (AMD)
-        // CPUID.80000008h           = MAXPHYADDR (used by EPT/NPT walkers)
+        // ── 2. Virtualization-extension probe (still in boot services) ───────
         let (_, _, ecx1, _) = unsafe { cpuid(1) };
         let vmx_supported = (ecx1 >> 5) & 1 == 1;
         let (_, _, ecx8x1, _) = unsafe { cpuid(0x8000_0001) };
         let svm_supported = (ecx8x1 >> 2) & 1 == 1;
 
-        // Drive the foundation-feature structs to confirm wiring.  These are
-        // unsafe because they execute CPUID and RDMSR; safe here because we
-        // are at CPL 0 and the firmware has not yet exited boot services.
         let vmx_features = unsafe { VmxCpuFeatures::detect() };
         let svm_features = unsafe { SvmCpuFeatures::detect() };
 
@@ -517,84 +484,39 @@ mod x86_entry {
                         puts(st, MSG_EPT_OK);
                     } else {
                         puts(st, MSG_VMX_NO);
-                        puts(st, MSG_EPT_NO);
+                        halt();
                     }
                 }
                 Some(CpuVendor::Amd) => {
                     if svm_supported && svm_features.svm_supported {
                         puts(st, MSG_SVM_OK);
                         if svm_features.npt_supported { puts(st, MSG_NPT_OK); }
-                        else { puts(st, MSG_NPT_NO); }
+                        else { puts(st, MSG_NPT_NO); halt(); }
                     } else {
                         puts(st, MSG_SVM_NO);
+                        halt();
                     }
                 }
-                None => {}
-            }
-        }
-
-        // ── 3. Ch52 — FEX-Emu binary translation pipeline ────────────────────
-        // We invoke the in-hypervisor FEX init pipeline with realistic config.
-        // Without the `fex_linked` feature, init returns FexLibNotLinked — that
-        // IS the expected behavior: the FFI surface is wired, but libfex.a is
-        // not in this build.  Add libfex.a + rebuild with --features fex_linked
-        // to actually run ARM64 -> x86_64 dynamic binary translation.
-        unsafe { puts(st, MSG_FEX_HDR); }
-
-        // Ch52 aether_defaults() places JIT cache at 0x2_0000_0000 (8 GiB),
-        // bump arena at 0x2_0100_0000.  These are just config values for the
-        // validate() path; no allocation happens until VMXON enables EPT.
-        let fex_cfg = FexIntegrationConfig::aether_defaults();
-        let mut bindings = FexHostBindings::new(fex_cfg.bump_arena_base_pa, fex_cfg.bump_arena_size);
-        let mut jit      = FexJitCache::new(fex_cfg.jit_cache_base_pa, fex_cfg.jit_cache_size);
-        let mut queue    = AotPreTranslationQueue::new();
-        let fex_result   = unsafe {
-            init_fex_integration(&fex_cfg, &mut bindings, &mut jit, &mut queue)
-        };
-
-        unsafe {
-            match fex_result {
-                Ok(_)                                  => puts(st, MSG_FEX_OK),
-                Err(FexError::FexLibNotLinked)         => puts(st, MSG_FEX_NOLIB),
-                Err(FexError::HostUserlandRejected)    => puts(st, MSG_FEX_HOSTUSER),
-                Err(_)                                 => puts(st, MSG_FEX_OTHER),
-            }
-        }
-
-        // ── 4. Ch54 — x86 Tier Hardware Validation gate ──────────────────────
-        unsafe { puts(st, MSG_HW_HDR); }
-
-        // aether_defaults() declares: Intel VT-x gate passed, AMD-V gate passed,
-        // FEX integration gate passed, Android x86 booted on both vendors,
-        // EPT/NPT invalidation enforced, no workaround, ro.build.type=user.
-        // In-tree machinery confirms the gate types compile + validate cleanly.
-        let hw_cfg = X86HwValidationConfig::aether_defaults();
-        let hw_result = init_x86_hw_validation(&hw_cfg);
-
-        unsafe {
-            match hw_result {
-                Ok(state) => {
-                    if state.gate.passes() { puts(st, MSG_HW_PASS); }
-                    else { puts(st, MSG_HW_FAIL); }
+                None => {
+                    puts(st, MSG_HANDOFF);
+                    halt();
                 }
-                Err(_) => puts(st, MSG_HW_ERR),
             }
+            puts(st, MSG_HANDOFF);
         }
 
-        // Reference EPT_PML4 so the static survives LTO (it is the table the
-        // EPTP would point at if we proceeded to VMXON; left zeroed here).
-        let _ept_pa = core::ptr::addr_of!(EPT_PML4) as u64;
+        // ── 3. Hand off to boot_x86_hypervisor ───────────────────────────────
+        // From here on: ExitBootServices, EPT/NPT setup, VMXON/SVME enable,
+        // VMLAUNCH/VMRUN, first VMEXIT.  Diagnostic output switches from UEFI
+        // ConOut to direct COM1 (0x3F8) because firmware boot services exit
+        // inside boot_x86_hypervisor.
+        unsafe { boot_x86_hypervisor(image_handle, system_table, vendor); }
+    }
 
-        unsafe {
-            puts(st, SEP);
-            puts(st, MSG_DONE);
+    fn halt() -> ! {
+        loop {
+            unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
         }
-
-        // Return EFI_SUCCESS — firmware regains control.  VMXON / VMRUN remain
-        // disabled in this scaffold because executing them safely requires
-        // ExitBootServices first (firmware uses paging structures that would
-        // be torn down).
-        0
     }
 }
 
