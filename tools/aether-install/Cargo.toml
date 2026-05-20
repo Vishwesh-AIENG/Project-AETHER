@@ -1,0 +1,17 @@
+[package]
+name = "aether-install"
+version = "0.1.0"
+edition = "2021"
+description = "AETHER Installer CLI -- partitions NVMe, writes EFI binaries, creates UEFI boot entry"
+
+[[bin]]
+name = "aether-install"
+path = "src/main.rs"
+
+[dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# We deliberately do NOT depend on the compat-check library crate -- aether-install
+# spawns the aether-compat binary as a subprocess and parses the --json output.
+# Keeps the dependency graph small and lets the user ship aether-compat alone.

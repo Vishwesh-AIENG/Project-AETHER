@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "hypervisor",
     "tools/compat-check",
+    "tools/aether-install",
 ]
 
 [profile.release]
