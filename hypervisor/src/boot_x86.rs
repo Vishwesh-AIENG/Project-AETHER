@@ -30,11 +30,12 @@ use core::ptr;
 use crate::boot::{BootContext, EfiSystemTable};
 use crate::svm::{
     init_svm_foundation, vmrun, NptTable, NptTableEntry,
-    SvmFoundationConfig, VmcbRegion,
+    SvmFoundationConfig, VmcbRegion, VMCB_SAVE_CR3,
+    VMCB_EXIT_INFO_1, VMCB_EXIT_INFO_2,
 };
 use crate::vtx::{
-    init_vtx_foundation, vmread, EptTable, EptTableEntry,
-    VmcsRegion, VmxonRegion, VtxFoundationConfig,
+    init_vtx_foundation, vmread, vmwrite, EptTable, EptTableEntry,
+    VmcsRegion, VmxonRegion, VtxFoundationConfig, VMCS_GUEST_CR3,
 };
 use crate::x86_hw_validation::CpuVendor;
 
@@ -153,6 +154,15 @@ static mut NPT_PDPT:      Page4K      = Page4K([0u8; 4096]);
 static mut NPT_PD:        Page4K      = Page4K([0u8; 4096]);
 static mut NPT_PT:        Page4K      = Page4K([0u8; 4096]);
 
+// Guest page tables (4-level identity map for long-mode guest).  These live
+// in HOST physical memory; the guest's CR3 points at GUEST_PML4 and the NPT
+// makes that PA accessible to the guest.  Different from EPT/NPT tables
+// (those are for GPA->HPA); these tables are for guest VA->guest PA.
+static mut GUEST_PML4:    Page4K      = Page4K([0u8; 4096]);
+static mut GUEST_PDPT:    Page4K      = Page4K([0u8; 4096]);
+static mut GUEST_PD:      Page4K      = Page4K([0u8; 4096]);
+static mut GUEST_PT:      Page4K      = Page4K([0u8; 4096]);
+
 // Host stack used as VMCS_HOST_RSP. 4 KiB; grows downward.
 static mut HOST_STACK:    Page4K      = Page4K([0u8; 4096]);
 
@@ -181,16 +191,22 @@ unsafe fn build_ept_identity_map(guest_ram_pa: u64) {
     let pd_pa   = ptr::addr_of!(EPT_PD)   as u64;
     let pt_pa   = ptr::addr_of!(EPT_PT)   as u64;
 
-    pml4.set(0, EptTableEntry::pointing_to(pdpt_pa).0);
-    pdpt.set(0, EptTableEntry::pointing_to(pd_pa).0);
-    pd.set(0,   EptTableEntry::pointing_to(pt_pa).0);
+    // Indices for the 2 MiB region containing guest_ram_pa.
+    let pml4_idx = ((guest_ram_pa >> 39) & 0x1FF) as usize;
+    let pdpt_idx = ((guest_ram_pa >> 30) & 0x1FF) as usize;
+    let pd_idx   = ((guest_ram_pa >> 21) & 0x1FF) as usize;
 
-    // EPT PTE (4 KiB leaf) for guest_ram_pa:
-    //   bits[2:0]   = 7 (R+W+X)
-    //   bits[5:3]   = 6 (memtype WB)
-    //   bits[51:12] = PA
-    let leaf_4k: u64 = (guest_ram_pa & !0xFFFu64) | 0x07 | (6 << 3);
-    pt.set(0, leaf_4k);
+    pml4.set(pml4_idx, EptTableEntry::pointing_to(pdpt_pa).0);
+    pdpt.set(pdpt_idx, EptTableEntry::pointing_to(pd_pa).0);
+    pd.set(pd_idx,     EptTableEntry::pointing_to(pt_pa).0);
+
+    // Fill all 512 EPT PT entries for the 2 MiB region containing guest_ram_pa.
+    // Entry: bits[2:0]=7 (R+W+X), bits[5:3]=6 (WB memtype), bits[51:12]=PFN.
+    let region_base = guest_ram_pa & !0x1FFFFFu64;
+    for i in 0..512usize {
+        let page_pa = region_base + (i as u64) * 4096;
+        pt.set(i, (page_pa & !0xFFFu64) | 0x07 | (6 << 3));
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -198,6 +214,52 @@ unsafe fn build_ept_identity_map(guest_ram_pa: u64) {
 // AMD APM Vol 2 §15.25.5.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Build a 4-level guest page table (standard x86_64) that identity-maps a
+// 2 MiB region of guest VA so that VA = `guest_ram_pa` (and the page tables
+// themselves) all translate to themselves.  Returns the PA to load into
+// guest CR3 for long-mode VMRUN.
+//
+// For VA `guest_ram_pa`, the PML4/PDPT/PD/PT indices are NOT all zero —
+// they depend on the high bits of the address.  We compute them and fill
+// the full 2 MiB worth of PT entries (one PD slot, 512 PT slots).
+unsafe fn build_guest_page_table(guest_ram_pa: u64) -> u64 {
+    let pml4_va = ptr::addr_of_mut!(GUEST_PML4) as *mut u64;
+    let pdpt_va = ptr::addr_of_mut!(GUEST_PDPT) as *mut u64;
+    let pd_va   = ptr::addr_of_mut!(GUEST_PD)   as *mut u64;
+    let pt_va   = ptr::addr_of_mut!(GUEST_PT)   as *mut u64;
+
+    let pml4_pa = ptr::addr_of!(GUEST_PML4) as u64;
+    let pdpt_pa = ptr::addr_of!(GUEST_PDPT) as u64;
+    let pd_pa   = ptr::addr_of!(GUEST_PD)   as u64;
+    let pt_pa   = ptr::addr_of!(GUEST_PT)   as u64;
+
+    let pml4_idx = ((guest_ram_pa >> 39) & 0x1FF) as usize;
+    let pdpt_idx = ((guest_ram_pa >> 30) & 0x1FF) as usize;
+    let pd_idx   = ((guest_ram_pa >> 21) & 0x1FF) as usize;
+
+    // 2 MiB-aligned base of the region we identity-map in guest VA.
+    let region_base = guest_ram_pa & !0x1FFFFFu64;
+
+    unsafe {
+        *pml4_va.add(pml4_idx) = (pdpt_pa & !0xFFFu64) | 0x03;
+        *pdpt_va.add(pdpt_idx) = (pd_pa   & !0xFFFu64) | 0x03;
+        *pd_va.add(pd_idx)     = (pt_pa   & !0xFFFu64) | 0x03;
+        // Fill all 512 PT entries — covers guest_ram_pa plus the guest
+        // page tables themselves (which live in the same 2 MiB region).
+        for i in 0..512 {
+            let page_pa = region_base + (i as u64) * 4096;
+            *pt_va.add(i) = (page_pa & !0xFFFu64) | 0x03;
+        }
+    }
+
+    pml4_pa
+}
+
+// Identity-map a 2 MiB region (the one containing `guest_ram_pa`) into NPT
+// using 512 sequential 4 KiB PT entries.  This covers GUEST_RAM plus the
+// guest page-table pages (PML4/PDPT/PD/PT) that the guest CPU walks in
+// HPA space when CR3 is loaded — all of which are statics in our .bss
+// allocated within a few KiB of each other.
 unsafe fn build_npt_identity_map(guest_ram_pa: u64) {
     let pml4 = unsafe { &mut *(ptr::addr_of_mut!(NPT_PML4) as *mut NptTable) };
     let pdpt = unsafe { &mut *(ptr::addr_of_mut!(NPT_PDPT) as *mut NptTable) };
@@ -208,12 +270,21 @@ unsafe fn build_npt_identity_map(guest_ram_pa: u64) {
     let pd_pa   = ptr::addr_of!(NPT_PD)   as u64;
     let pt_pa   = ptr::addr_of!(NPT_PT)   as u64;
 
-    pml4.set(0, NptTableEntry::pointing_to(pdpt_pa).0);
-    pdpt.set(0, NptTableEntry::pointing_to(pd_pa).0);
-    pd.set(0,   NptTableEntry::pointing_to(pt_pa).0);
-    // NPT PTE (4 KiB): PRESENT | WRITABLE | USER, no PS.
-    let leaf_4k: u64 = (guest_ram_pa & !0xFFFu64) | 0x07;
-    pt.set(0, leaf_4k);
+    let pml4_idx = ((guest_ram_pa >> 39) & 0x1FF) as usize;
+    let pdpt_idx = ((guest_ram_pa >> 30) & 0x1FF) as usize;
+    let pd_idx   = ((guest_ram_pa >> 21) & 0x1FF) as usize;
+
+    pml4.set(pml4_idx, NptTableEntry::pointing_to(pdpt_pa).0);
+    pdpt.set(pdpt_idx, NptTableEntry::pointing_to(pd_pa).0);
+    pd.set(pd_idx,     NptTableEntry::pointing_to(pt_pa).0);
+
+    // Fill all 512 PT entries with sequential 4 KiB pages covering the 2 MiB
+    // region that contains guest_ram_pa.
+    let region_base = guest_ram_pa & !0x1FFFFFu64;
+    for i in 0..512usize {
+        let page_pa = region_base + (i as u64) * 4096;
+        pt.set(i, (page_pa & !0xFFFu64) | 0x07);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -345,6 +416,8 @@ unsafe fn boot_intel(
     unsafe {
         com1_puts(b"[x86] Intel path: building EPT identity map...\n");
         build_ept_identity_map(guest_ram_pa);
+        let guest_cr3 = build_guest_page_table(guest_ram_pa);
+        com1_puts(b"[x86] Guest CR3 (PML4)= "); com1_puthex64(guest_cr3); com1_puts(b"\n");
 
         let cfg = VtxFoundationConfig {
             vmxon_pa,
@@ -355,7 +428,7 @@ unsafe fn boot_intel(
             guest_ram_size:  4096,         // 4 KiB
             mmio_base:       0,
             mmio_size:       0,
-            guest_64bit:     false,        // real mode -> single HLT
+            guest_64bit:     true,         // long mode -> simpler VMCB
         };
 
         com1_puts(b"[x86] init_vtx_foundation()...\n");
@@ -372,6 +445,9 @@ unsafe fn boot_intel(
                 halt();
             }
         }
+
+        // Patch the guest CR3 the foundation init hardcoded to 0.
+        let _ = vmwrite(VMCS_GUEST_CR3, guest_cr3);
 
         com1_puts(b"[x86] VMLAUNCH...\n");
         // VMLAUNCH transfers control: on entry the guest runs (HLT -> VMEXIT);
@@ -408,6 +484,8 @@ unsafe fn boot_amd(
     unsafe {
         com1_puts(b"[x86] AMD path: building NPT identity map...\n");
         build_npt_identity_map(guest_ram_pa);
+        let guest_cr3 = build_guest_page_table(guest_ram_pa);
+        com1_puts(b"[x86] Guest CR3 (PML4)= "); com1_puthex64(guest_cr3); com1_puts(b"\n");
 
         let cfg = SvmFoundationConfig {
             vmcb_pa,
@@ -418,7 +496,7 @@ unsafe fn boot_amd(
             guest_ram_size:  4096,
             mmio_base:       0,
             mmio_size:       0,
-            guest_64bit:     false,
+            guest_64bit:     true,
         };
 
         com1_puts(b"[x86] init_svm_foundation()...\n");
@@ -435,18 +513,27 @@ unsafe fn boot_amd(
             }
         }
 
+        // Patch guest CR3 (init hardcoded to 0).
+        vmcb.write_u64(VMCB_SAVE_CR3, guest_cr3);
+
         com1_puts(b"[x86] VMRUN...\n");
         vmrun(vmcb_pa);
         com1_puts(b"[x86] VMRUN returned (VMEXIT observed).\n");
 
         let exit_code = vmcb.exit_code();
+        let exit_info_1 = vmcb.read_u64(VMCB_EXIT_INFO_1);
+        let exit_info_2 = vmcb.read_u64(VMCB_EXIT_INFO_2);
         com1_puts(b"[x86] VMCB exit_code = ");
         com1_puthex64(exit_code);
         if exit_code == 0x78 {
             com1_puts(b" HLT (Ch51 gate PASSED)\n");
+        } else if exit_code == 0x400 {
+            com1_puts(b" NPF (nested page fault)\n");
         } else {
             com1_puts(b"\n");
         }
+        com1_puts(b"[x86] EXITINFO1 (NPF error code) = "); com1_puthex64(exit_info_1); com1_puts(b"\n");
+        com1_puts(b"[x86] EXITINFO2 (faulting GPA)   = "); com1_puthex64(exit_info_2); com1_puts(b"\n");
         com1_puts(b"[x86] Hypervisor in SVM host mode. Halting.\n");
         halt();
     }
