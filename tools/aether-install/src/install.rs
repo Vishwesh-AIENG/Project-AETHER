@@ -1,15 +1,17 @@
 // install.rs -- `aether-install install` pipeline orchestration.
 //
 // Pipeline (from chapter spec):
-//   1. Run compat check
-//   2. GPU configuration (auto SR-IOV or prompt)
-//   3. Detect / confirm target NVMe drive
-//   4. Create NVMe namespace for Android
-//   5. Write EFI binaries (hypervisor.efi, selector.efi) to ESP
-//   6. Create UEFI Boot#### entry pointing at selector.efi
-//   7. Update BootOrder to put AETHER first
-//   8. Write Android image into namespace
-//   9. Write AETHER config partition
+//   1.  Run compat check
+//   2.  GPU configuration (auto SR-IOV or prompt)
+//   3.  Detect / confirm target NVMe drive
+//   4.  Create NVMe namespace for Android
+//   5.  Write EFI binaries (hypervisor.efi, selector.efi) to ESP
+//   6.  Secure Boot -- generate RSA-2048 key pair, sign hypervisor.efi with
+//       PE Authenticode, write MokNew + MokAuth UEFI variables (Ch57)
+//   7.  Create UEFI Boot#### entry pointing at selector.efi
+//   8.  Update BootOrder to put AETHER first
+//   9.  Write Android image into namespace
+//  10.  Write AETHER config partition
 //
 // Steps 1-2 always run (read-only / decision).
 // Steps 3-9 are gated on --apply. Without --apply we print a "PLAN" of what
@@ -28,6 +30,7 @@ use crate::cli::CliArgs;
 use crate::device_path::{GptGuid, HardDriveNode};
 use crate::gpu_config::{self, GpuMode, GpuPlan};
 use crate::install_state::{InstallState, Slot};
+use crate::secure_boot;
 use crate::uefi_vars;
 
 use std::io::{self, BufRead, Write};
@@ -173,7 +176,47 @@ pub fn run(args: &CliArgs) -> i32 {
     }
     print_step(5, "write EFI binaries", "OK");
 
-    // Step 6 + 7: UEFI Boot#### entry + BootOrder --
+    // Step 6: Secure Boot -- sign hypervisor.efi and enroll MOK key ----------
+    // Only relevant when --apply (needs the signed binary already at dst).
+    // In dry-run we still print the plan so the user knows what will happen.
+    let sb_active = !args.apply || hypervisor_src.is_some();
+    if sb_active {
+        match secure_boot::run_secure_boot_step(args.apply, &hypervisor_dst) {
+            Ok((fingerprint, outcome)) => {
+                if args.apply {
+                    state.mok_key_fingerprint = Some(fingerprint.clone());
+                    use crate::secure_boot::EnrollmentOutcome;
+                    match outcome {
+                        EnrollmentOutcome::AlreadyEnrolled => {
+                            state.secure_boot_enrolled  = true;
+                            state.awaiting_mok_reboot   = false;
+                        }
+                        EnrollmentOutcome::AwaitingReboot => {
+                            state.secure_boot_enrolled  = false;
+                            state.awaiting_mok_reboot   = true;
+                        }
+                        EnrollmentOutcome::Enrolled => {
+                            state.secure_boot_enrolled  = true;
+                            state.awaiting_mok_reboot   = false;
+                        }
+                    }
+                }
+                print_step(6, "Secure Boot", &format!(
+                    "outcome={:?}  fingerprint={}",
+                    outcome,
+                    fingerprint.get(..16).unwrap_or(&fingerprint)
+                ));
+            }
+            Err((msg, code)) => {
+                eprintln!("           Secure Boot step FAILED: {}", msg);
+                return code;
+            }
+        }
+    } else {
+        print_step(6, "Secure Boot", "(skipped -- no --hypervisor path provided)");
+    }
+
+    // Step 7 + 8: UEFI Boot#### entry + BootOrder --
     // The boot entry points at selector.efi (Ch58), which then chainloads
     // either hypervisor.efi or Windows Boot Manager.
     let entry = BootEntry {
@@ -196,7 +239,7 @@ pub fn run(args: &CliArgs) -> i32 {
     let blob = entry.to_bytes();
     let boot_idx = match state.boot_entry_index {
         Some(i) => {
-            print_step(6, "Boot#### entry",
+            print_step(7, "Boot#### entry",
                 &format!("re-using Boot{:04X} from previous install (idempotent)", i));
             i
         }
@@ -204,7 +247,7 @@ pub fn run(args: &CliArgs) -> i32 {
             let used = read_used_boot_indices().unwrap_or_default();
             let idx = boot_entry::pick_free_boot_index(&used)
                 .unwrap_or(0x9AEF); // "AEF" fallback that's almost certainly unused
-            print_step(6, "Boot#### entry", &format!("will allocate Boot{:04X}", idx));
+            print_step(7, "Boot#### entry", &format!("will allocate Boot{:04X}", idx));
             idx
         }
     };
@@ -241,7 +284,7 @@ pub fn run(args: &CliArgs) -> i32 {
     } else {
         println!("           [plan] BootOrder: {:?} -> {:?}", current_order, new_order);
     }
-    print_step(7, "BootOrder updated", "OK");
+    print_step(8, "BootOrder updated", "OK");
 
     // Step 8: write Android image --
     if args.apply {
@@ -255,7 +298,7 @@ pub fn run(args: &CliArgs) -> i32 {
     } else {
         println!("           [plan] write Android image to namespace NSID={}", nsid);
     }
-    print_step(8, "Android image", "OK");
+    print_step(9, "Android image", "OK");
 
     // Step 9: config partition --
     if state.config_partition_guid.is_none() {
@@ -271,7 +314,7 @@ pub fn run(args: &CliArgs) -> i32 {
     } else {
         println!("           [plan] write config partition with install metadata");
     }
-    print_step(9, "config partition", "OK");
+    print_step(10, "config partition", "OK");
 
     // --- Persist state -------------------------------------------------------
     if state.install_id.is_empty() {
@@ -302,7 +345,7 @@ pub fn run(args: &CliArgs) -> i32 {
 // ---- Helpers ---------------------------------------------------------------
 
 fn print_step(n: u32, label: &str, detail: &str) {
-    println!("[{}/9] {:<24} {}", n, label, detail);
+    println!("[{}/10] {:<24} {}", n, label, detail);
 }
 
 fn resolve_gpu_plan(mut plan: GpuPlan, args: &CliArgs) -> Result<GpuPlan, i32> {

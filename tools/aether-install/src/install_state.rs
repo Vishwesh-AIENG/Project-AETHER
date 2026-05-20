@@ -33,6 +33,13 @@ pub struct InstallState {
     pub boot_entry_index: Option<u16>,        // Boot#### index assigned
     pub gpu_plan:       Option<GpuPlan>,      // chosen GPU mode
     pub active_slot:    Slot,                 // A/B for OTA
+    // Ch57: Secure Boot
+    #[serde(default)]
+    pub secure_boot_enrolled:   bool,         // true after MokList enrollment confirmed
+    #[serde(default)]
+    pub awaiting_mok_reboot:    bool,         // true: MokNew written, reboot pending
+    #[serde(default)]
+    pub mok_key_fingerprint:    Option<String>, // hex-SHA256 of the enrolled DER cert
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +64,9 @@ impl Default for InstallState {
             boot_entry_index: None,
             gpu_plan:       None,
             active_slot:    Slot::A,
+            secure_boot_enrolled: false,
+            awaiting_mok_reboot:  false,
+            mok_key_fingerprint:  None,
         }
     }
 }

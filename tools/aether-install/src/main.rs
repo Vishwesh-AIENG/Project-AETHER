@@ -26,6 +26,7 @@ mod gpu_config;
 mod install;
 mod install_state;
 mod nvidia_db;
+mod secure_boot;
 mod status;
 mod uefi_vars;
 mod uninstall;

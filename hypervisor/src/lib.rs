@@ -725,7 +725,49 @@ pub mod android_x86_userspace; // ch53: Android on x86 — Userspace. Wires the 
                          //       GetPhysicalDeviceProperties returns matching vendor's PCI ID; no
                          //       software-rendering fallback; ro.build.type=user.
 
-pub mod x86_hw_validation; // ch54: x86 Tier Hardware Validation — capstone of the x86 tier
+pub mod x86_hw_validation; // ch54: x86 Tier Hardware Validation
+
+// Part V — Installer & Management (Chapters 55–64)
+pub mod secure_boot;     // ch57: Secure Boot Integration — shim + MOK path.
+                         //       installer generates RSA-2048 keypair, signs hypervisor.efi
+                         //       with PE Authenticode, writes MokNew (DER cert) + MokAuth
+                         //       (32 zero bytes) UEFI variables. shim detects MokNew on first
+                         //       reboot → MokManager.efi → user physically approves key →
+                         //       MokList updated. Second reboot: shim verifies Authenticode
+                         //       signature → loads signed hypervisor.efi. Users are NEVER
+                         //       instructed to disable Secure Boot (DisableSecureBootForbidden
+                         //       is a distinct error variant encoding this invariant).
+                         //       Constants: AETHER_MOK_KEY_BITS=2048, UEFI_VAR_MOK_NEW/AUTH/LIST,
+                         //       AETHER_SHIM_EFI_PATH, AETHER_MOKMANAGER_EFI_PATH,
+                         //       AETHER_HYPERVISOR_EFI_PATH, MOK_AUTH_PASSWORDLESS=[0u8;32].
+                         //       MokKeyFormat (Der only -- PEM rejected as non-UEFI wire format),
+                         //       MokEnrollmentRecord (sha256_fingerprint/key_size_bits/format +
+                         //       is_fingerprint_set()), SecureBootConfig (key_size_bits/format/
+                         //       require_mok_password/shim_path/mokmanager_path/hypervisor_path +
+                         //       aether_defaults() + validate()),
+                         //       SecureBootGate (shim_present + mok_enrolled + signature_verified
+                         //       + two_reboot_complete; passes() / enrollment_complete()),
+                         //       SecureBootError (WrongKeySize/InvalidKeyFormat/ShimPathEmpty/
+                         //       MokManagerPathEmpty/HypervisorPathEmpty/
+                         //       SecureBootDisabledInFirmware/DisableSecureBootForbidden/
+                         //       SignatureVerificationFailed/FingerprintNotSet/
+                         //       EnrollmentProtocolIncomplete),
+                         //       SecureBootPhase (NotStarted→KeyPairAndSignature→ShimOnEsp→
+                         //       MokNewWritten→MokManagerLaunched→KeyEnrolled→SignatureVerified→
+                         //       GatePassed; strictly ordered),
+                         //       SecureBootState (process_line()/mark_shim_present()/
+                         //       mark_mok_new_written()/gate()/is_gate_passed()),
+                         //       UART signatures: SB_UART_SIG_MOKMANAGER_LAUNCHED/KEY_ENROLLED/
+                         //       SIGNATURE_OK/MOK_NEW_CLEARED/HYPERVISOR_READY/SIGNATURE_FAILED/
+                         //       SECURE_BOOT_DISABLED (7 byte-pattern constants),
+                         //       init_secure_boot_integration() -- 8-step pipeline: validate
+                         //       config → check fingerprint set → advance to KeyPairAndSignature
+                         //       → caller drives ShimOnEsp via mark_shim_present() → MokNewWritten
+                         //       via mark_mok_new_written() → MokManagerLaunched/KeyEnrolled/
+                         //       SignatureVerified/GatePassed via process_line() UART scan.
+                         //       contains_bytes() O(n×m) window scan (no heap, no regex).
+                         //       Gate: shim_present + mok_enrolled + signature_verified +
+                         //       two_reboot_complete; "Hypervisor ready." after second reboot. — capstone of the x86 tier
                          //       (Ch50–54). Both Intel (Core Ultra 7 165H, Family=0x06 Model=0xAA)
                          //       AND AMD (Ryzen 9 7950X, Family=0x19 Model=0x61) must independently
                          //       boot Android through FEX-Emu before this gate passes.
