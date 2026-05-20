@@ -1,0 +1,18 @@
+[package]
+name = "compat-check"
+version = "0.1.0"
+edition = "2021"
+description = "AETHER Hardware Compatibility Checker"
+
+[[bin]]
+name = "aether-compat"
+path = "src/main.rs"
+
+[dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo    = "0.30"
+
+# raw-cpuid only compiled on x86_64 host (the checker runs on the target machine)
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+raw-cpuid = "11"
