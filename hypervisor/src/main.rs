@@ -424,7 +424,105 @@ mod x86_entry {
 
     use hypervisor::vtx::VmxCpuFeatures;
     use hypervisor::svm::SvmCpuFeatures;
-    use hypervisor::boot_x86::boot_x86_hypervisor;
+    use hypervisor::boot_x86::{boot_x86_hypervisor, set_framebuffer, FramebufferInfo};
+
+    // ── EFI GOP (Graphics Output Protocol) bindings ──────────────────────────
+    // We need to capture the framebuffer base + dimensions BEFORE
+    // ExitBootServices so we can paint a green/red status indicator on
+    // machines without a serial port.
+
+    #[repr(C)]
+    struct EfiGuid { d1: u32, d2: u16, d3: u16, d4: [u8; 8] }
+    // EFI_GRAPHICS_OUTPUT_PROTOCOL GUID: 9042a9de-23dc-4a38-96fb-7aded080516a
+    const GOP_GUID: EfiGuid = EfiGuid {
+        d1: 0x9042a9de, d2: 0x23dc, d3: 0x4a38,
+        d4: [0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a],
+    };
+
+    #[repr(C)]
+    struct EfiGopModeInfo {
+        version:          u32,
+        horizontal_res:   u32,
+        vertical_res:     u32,
+        pixel_format:     u32,  // 0=RGB888, 1=BGR888, 2=BitMask, 3=BltOnly
+        pixel_mask_red:   u32,
+        pixel_mask_green: u32,
+        pixel_mask_blue:  u32,
+        pixel_mask_reserved: u32,
+        pixels_per_scan_line: u32,
+    }
+
+    #[repr(C)]
+    struct EfiGopMode {
+        max_mode:        u32,
+        mode:            u32,
+        info:            *const EfiGopModeInfo,
+        size_of_info:    u64,
+        framebuffer_base: u64,
+        framebuffer_size: u64,
+    }
+
+    #[repr(C)]
+    struct EfiGop {
+        query_mode:   *const c_void,
+        set_mode:     *const c_void,
+        blt:          *const c_void,
+        mode:         *const EfiGopMode,
+    }
+
+    // EFI_BOOT_SERVICES.LocateProtocol is at offset 320 (UEFI 2.10 Table 7-3).
+    type LocateProtocolFn = unsafe extern "efiapi" fn(
+        *const EfiGuid,
+        *mut c_void,
+        *mut *mut c_void,
+    ) -> usize;
+
+    /// Query GOP and stash the framebuffer info for the post-EBS painter.
+    /// Silently does nothing if GOP can't be found.
+    unsafe fn capture_framebuffer(system_table: *const c_void) {
+        if system_table.is_null() { return; }
+        // EFI_SYSTEM_TABLE layout: hdr(24) + fw_vendor(8) + fw_rev(4) + pad(4)
+        //   + con_in_h(8) + con_in(8) + con_out_h(8) + con_out(8) + con_err_h(8)
+        //   + con_err(8) + runtime_svc(8) + boot_svc(8) + ...
+        // boot_services pointer at offset 96.
+        let boot_svc_ptr = unsafe {
+            *(system_table.cast::<u8>().add(96) as *const *const u8)
+        };
+        if boot_svc_ptr.is_null() { return; }
+        // LocateProtocol is at offset 320 in EFI_BOOT_SERVICES.
+        let lp = unsafe {
+            *(boot_svc_ptr.add(320) as *const LocateProtocolFn)
+        };
+
+        let mut gop_ptr: *mut c_void = core::ptr::null_mut();
+        let status = unsafe { lp(&GOP_GUID, core::ptr::null_mut(), &mut gop_ptr) };
+        if status != 0 || gop_ptr.is_null() { return; }
+
+        let gop  = gop_ptr as *const EfiGop;
+        let mode = unsafe { (*gop).mode };
+        if mode.is_null() { return; }
+        let info = unsafe { (*mode).info };
+        if info.is_null() { return; }
+
+        let fb_base = unsafe { (*mode).framebuffer_base };
+        let fb_size = unsafe { (*mode).framebuffer_size };
+        let width   = unsafe { (*info).horizontal_res };
+        let height  = unsafe { (*info).vertical_res };
+        let pitch   = unsafe { (*info).pixels_per_scan_line };
+        // pixel_format 0 = RGB (BGRA in memory? actually UEFI's RGB means red in low byte).
+        // pixel_format 1 = BGR (most common: B,G,R,reserved in memory order).
+        let fmt = unsafe { (*info).pixel_format };
+        let bgr = fmt == 1;
+
+        set_framebuffer(FramebufferInfo {
+            base: fb_base,
+            size: fb_size,
+            width,
+            height,
+            pitch_px: pitch,
+            bgr_format: bgr,
+        });
+    }
 
     // UTF-16LE banner strings (literal, NUL-terminated).
     static BANNER:        &[u16] = &utf16_z!("\r\nAETHER Hypervisor (x86_64) starting...\r\n");
@@ -503,6 +601,7 @@ mod x86_entry {
                 }
             }
             puts(st, MSG_HANDOFF);
+            capture_framebuffer(system_table);
         }
 
         // ── 3. Hand off to boot_x86_hypervisor ───────────────────────────────

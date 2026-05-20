@@ -27,6 +27,57 @@
 use core::ffi::c_void;
 use core::ptr;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GOP framebuffer info — captured BEFORE ExitBootServices (passed in from
+// main.rs x86_entry via set_framebuffer).  Used post-EBS to paint the screen
+// as a visible success/fail indicator on machines without serial ports.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+pub struct FramebufferInfo {
+    pub base:        u64,
+    pub size:        u64,
+    pub width:       u32,
+    pub height:      u32,
+    pub pitch_px:    u32, // pixels-per-scan-line
+    pub bgr_format:  bool, // true = BGRA8 (most common), false = RGBA8
+}
+
+static mut FB_INFO: Option<FramebufferInfo> = None;
+
+pub fn set_framebuffer(fb: FramebufferInfo) {
+    unsafe { FB_INFO = Some(fb); }
+}
+
+/// Fill the entire visible framebuffer with a solid colour.  Safe to call
+/// after ExitBootServices because the GOP framebuffer PA is identity-mapped
+/// by UEFI and stays mapped until we replace CR3 (which we do not).
+unsafe fn fb_fill(rgb: u32) {
+    unsafe {
+        let fb = match FB_INFO {
+            Some(f) => f,
+            None    => return,
+        };
+        let pixel: u32 = if fb.bgr_format {
+            // Convert RGB -> BGR: swap R and B bytes.
+            ((rgb & 0x0000FF) << 16) | (rgb & 0x00FF00) | ((rgb & 0xFF0000) >> 16)
+        } else {
+            rgb
+        };
+        let base = fb.base as *mut u32;
+        for y in 0..fb.height {
+            for x in 0..fb.width {
+                *base.add((y * fb.pitch_px + x) as usize) = pixel;
+            }
+        }
+    }
+}
+
+const FB_GREEN:  u32 = 0x00_00FF00;
+const FB_RED:    u32 = 0x00_FF0000;
+const FB_AMBER:  u32 = 0x00_FFAA00;
+const FB_BLUE:   u32 = 0x00_0000FF;
+
 use crate::boot::{BootContext, EfiSystemTable};
 use crate::svm::{
     init_svm_foundation, vmrun, NptTable, NptTableEntry,
@@ -113,6 +164,92 @@ pub unsafe fn com1_puts(s: &[u8]) {
         }
         unsafe { com1_putb(b); }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VGA text mode (0xB8000) — visible diagnostics for machines without a serial
+// port.  On UEFI, the firmware may have switched the GPU into framebuffer
+// mode where 0xB8000 is no longer the active display surface.  In that case
+// these writes are harmless but invisible.  On any machine with CSM/legacy
+// support, OR any machine that left the GPU in text mode, the messages
+// appear on-screen.
+//
+// Layout: 80 columns x 25 rows, two bytes per cell (char + attribute byte).
+// Attribute 0x07 = light-gray on black.  Attribute 0x0F = bright white.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VGA_BUF:   u64   = 0xB8000;
+const VGA_COLS:  usize = 80;
+const VGA_ROWS:  usize = 25;
+const VGA_ATTR:  u8    = 0x0F; // bright white on black
+
+static mut VGA_ROW: usize = 0;
+static mut VGA_COL: usize = 0;
+
+unsafe fn vga_putc(b: u8) {
+    unsafe {
+        if b == b'\n' || VGA_COL >= VGA_COLS {
+            VGA_COL = 0;
+            VGA_ROW += 1;
+            if VGA_ROW >= VGA_ROWS {
+                // Scroll: copy rows 1..ROWS up by one row.
+                let buf = VGA_BUF as *mut u16;
+                for row in 1..VGA_ROWS {
+                    for col in 0..VGA_COLS {
+                        let src = *buf.add(row * VGA_COLS + col);
+                        *buf.add((row - 1) * VGA_COLS + col) = src;
+                    }
+                }
+                // Clear the bottom row.
+                for col in 0..VGA_COLS {
+                    *buf.add((VGA_ROWS - 1) * VGA_COLS + col) = 0x0F20; // space, bright white
+                }
+                VGA_ROW = VGA_ROWS - 1;
+            }
+            if b == b'\n' { return; }
+        }
+        let off = VGA_ROW * VGA_COLS + VGA_COL;
+        let cell: u16 = (b as u16) | ((VGA_ATTR as u16) << 8);
+        *(VGA_BUF as *mut u16).add(off) = cell;
+        VGA_COL += 1;
+    }
+}
+
+pub unsafe fn vga_clear() {
+    unsafe {
+        let buf = VGA_BUF as *mut u16;
+        let blank: u16 = 0x0F20; // space char with bright-white attribute
+        for i in 0..(VGA_COLS * VGA_ROWS) {
+            *buf.add(i) = blank;
+        }
+        VGA_ROW = 0;
+        VGA_COL = 0;
+    }
+}
+
+pub unsafe fn vga_puts(s: &[u8]) {
+    for &b in s {
+        unsafe { vga_putc(b); }
+    }
+}
+
+pub unsafe fn vga_puthex64(v: u64) {
+    unsafe { vga_puts(b"0x"); }
+    let mut buf = [0u8; 16];
+    for i in 0..16 {
+        let nib = ((v >> (60 - i * 4)) & 0xF) as u8;
+        buf[i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+    }
+    unsafe { vga_puts(&buf); }
+}
+
+/// Print to both COM1 (serial) and VGA text mode.
+pub unsafe fn dual_puts(s: &[u8]) {
+    unsafe { com1_puts(s); vga_puts(s); }
+}
+
+pub unsafe fn dual_puthex64(v: u64) {
+    unsafe { com1_puthex64(v); vga_puthex64(v); }
 }
 
 pub unsafe fn com1_puthex64(mut v: u64) {
@@ -311,21 +448,21 @@ unsafe extern "C" fn host_vmexit_entry() -> ! {
         const VMCS_EXIT_REASON: u32 = 0x4402;
         let (exit_reason, _ok) = vmread(VMCS_EXIT_REASON);
 
-        com1_puts(b"[x86] VMEXIT reason=");
-        com1_puthex64(exit_reason);
+        dual_puts(b"[x86] VMEXIT reason=");
+        dual_puthex64(exit_reason);
         if exit_reason & (1u64 << 31) != 0 {
-            com1_puts(b" (VM-entry failure)\n");
+            dual_puts(b" (VM-entry failure)\n");
         } else {
             let basic = exit_reason & 0xFFFF;
             match basic {
-                0x0C => com1_puts(b" HLT_EXIT (Ch50 gate PASSED)\n"),
-                0x00 => com1_puts(b" EXCEPTION_NMI\n"),
-                0x01 => com1_puts(b" EXTERNAL_INTERRUPT\n"),
-                0x30 => com1_puts(b" EPT_VIOLATION\n"),
-                _    => com1_puts(b"\n"),
+                0x0C => { dual_puts(b" HLT_EXIT (Ch50 gate PASSED)\n"); fb_fill(FB_GREEN); }
+                0x00 => { dual_puts(b" EXCEPTION_NMI\n"); fb_fill(FB_RED); }
+                0x01 => { dual_puts(b" EXTERNAL_INTERRUPT\n"); fb_fill(FB_AMBER); }
+                0x30 => { dual_puts(b" EPT_VIOLATION\n"); fb_fill(FB_AMBER); }
+                _    => { dual_puts(b"\n"); fb_fill(FB_RED); }
             }
         }
-        com1_puts(b"[x86] Hypervisor in VMX root mode. Halting.\n");
+        dual_puts(b"[x86] Hypervisor in VMX root mode. Halting.\n");
         loop {
             core::arch::asm!("cli; hlt", options(nomem, nostack));
         }
@@ -350,10 +487,14 @@ pub unsafe fn boot_x86_hypervisor(
     };
     let _boot_result = unsafe { boot_ctx.run() };
 
-    // ── 2. ConOut is dead. Switch to COM1. ───────────────────────────────────
+    // ── 2. ConOut is dead. Switch to COM1 + VGA text mode + paint screen. ───
     unsafe {
         com1_init();
-        com1_puts(b"\n[x86] ExitBootServices: OK\n");
+        vga_clear();
+        // BLUE = boot pipeline started (post-EBS).  We will overwrite with
+        // GREEN on Ch50/51 gate pass or RED on any failure path.
+        fb_fill(FB_BLUE);
+        dual_puts(b"\n[x86] ExitBootServices: OK\n");
     }
 
     // ── 3. Compute physical addresses of our static regions ─────────────────
@@ -372,11 +513,11 @@ pub unsafe fn boot_x86_hypervisor(
     let host_rip     = host_vmexit_entry as *const () as u64;
 
     unsafe {
-        com1_puts(b"[x86] VMXON region PA = "); com1_puthex64(vmxon_pa); com1_puts(b"\n");
-        com1_puts(b"[x86] VMCS region PA  = "); com1_puthex64(vmcs_pa);  com1_puts(b"\n");
-        com1_puts(b"[x86] EPT PML4 PA     = "); com1_puthex64(ept_pml4_pa); com1_puts(b"\n");
-        com1_puts(b"[x86] Guest RAM PA    = "); com1_puthex64(guest_ram_pa); com1_puts(b"\n");
-        com1_puts(b"[x86] Host RIP        = "); com1_puthex64(host_rip);  com1_puts(b"\n");
+        dual_puts(b"[x86] VMXON region PA = "); dual_puthex64(vmxon_pa); dual_puts(b"\n");
+        dual_puts(b"[x86] VMCS region PA  = "); dual_puthex64(vmcs_pa);  dual_puts(b"\n");
+        dual_puts(b"[x86] EPT PML4 PA     = "); dual_puthex64(ept_pml4_pa); dual_puts(b"\n");
+        dual_puts(b"[x86] Guest RAM PA    = "); dual_puthex64(guest_ram_pa); dual_puts(b"\n");
+        dual_puts(b"[x86] Host RIP        = "); dual_puthex64(host_rip);  dual_puts(b"\n");
     }
 
     // ── 4. Place guest payload: a single HLT (0xF4) at guest RAM offset 0 ───
@@ -395,7 +536,7 @@ pub unsafe fn boot_x86_hypervisor(
             vmcb_pa, hsave_pa, npt_pml4_pa, guest_ram_pa,
         ) },
         None => {
-            unsafe { com1_puts(b"[x86] Unsupported CPU vendor. Halting.\n"); }
+            unsafe { dual_puts(b"[x86] Unsupported CPU vendor. Halting.\n"); }
             halt();
         }
     }
@@ -414,10 +555,10 @@ unsafe fn boot_intel(
     host_rip: u64,
 ) -> ! {
     unsafe {
-        com1_puts(b"[x86] Intel path: building EPT identity map...\n");
+        dual_puts(b"[x86] Intel path: building EPT identity map...\n");
         build_ept_identity_map(guest_ram_pa);
         let guest_cr3 = build_guest_page_table(guest_ram_pa);
-        com1_puts(b"[x86] Guest CR3 (PML4)= "); com1_puthex64(guest_cr3); com1_puts(b"\n");
+        dual_puts(b"[x86] Guest CR3 (PML4)= "); dual_puthex64(guest_cr3); dual_puts(b"\n");
 
         let cfg = VtxFoundationConfig {
             vmxon_pa,
@@ -431,17 +572,18 @@ unsafe fn boot_intel(
             guest_64bit:     true,         // long mode -> simpler VMCB
         };
 
-        com1_puts(b"[x86] init_vtx_foundation()...\n");
+        dual_puts(b"[x86] init_vtx_foundation()...\n");
         let vmxon = &mut *(ptr::addr_of_mut!(VMXON_REGION));
         let vmcs  = &mut *(ptr::addr_of_mut!(VMCS_REGION));
         match init_vtx_foundation(&cfg, vmxon, vmcs, host_stack_top, host_rip) {
             Ok(state) => {
-                com1_puts(b"[x86] init_vtx_foundation: phase=");
-                com1_puthex64(state.phase as u64);
-                com1_puts(b" (EPT active)\n");
+                dual_puts(b"[x86] init_vtx_foundation: phase=");
+                dual_puthex64(state.phase as u64);
+                dual_puts(b" (EPT active)\n");
             }
             Err(_) => {
-                com1_puts(b"[x86] init_vtx_foundation FAILED. Check BIOS VT-x.\n");
+                dual_puts(b"[x86] init_vtx_foundation FAILED. Check BIOS VT-x.\n");
+                fb_fill(FB_RED);
                 halt();
             }
         }
@@ -449,7 +591,7 @@ unsafe fn boot_intel(
         // Patch the guest CR3 the foundation init hardcoded to 0.
         let _ = vmwrite(VMCS_GUEST_CR3, guest_cr3);
 
-        com1_puts(b"[x86] VMLAUNCH...\n");
+        dual_puts(b"[x86] VMLAUNCH...\n");
         // VMLAUNCH transfers control: on entry the guest runs (HLT -> VMEXIT);
         // host_rip catches the VMEXIT.  If VMLAUNCH itself fails (e.g. invalid
         // VMCS), CF/ZF are set and execution continues past it — we halt.
@@ -459,12 +601,12 @@ unsafe fn boot_intel(
             "2: ",
             options(nostack),
         );
-        com1_puts(b"[x86] VMLAUNCH returned - VMCS validation failed.\n");
+        dual_puts(b"[x86] VMLAUNCH returned - VMCS validation failed.\n");
         const VMCS_VM_INSTR_ERROR: u32 = 0x4400;
         let (err, _ok) = vmread(VMCS_VM_INSTR_ERROR);
-        com1_puts(b"[x86] VM_INSTRUCTION_ERROR = ");
-        com1_puthex64(err);
-        com1_puts(b"\n");
+        dual_puts(b"[x86] VM_INSTRUCTION_ERROR = ");
+        dual_puthex64(err);
+        dual_puts(b"\n");
         halt();
     }
 }
@@ -482,10 +624,10 @@ unsafe fn boot_amd(
     guest_ram_pa: u64,
 ) -> ! {
     unsafe {
-        com1_puts(b"[x86] AMD path: building NPT identity map...\n");
+        dual_puts(b"[x86] AMD path: building NPT identity map...\n");
         build_npt_identity_map(guest_ram_pa);
         let guest_cr3 = build_guest_page_table(guest_ram_pa);
-        com1_puts(b"[x86] Guest CR3 (PML4)= "); com1_puthex64(guest_cr3); com1_puts(b"\n");
+        dual_puts(b"[x86] Guest CR3 (PML4)= "); dual_puthex64(guest_cr3); dual_puts(b"\n");
 
         let cfg = SvmFoundationConfig {
             vmcb_pa,
@@ -499,42 +641,45 @@ unsafe fn boot_amd(
             guest_64bit:     true,
         };
 
-        com1_puts(b"[x86] init_svm_foundation()...\n");
+        dual_puts(b"[x86] init_svm_foundation()...\n");
         let vmcb = &mut *(ptr::addr_of_mut!(VMCB_REGION));
         match init_svm_foundation(&cfg, vmcb) {
             Ok(state) => {
-                com1_puts(b"[x86] init_svm_foundation: phase=");
-                com1_puthex64(state.phase as u64);
-                com1_puts(b" (NPT active)\n");
+                dual_puts(b"[x86] init_svm_foundation: phase=");
+                dual_puthex64(state.phase as u64);
+                dual_puts(b" (NPT active)\n");
             }
             Err(_) => {
-                com1_puts(b"[x86] init_svm_foundation FAILED. Check BIOS SVM.\n");
+                dual_puts(b"[x86] init_svm_foundation FAILED. Check BIOS SVM.\n");
+                fb_fill(FB_RED);
                 halt();
             }
         }
 
-        // Patch guest CR3 (init hardcoded to 0).
         vmcb.write_u64(VMCB_SAVE_CR3, guest_cr3);
 
-        com1_puts(b"[x86] VMRUN...\n");
+        dual_puts(b"[x86] VMRUN...\n");
         vmrun(vmcb_pa);
-        com1_puts(b"[x86] VMRUN returned (VMEXIT observed).\n");
+        dual_puts(b"[x86] VMRUN returned (VMEXIT observed).\n");
 
         let exit_code = vmcb.exit_code();
         let exit_info_1 = vmcb.read_u64(VMCB_EXIT_INFO_1);
         let exit_info_2 = vmcb.read_u64(VMCB_EXIT_INFO_2);
-        com1_puts(b"[x86] VMCB exit_code = ");
-        com1_puthex64(exit_code);
+        dual_puts(b"[x86] VMCB exit_code = ");
+        dual_puthex64(exit_code);
         if exit_code == 0x78 {
-            com1_puts(b" HLT (Ch51 gate PASSED)\n");
+            dual_puts(b" HLT (Ch51 gate PASSED)\n");
+            fb_fill(FB_GREEN);
         } else if exit_code == 0x400 {
-            com1_puts(b" NPF (nested page fault)\n");
+            dual_puts(b" NPF (nested page fault)\n");
+            fb_fill(FB_AMBER);
         } else {
-            com1_puts(b"\n");
+            dual_puts(b"\n");
+            fb_fill(FB_RED);
         }
-        com1_puts(b"[x86] EXITINFO1 (NPF error code) = "); com1_puthex64(exit_info_1); com1_puts(b"\n");
-        com1_puts(b"[x86] EXITINFO2 (faulting GPA)   = "); com1_puthex64(exit_info_2); com1_puts(b"\n");
-        com1_puts(b"[x86] Hypervisor in SVM host mode. Halting.\n");
+        dual_puts(b"[x86] EXITINFO1 = "); dual_puthex64(exit_info_1); dual_puts(b"\n");
+        dual_puts(b"[x86] EXITINFO2 = "); dual_puthex64(exit_info_2); dual_puts(b"\n");
+        dual_puts(b"[x86] Hypervisor in SVM host mode. Halting.\n");
         halt();
     }
 }
