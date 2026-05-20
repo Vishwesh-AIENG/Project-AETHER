@@ -7,4 +7,8 @@ aether-skills/
 .claude/
 CLAUDE.md
 qemu/efi/
+qemu/efi-x86/
 qemu/ovmf_vars.fd
+qemu/com1.log
+qemu/screen.ppm
+qemu/screen.png
