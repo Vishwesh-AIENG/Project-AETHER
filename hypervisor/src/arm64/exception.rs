@@ -366,7 +366,7 @@ fn handle_wfx(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
 /// Prints the faulting IPA (from HPFAR_EL2) and ESR to the UART for
 /// Test 3 isolation verification, then halts the guest.
 #[inline]
-fn handle_data_abort(_ctx: &mut GuestContext, esr: u64) -> ExitReason {
+fn handle_data_abort(ctx: &mut GuestContext, esr: u64) -> ExitReason {
     // SAFETY: UART_PA is the QEMU virt PL011 address, always identity-mapped
     // by UEFI and never reclaimed. We are at EL2 in an exception handler;
     // the UART is accessible unconditionally.
@@ -383,6 +383,15 @@ fn handle_data_abort(_ctx: &mut GuestContext, esr: u64) -> ExitReason {
     // the byte offset within the page (same in VA and IPA for 4KB granule).
     // Source: ARM ARM DDI0487 D1.10.7; verified against Linux kvm/fault.c.
     let ipa = ((hpfar & 0x0000_00FF_FFFF_FFF0) << 8) | (far & 0xFFF);
+
+    // Phase 3: dispatch virtio-blk MMIO accesses inside the device window
+    // before treating the fault as fatal.
+    if crate::virtio_blk::ipa_in_device_window(ipa) {
+        if let Some(ret) = handle_virtio_mmio_fault(ctx, esr, ipa) {
+            return ret;
+        }
+        // Fault inside the window but undecodable — fall through to halt.
+    }
 
     unsafe {
         uart.puts("\r\n[EL2] Stage 2 fault caught!\r\n");
@@ -406,6 +415,64 @@ fn handle_data_abort(_ctx: &mut GuestContext, esr: u64) -> ExitReason {
 fn handle_inst_abort(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
     // Chapter 8: map the missing page if it belongs to the guest.
     ExitReason::Halt
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3: virtio-mmio fault decoder
+//
+// Decodes ESR_EL2.ISS for an ISV=1 data abort, dispatches the access to the
+// global virtio_blk backend, writes the result back into the destination
+// register on reads, and returns `RetryInstruction` so the guest advances
+// past the faulting instruction once the trap completes.
+//
+// On ISV=0 (unsupported decode) we return None so the caller treats it as
+// fatal — a real driver doing word-sized accesses always gets ISV=1.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[inline]
+fn handle_virtio_mmio_fault(ctx: &mut GuestContext, esr: u64, ipa: u64) -> Option<ExitReason> {
+    // ISS layout for a synchronous data abort with ISV=1:
+    //   bit 24: ISV
+    //   bits 23:22: SAS — 00=byte, 01=halfword, 10=word, 11=doubleword
+    //   bits 21: SSE (sign-extend) — ignored
+    //   bits 20:16: SRT — destination register index (0..30, 31 = XZR/discard)
+    //   bit  6: WnR — 1 = write, 0 = read
+    let iss = esr & 0x01FF_FFFF;
+    let isv = (iss >> 24) & 1 != 0;
+    if !isv { return None; }
+    let sas  = ((iss >> 22) & 0x3) as u8;
+    let srt  = ((iss >> 16) & 0x1F) as usize;
+    let is_write = (iss >> 6) & 1 != 0;
+
+    let offset = ipa - crate::virtio::VIRTIO_MMIO_BASE_IPA;
+
+    // We only handle word-sized accesses. virtio-mmio drivers always use 32-bit
+    // accesses except for descriptor ring memory (which goes through Stage 2
+    // mappings, not MMIO).
+    if sas != 0b10 { return None; }
+
+    if is_write {
+        // Source register value. Note: SRT=31 is XZR (writes-zero, ignored).
+        let val = if srt == 31 { 0u32 } else { ctx.regs[srt] as u32 };
+        let r = crate::virtio_blk::with_backend_mut(|be| be.handle_mmio_write(offset, val));
+        match r {
+            Some(Ok(())) => Some(ExitReason::RetryInstruction),
+            _ => None,
+        }
+    } else {
+        let r = crate::virtio_blk::with_backend_mut(|be| be.handle_mmio_read(offset));
+        match r {
+            Some(Ok(v)) => {
+                if srt != 31 {
+                    // ARM data-abort retry advances the PC past the faulting
+                    // load; we therefore need to populate the register here.
+                    ctx.regs[srt] = v as u64;
+                }
+                Some(ExitReason::RetryInstruction)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// EC = 0x18: System register access trapped.

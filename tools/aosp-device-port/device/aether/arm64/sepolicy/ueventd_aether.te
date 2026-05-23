@@ -1,0 +1,11 @@
+# ueventd_aether.te
+#
+# Source: hypervisor/src/userspace_boot.rs::AETHER_SEPOLICY_FIXES row 5
+#
+# Silent failure: ueventd cannot create /dev/aether/* device nodes;
+# HALs that depend on those nodes (sensors, modem) cannot register;
+# Zygote starts but sensor APIs return empty lists.
+
+# aether_device type is declared in hal_graphics_allocator_aether.te.
+
+allow ueventd aether_device:chr_file { open read write create };

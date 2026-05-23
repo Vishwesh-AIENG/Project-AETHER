@@ -1,0 +1,67 @@
+# init.aether.rc — AETHER service startup ordering.
+#
+# Mirrors UserspaceBootPhase progression in
+# hypervisor/src/userspace_boot.rs:
+#   KernelHandoff -> FirstStageInit -> SecondStageInit ->
+#   SystemDaemonsStarted -> HalsRegistered -> ZygoteReady -> HomeScreenRendered
+#
+# Critical-path HALs (HalName::is_critical_path):
+#   - gralloc.aether                  -> graphics allocator
+#   - aether.health@2.1-service       -> battery / power source
+# These get the `critical` flag so init reboots on repeated crash.
+
+on early-init
+    # AETHER virtual devices created by ueventd from ueventd.aether.rc
+    chmod 0660 /dev/dma_heap/system
+    chmod 0666 /dev/aether/sensors
+    chmod 0666 /dev/aether/modem
+
+on post-fs
+    # AETHER paravirt modem shared page (AETHER_MODEM_IPA = 0x0B000000).
+    chmod 0660 /dev/aether/modem
+    chown radio radio /dev/aether/modem
+
+on post-fs-data
+    mkdir /data/vendor/aether 0770 system system
+    mkdir /data/vendor/aether/sensors 0770 system system
+
+# ── HAL services — start order matters; gralloc + health first ───────────────
+
+service vendor.gralloc-aether /vendor/lib64/hw/gralloc.aether.so
+    class core
+    user system
+    group graphics drmrpc
+    critical
+
+service vendor.health-aether /vendor/bin/hw/aether.health@2.1-service
+    class hal
+    user system
+    group system
+    critical
+
+service vendor.power-aether /vendor/bin/hw/aether.power@5-service
+    class hal
+    user system
+    group system
+
+service vendor.sensors-aether /vendor/bin/hw/aether.sensors@2.1-service
+    class hal
+    user system
+    group system
+
+service vendor.radio-aether /vendor/bin/hw/aether.radio@2.0-service
+    class hal
+    user radio
+    group radio system
+
+service vendor.camera-aether /vendor/bin/hw/aether.camera@2.7-service
+    class hal
+    user cameraserver
+    group cameraserver system
+
+on boot
+    # Allow gralloc to talk to /dev/dri/renderD128 even before late_start.
+    chown system graphics /dev/dri/renderD128
+    chmod 0660 /dev/dri/renderD128
+    chown system graphics /dev/dri/card0
+    chmod 0660 /dev/dri/card0

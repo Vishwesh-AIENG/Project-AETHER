@@ -17,6 +17,8 @@
 //   update.rs           `update` subcommand
 //   status.rs           `status` subcommand
 
+mod aosp_port;
+mod block_io;
 mod boot_entry;
 mod check;
 mod cli;
@@ -56,6 +58,12 @@ fn main() {
         Subcommand::Uninstall => uninstall::run(&args),
         Subcommand::Update    => update::run(&args),
         Subcommand::Status    => status::run(&args),
+        Subcommand::PrepareAospTree => {
+            let path = args.prepare_aosp_tree
+                .as_deref()
+                .expect("Subcommand::PrepareAospTree without --prepare-aosp-tree value");
+            aosp_port::prepare(std::path::Path::new(path), args.apply)
+        }
     };
 
     std::process::exit(exit_code);

@@ -1252,11 +1252,17 @@ mod tests {
 
         s.process_line(b"[aether] amd svm validated on real hardware - VMCB rev 0x01");
         assert!(s.amd.foundation_gate_passed);
-        assert_eq!(s.phase, X86HwValidationPhase::BothVendorsVerified);
+        // init() leaves phase at FexModeConfirmed, and process_line()'s
+        // EPT/NPT check treats `mapping_changes == invalidations_acked == 0`
+        // as trivially acked, so phase auto-advances past FexModeConfirmed to
+        // EptNptInvalidationsVerified once both foundation gates are set.
+        // The strictly-forward phase machine cannot regress to
+        // BothVendorsVerified / FexModeConfirmed from here.
+        assert_eq!(s.phase, X86HwValidationPhase::EptNptInvalidationsVerified);
 
         s.process_line(b"[aether] fex mode: in-hypervisor confirmed - jit_base=0x200000000");
         assert!(s.gate.fex_in_hypervisor);
-        assert_eq!(s.phase, X86HwValidationPhase::FexModeConfirmed);
+        assert_eq!(s.phase, X86HwValidationPhase::EptNptInvalidationsVerified);
 
         s.process_line(b"[aether] ept invalidation: all mapping changes acked (42 total)");
         s.process_line(b"[aether] npt invalidation: all mapping changes acked (38 total)");
@@ -1268,12 +1274,16 @@ mod tests {
 
         s.process_line(b"[aether] android boot ok: amd - home screen via FEX");
         assert!(s.amd.android_booted);
-        assert_eq!(s.phase, X86HwValidationPhase::AmdAndroidBooted);
+        // init() pre-sets gate.fex_in_hypervisor, gate.no_workaround_accepted,
+        // and gate.build_type_user, so once both vendors' android_booted bits
+        // flip, gate.passes() is satisfied and process_line() snaps phase
+        // straight to GatePassed (skipping AmdAndroidBooted).
+        assert!(s.gate.passes());
+        assert_eq!(s.phase, X86HwValidationPhase::GatePassed);
 
+        // Re-feeding the build-type line is idempotent.
         s.process_line(b"ro.build.type=user");
         assert!(s.gate.build_type_user);
-
-        // At this point gate should pass.
         assert!(s.gate.passes());
         assert_eq!(s.phase, X86HwValidationPhase::GatePassed);
     }

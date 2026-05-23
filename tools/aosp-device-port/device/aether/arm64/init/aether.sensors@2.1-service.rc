@@ -1,0 +1,6 @@
+service vendor.sensors-aether /vendor/bin/hw/aether.sensors@2.1-service
+    interface android.hardware.sensors@2.1::ISensors default
+    class hal
+    user system
+    group system
+    capabilities BLOCK_SUSPEND

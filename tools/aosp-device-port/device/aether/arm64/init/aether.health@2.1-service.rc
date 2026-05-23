@@ -1,0 +1,5 @@
+service vendor.health-aether /vendor/bin/hw/aether.health@2.1-service
+    interface android.hardware.health@2.1::IHealth default
+    class hal
+    user system
+    group system

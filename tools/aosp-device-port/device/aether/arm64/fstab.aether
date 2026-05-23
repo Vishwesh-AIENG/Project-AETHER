@@ -1,0 +1,27 @@
+# fstab.aether — first-stage mount table.
+#
+# Matches /firmware/android/fstab nodes in kernel/aether.dts
+# (built by hypervisor/src/kernel.rs::build_production_android_dtb).
+#
+# Encryption: fileencryption=aes-256-xts + metadata_encryption=aes-256-xts
+# satisfies CONFIG_DM_CRYPT + CONFIG_CRYPTO_AES + CONFIG_CRYPTO_XTS in
+# hypervisor/src/kernel_defconfig.rs::AETHER_GKI_DEFCONFIG.
+#
+# Source spec: source.android.com/devices/bootloader/boot-image-header
+#              source.android.com/security/encryption/file-based
+#
+# Format: <src> <mnt_point> <type> <mnt_flags> <fs_mgr_flags>
+
+# Logical (dynamic-partition) entries mounted in first stage.
+system     /system    ext4   ro,barrier=1,discard                                            wait,logical,first_stage_mount,slotselect,avb=vbmeta
+vendor     /vendor    ext4   ro,barrier=1,discard                                            wait,logical,first_stage_mount,slotselect,avb=vbmeta
+product    /product   ext4   ro,barrier=1,discard                                            wait,logical,first_stage_mount,slotselect,avb=vbmeta
+
+# Userdata — F2FS with FBE + metadata encryption.
+/dev/block/by-name/userdata    /data    f2fs   noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier   latemount,wait,check,quota,formattable,fileencryption=aes-256-xts,metadata_encryption=aes-256-xts,keydirectory=/metadata/vold/metadata_encryption,wrappedkey,reservedsize=128M
+
+# Metadata partition (small ext4 used by vold for keys).
+/dev/block/by-name/metadata    /metadata    ext4   noatime,nosuid,nodev,discard    wait,formattable,first_stage_mount
+
+# Misc partition — AVB BCB (A/B slot state).
+/dev/block/by-name/misc        /misc        emmc   defaults                       defaults

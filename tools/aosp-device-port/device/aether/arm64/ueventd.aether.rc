@@ -1,0 +1,23 @@
+# ueventd.aether.rc — device-node permissions for AETHER virtual devices.
+#
+# Mirrors hypervisor/src/userspace_boot.rs::SelinuxViolation handling:
+# ueventd needs `allow ueventd aether_device:chr_file { open read write create };`
+# (AETHER_SEPOLICY_FIXES row 5) plus matching uevent rules to create the nodes.
+#
+# All AETHER device nodes live under /dev/aether/* with mode 0660 unless noted.
+
+# DMA-BUF heap — required by gralloc.aether for GPU-visible buffers.
+/dev/dma_heap/system          0660  system  graphics
+
+# DRM render/control nodes — Adreno GPU passthrough.
+/dev/dri/renderD128           0660  system  graphics
+/dev/dri/card0                0660  system  graphics
+
+# AETHER paravirt sensor device — surfaces VirtualSensorSuite (ch12).
+/dev/aether/sensors           0666  system  system
+
+# AETHER paravirt modem shared page — VirtualModem AT command interface.
+/dev/aether/modem             0660  radio   radio
+
+# NVMe namespace assigned to Android (Phase 3 storage path).
+/dev/block/nvme*              0660  root    system

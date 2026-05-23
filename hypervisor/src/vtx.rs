@@ -948,6 +948,46 @@ pub unsafe fn vmptrld(vmcs_pa: u64) -> bool {
 pub unsafe fn vmptrld(_pa: u64) -> bool { true }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// VMRESUME — Phase 5b
+//
+// VMRESUME re-enters the guest using the currently-loaded VMCS. Control
+// transfers to GUEST_RIP / GUEST_RSP from the VMCS guest area. The next
+// VMEXIT routes back to host_rip (already wired to host_vmexit_entry).
+//
+// VMRESUME differs from VMLAUNCH only in that the VMCS launch state must be
+// already "launched" — VMLAUNCH transitions it to launched on first entry;
+// every subsequent re-entry must use VMRESUME. The current dispatch model
+// is "VMLAUNCH once in boot_intel; VMRESUME on every re-entry from the
+// VMEXIT handler", which matches Intel SDM Vol. 3C §27.6 Figure 27-3.
+//
+// On failure (e.g. invalid VMCS state) CF or ZF is set and execution
+// continues past the instruction; we detect that and return false so the
+// caller can read VM_INSTRUCTION_ERROR via VMREAD.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Issue VMRESUME. Returns `true` if the instruction took (control should
+/// never observably return — execution transfers to the guest). Returns
+/// `false` if VMRESUME failed (caller should VMREAD VM_INSTRUCTION_ERROR).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub unsafe fn vmresume() -> bool {
+    let success: u8;
+    unsafe {
+        core::arch::asm!(
+            "vmresume",
+            "setnbe {success}",   // success = !CF && !ZF
+            success = out(reg_byte) success,
+            options(nostack),
+        );
+    }
+    success != 0
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn vmresume() -> bool { true }
+
+// ─────────────────────────────────────────────────────────────────────────────
 // VM exit reason decoder
 // ─────────────────────────────────────────────────────────────────────────────
 

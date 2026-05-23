@@ -1,0 +1,11 @@
+# vold_aether.te
+#
+# Source: hypervisor/src/userspace_boot.rs::AETHER_SEPOLICY_FIXES row 4
+#
+# Silent failure: vold cannot manage NVMe namespace block devices;
+# userdata partition mount fails with -EACCES; first-stage init prints
+# "Failed to mount userdata" and reboots into recovery.
+
+type nvme_device, dev_type;
+
+allow vold nvme_device:blk_file { open read write ioctl };

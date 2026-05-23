@@ -1,0 +1,14 @@
+# hal_aether.te
+#
+# Source: hypervisor/src/userspace_boot.rs::AETHER_SEPOLICY_FIXES row 3
+#
+# Silent failure: system_server cannot call into AETHER-specific HAL
+# services over hwbinder; HALs register but app-facing APIs (sensors,
+# power, health) return null/empty without throwing.
+
+type hal_aether_default, domain;
+type hal_aether_default_exec, exec_type, vendor_file_type, file_type;
+
+init_daemon_domain(hal_aether_default)
+hal_server_domain(hal_aether_default, hal_aether)
+binder_call(system_server, hal_aether_default)

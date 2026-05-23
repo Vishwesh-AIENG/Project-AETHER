@@ -915,6 +915,35 @@ pub fn build_android_dtb(
     }
     b.end_node()?; // /chosen
 
+    // ── /virtio_mmio@a000000 (AETHER paravirt block — Phase 3) ───────────────
+    //
+    // Single virtio-mmio device window at VIRTIO_MMIO_BASE_IPA (0x0A00_0000),
+    // 0x1000 bytes wide, advertising a virtio-blk device. Stage 2 maps this
+    // range as a trap; the EL2 data-abort handler dispatches MMIO accesses to
+    // crate::virtio_blk. SPI 16 (DT intid 16, edge-rising) signals used-ring
+    // completions back to the guest via vGIC injection.
+    //
+    // The node naming `virtio_mmio@a000000` matches QEMU's virt machine so
+    // stock GKI virtio_mmio bindings probe it without surgery.
+    {
+        let mut name = [0u8; 32];
+        let prefix = b"virtio_mmio@";
+        name[..prefix.len()].copy_from_slice(prefix);
+        let n = hex_u64(&mut name[prefix.len()..],
+                        crate::virtio::VIRTIO_MMIO_BASE_IPA);
+        b.begin_node(&name[..prefix.len() + n])?;
+        b.prop_str(b"compatible", b"virtio,mmio")?;
+        b.prop_cells(b"reg", &[
+            (crate::virtio::VIRTIO_MMIO_BASE_IPA >> 32) as u32,
+             crate::virtio::VIRTIO_MMIO_BASE_IPA as u32,
+            0, crate::virtio::VIRTIO_MMIO_REGION_SIZE as u32,
+        ])?;
+        // DT intid is absolute INTID − 32 for SPIs.
+        let intid_dt = crate::virtio::VIRTIO_BLK_SPI_INTID - 32;
+        b.prop_cells(b"interrupts", &[GIC_SPI, intid_dt, IRQ_TYPE_LEVEL_HIGH])?;
+        b.end_node()?;
+    }
+
     b.end_node()?; // root
 
     b.finalize_into(out)

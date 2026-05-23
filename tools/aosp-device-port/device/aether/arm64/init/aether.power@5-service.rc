@@ -1,0 +1,5 @@
+service vendor.power-aether /vendor/bin/hw/aether.power@5-service
+    interface aidl android.hardware.power.IPower/default
+    class hal
+    user system
+    group system

@@ -1,0 +1,44 @@
+# fex-stub — Rust-built static archive providing the 5 FEX FFI symbols as
+# no-op shims. Drops into hypervisor/third_party/fex/lib/ so that
+# `cargo build --features fex_linked` links cleanly today, before the
+# upstream FEX fork delivers a real libfex.a.
+#
+# Build:
+#   cd hypervisor/third_party/fex/fex-stub
+#   cargo +nightly build -Z build-std=core,compiler_builtins \
+#     -Z build-std-features=compiler-builtins-mem \
+#     --target x86_64-unknown-uefi --release
+#   cp target/x86_64-unknown-uefi/release/fex.lib ../lib/fex.lib
+#
+# Symbols delivered:
+#   fex_init               -> returns FexResult::NotInitialised (1)
+#   fex_load_arm64_elf     -> returns FexResult::NotInitialised (1)
+#   fex_translate_block    -> returns FexResult::NotInitialised (1)
+#   fex_dispatch_block     -> returns FexResult::NotInitialised (1)
+#   fex_shutdown           -> returns FexResult::Ok (0)
+#
+# AETHER's `try_init_fex` treats NotInitialised as "feature off" and falls
+# back to the foundation-gate HLT payload, so the hypervisor still boots
+# under this stub — the wiring runs end-to-end with no real translation.
+
+# Keep this crate OUT of the workspace so the AETHER hypervisor crate doesn't
+# accidentally try to build it as a normal dependency. fex-stub is a
+# standalone produce-an-archive build whose output is dropped into
+# hypervisor/third_party/fex/lib/ for the main build's linker to find.
+[workspace]
+
+[package]
+name    = "fex-stub"
+version = "0.0.1"
+edition = "2024"
+description = "AETHER FEX FFI stub — no-op shims for --features fex_linked link verification"
+
+[lib]
+name        = "fex"
+crate-type  = ["staticlib"]
+path        = "src/lib.rs"
+
+[profile.release]
+panic     = "abort"
+opt-level = "s"
+lto       = true

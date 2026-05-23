@@ -1,0 +1,9 @@
+# hal_sensors_aether.te
+#
+# Source: hypervisor/src/userspace_boot.rs::AETHER_SEPOLICY_FIXES row 2
+#
+# Silent failure: sensors HAL cannot read IIO device nodes; SensorService
+# reports "no sensors available"; apps that depend on accel/gyro/mag fail
+# without obvious error (rotation lock, fitness tracking, gaming).
+
+allow hal_sensors_default iio_device:chr_file { open read write ioctl };

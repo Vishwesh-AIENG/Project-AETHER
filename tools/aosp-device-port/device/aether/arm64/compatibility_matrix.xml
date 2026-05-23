@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    compatibility_matrix.xml — framework-side requirements on the vendor.
+    Declares the minimum HAL versions the AETHER Android framework needs.
+    Must be satisfied by manifest.xml entries on the vendor side.
+
+    Pinned to Android 14 target FCM version 7.
+-->
+<compatibility-matrix version="1.0" type="framework" level="7">
+
+    <hal format="hidl" optional="false">
+        <name>android.hardware.graphics.composer</name>
+        <version>3.0</version>
+        <interface>
+            <name>IComposer</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <hal format="hidl" optional="false">
+        <name>android.hardware.graphics.allocator</name>
+        <version>4.0</version>
+        <interface>
+            <name>IAllocator</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <hal format="hidl" optional="false">
+        <name>android.hardware.sensors</name>
+        <version>2.1</version>
+        <interface>
+            <name>ISensors</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <hal format="aidl" optional="false">
+        <name>android.hardware.power</name>
+        <version>5</version>
+        <interface>
+            <name>IPower</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <hal format="hidl" optional="false">
+        <name>android.hardware.health</name>
+        <version>2.1</version>
+        <interface>
+            <name>IHealth</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <kernel version="6.1.0">
+        <!-- Required CONFIG_ options come from AETHER_GKI_DEFCONFIG;
+             see kernel/aether_gki_defconfig and the drift-check script. -->
+    </kernel>
+
+    <sepolicy>
+        <kernel-sepolicy-version>33</kernel-sepolicy-version>
+        <sepolicy-version>33.0</sepolicy-version>
+    </sepolicy>
+
+    <avb>
+        <vbmeta-version>1.2</vbmeta-version>
+    </avb>
+
+</compatibility-matrix>

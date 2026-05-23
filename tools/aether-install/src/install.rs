@@ -129,14 +129,26 @@ pub fn run(args: &CliArgs) -> i32 {
         None => {
             let n = 2u32; // AETHER convention: nsid=1 reserved, Android lives in nsid=2
             if args.apply {
-                // Real implementation lives in nvme_admin (out of scope for Ch56 -- the
-                // creation pipeline is in hypervisor/src/nvme_namespace.rs and is exercised
-                // there). The installer here would invoke `nvme create-ns` or the libnvme
-                // FFI. We record the intent in state and emit the command for the user.
-                println!("           [stub] would run: nvme create-ns {} --nsze=...", target_disk);
-                state.android_nsid = Some(n);
+                // Phase 3: invoke nvme-cli on Linux for namespace creation.
+                // Windows path: the installer requires the caller to have
+                // already created the namespace via vendor tools and to pass
+                // an existing block device — there is no Windows libnvme
+                // equivalent that exposes Namespace Management Create.
+                match create_nvme_namespace(&target_disk) {
+                    Ok(()) => {
+                        println!("           created NSID={} on {}", n, target_disk);
+                        state.android_nsid = Some(n);
+                    }
+                    Err(e) => {
+                        eprintln!("           NVMe namespace create FAILED: {}", e);
+                        eprintln!("           hint: install nvme-cli on Linux, or pre-create the");
+                        eprintln!("                 namespace via vendor tools on Windows.");
+                        return 5;
+                    }
+                }
             } else {
-                println!("           [plan] create namespace NSID={} on {}", n, target_disk);
+                println!("           [plan] create namespace NSID={} on {} via `nvme create-ns`",
+                         n, target_disk);
             }
             n
         }
@@ -287,16 +299,46 @@ pub fn run(args: &CliArgs) -> i32 {
     print_step(8, "BootOrder updated", "OK");
 
     // Step 8: write Android image --
+    //
+    // Partition layout mirrors hypervisor/src/avb_boot.rs::AvbPartitionLayout
+    // ::aether_defaults():  boot_a starts at LBA 8192 (32 MiB into the
+    // namespace, 4-KiB sectors).  After writing we re-read the first 8 bytes
+    // and confirm the "ANDROID!" magic so the Phase 3 verify gate passes.
     if args.apply {
         let src = android_src.as_deref().unwrap();
-        // Real impl: open /dev/nvmeXnY (Linux) or the namespace block device
-        // and dd the image. The compat with NVMe Namespace Management is in
-        // hypervisor/src/nvme_namespace.rs; the host-side write is a normal
-        // dd-equivalent.
-        println!("           [stub] would dd {} -> {}/{} (NSID={})",
-            src, target_disk, nsid, nsid);
+        let device_path = namespace_block_device(&target_disk, nsid);
+        const BOOT_A_LBA: u64 = 8192;
+        let offset = crate::block_io::lba_to_byte_offset(BOOT_A_LBA);
+        match crate::block_io::BlockDevice::open(&device_path) {
+            Ok(mut dev) => match dev.dd_file(src, offset) {
+                Ok(written) => {
+                    println!("           wrote {} bytes from {} to {} at LBA {} ({} MiB)",
+                             written, src, device_path, BOOT_A_LBA, offset / (1024 * 1024));
+                    match dev.verify_prefix(offset, b"ANDROID!") {
+                        Ok(true)  => println!("           verify OK: ANDROID! magic present at LBA {}", BOOT_A_LBA),
+                        Ok(false) => {
+                            eprintln!("           verify FAILED: ANDROID! magic missing at LBA {}", BOOT_A_LBA);
+                            return 10;
+                        }
+                        Err(e)    => {
+                            eprintln!("           verify read FAILED: {}", e);
+                            return 10;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("           dd_file FAILED: {} -> {}: {}", src, device_path, e);
+                    return 10;
+                }
+            },
+            Err(e) => {
+                eprintln!("           open block device {} FAILED: {}", device_path, e);
+                return 10;
+            }
+        }
     } else {
-        println!("           [plan] write Android image to namespace NSID={}", nsid);
+        println!("           [plan] dd {} -> namespace NSID={} at LBA 8192 (boot_a)",
+                 android_src.as_deref().unwrap_or("android.img"), nsid);
     }
     print_step(9, "Android image", "OK");
 
@@ -346,6 +388,83 @@ pub fn run(args: &CliArgs) -> i32 {
 
 fn print_step(n: u32, label: &str, detail: &str) {
     println!("[{}/10] {:<24} {}", n, label, detail);
+}
+
+/// Spawn `nvme create-ns` on Linux. Returns Err with a human-readable
+/// message if nvme-cli is missing, the call fails, or we are on Windows
+/// (where Namespace Management Create requires vendor tools).
+#[cfg(unix)]
+fn create_nvme_namespace(target_disk: &str) -> Result<(), String> {
+    // AETHER convention: 32 GiB namespace for the Android boot/system/vendor/
+    // userdata combined image. NSZE is in LBAs at LBA format 0 (4096 bytes).
+    let nsze: u64 = 32u64 * 1024 * 1024 * 1024 / 4096;
+    let out = std::process::Command::new("nvme")
+        .args(&[
+            "create-ns",
+            target_disk,
+            &format!("--nsze={}", nsze),
+            &format!("--ncap={}", nsze),
+            "--flbas=0",
+            "--dps=0",
+        ])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "`nvme` binary not found on PATH — install nvme-cli (apt install nvme-cli / \
+                 dnf install nvme-cli) and re-run.".to_string()
+            } else {
+                format!("spawning `nvme create-ns` failed: {}", e)
+            }
+        })?;
+    if !out.status.success() {
+        return Err(format!(
+            "`nvme create-ns` exited with status {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Windows path: refuse, document the requirement.
+#[cfg(windows)]
+fn create_nvme_namespace(target_disk: &str) -> Result<(), String> {
+    Err(format!(
+        "NVMe Namespace Management Create is not implemented for Windows in Phase 3. \
+         Pre-create the namespace via vendor tools (Samsung Magician / Intel SSD Toolbox / \
+         vendor CLI) and re-run the installer with --existing-namespace pointing at the \
+         created namespace on {}.",
+        target_disk
+    ))
+}
+
+/// Map a target disk + nsid to the namespace block-device path.
+///
+/// Linux: `/dev/nvme0` -> `/dev/nvme0n2` for nsid=2 (AETHER convention).
+/// Windows: namespaces appear as separate PHYSICALDRIVE indices that vary
+///          by vendor; the simplest reliable handling is to require the
+///          installer caller to pass `--existing-namespace` with the right
+///          path. Until that wiring lands we return the same target_disk —
+///          users on Windows must point --target-disk at the namespace
+///          device directly.
+fn namespace_block_device(target_disk: &str, nsid: u32) -> String {
+    #[cfg(unix)]
+    {
+        // /dev/nvme0 + nsid=2 -> /dev/nvme0n2
+        if let Some(stripped) = target_disk.strip_prefix("/dev/nvme") {
+            // Take only the digit run after "nvme".
+            let ctrl: String = stripped.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !ctrl.is_empty() {
+                return format!("/dev/nvme{}n{}", ctrl, nsid);
+            }
+        }
+        target_disk.to_string()
+    }
+    #[cfg(windows)]
+    {
+        let _ = nsid;
+        target_disk.to_string()
+    }
 }
 
 fn resolve_gpu_plan(mut plan: GpuPlan, args: &CliArgs) -> Result<GpuPlan, i32> {

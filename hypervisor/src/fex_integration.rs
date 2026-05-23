@@ -585,7 +585,7 @@ impl FexResult {
 // or unit-test build (or any build without the static archive available),
 // they are stubs returning FexResult::NotInitialised.
 #[cfg(feature = "fex_linked")]
-extern "C" {
+unsafe extern "C" {
     /// Initialise the FEX runtime with hypervisor-provided host bindings.
     pub fn fex_init(bindings: *mut FexHostBindings, jit: *mut FexJitCache) -> FexResult;
     /// Parse an ARM64 ELF image at `image_base` (host VA) of `image_size`

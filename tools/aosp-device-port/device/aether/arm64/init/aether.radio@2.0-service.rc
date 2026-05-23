@@ -1,0 +1,6 @@
+service vendor.radio-aether /vendor/bin/hw/aether.radio@2.0-service
+    interface android.hardware.radio@2.0::IRadio default
+    class hal
+    user radio
+    group radio system
+    capabilities BLOCK_SUSPEND

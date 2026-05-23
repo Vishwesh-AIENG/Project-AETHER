@@ -1,0 +1,21 @@
+# hal_graphics_allocator_aether.te
+#
+# Source: hypervisor/src/userspace_boot.rs::AETHER_SEPOLICY_FIXES row 1
+# Source: hypervisor/src/adreno_render.rs::ADRENO_SELINUX_RULES
+#
+# Silent failure without these rules:
+#   - Gralloc cannot open /dev/dma_heap_device; ioctl returns -EACCES;
+#     Mesa silently falls back to llvmpipe software rendering.
+#   - Gralloc cannot open /dev/dri/renderD128; modesetting impossible;
+#     drm_hwcomposer falls back to fbdev.
+
+type aether_device, dev_type;
+
+# AETHER_SEPOLICY_FIXES[0]: GrallocDmaBuf.
+allow gralloc_default dma_heap_device:chr_file { open read write ioctl };
+
+# ADRENO_SELINUX_RULES[0]: GPU render node.
+allow gralloc_default gpu_device:chr_file { read write ioctl open };
+
+# ADRENO_SELINUX_RULES[1]: DRM card device.
+allow gralloc_default dri_device:chr_file { read write ioctl open };

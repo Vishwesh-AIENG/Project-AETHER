@@ -1,0 +1,127 @@
+// Android.bp — Soong build declarations for AETHER device-local modules.
+//
+// Mirrors hypervisor/src/aosp_build.rs::AETHER_SOONG_MODULES (8 entries):
+//   - 5x cc_binary  vendor HAL services
+//   - 1x cc_library_shared  gralloc.aether
+//   - 2x prebuilt_etc  vendor manifest + audio policy
+
+// ── Vendor HAL services ──────────────────────────────────────────────────────
+
+cc_binary {
+    name: "aether.sensors@2.1-service",
+    vendor: true,
+    relative_install_path: "hw",
+    init_rc: ["init/aether.sensors@2.1-service.rc"],
+    srcs: ["../../../vendor/aether/hal/sensors/service.cpp"],
+    shared_libs: [
+        "libbase",
+        "libcutils",
+        "libutils",
+        "liblog",
+        "libhidlbase",
+        "android.hardware.sensors@2.1",
+        "android.hardware.sensors@2.0",
+    ],
+}
+
+cc_binary {
+    name: "aether.radio@2.0-service",
+    vendor: true,
+    relative_install_path: "hw",
+    init_rc: ["init/aether.radio@2.0-service.rc"],
+    srcs: ["../../../vendor/aether/hal/radio/service.cpp"],
+    shared_libs: [
+        "libbase",
+        "libcutils",
+        "libutils",
+        "liblog",
+        "libhidlbase",
+        "android.hardware.radio@2.0",
+    ],
+}
+
+cc_binary {
+    name: "aether.camera@2.7-service",
+    vendor: true,
+    relative_install_path: "hw",
+    init_rc: ["init/aether.camera@2.7-service.rc"],
+    srcs: ["../../../vendor/aether/hal/camera/service.cpp"],
+    shared_libs: [
+        "libbase",
+        "libcutils",
+        "libutils",
+        "liblog",
+        "libhidlbase",
+        "android.hardware.camera.provider@2.7",
+    ],
+}
+
+cc_binary {
+    name: "aether.power@5-service",
+    vendor: true,
+    relative_install_path: "hw",
+    init_rc: ["init/aether.power@5-service.rc"],
+    srcs: ["../../../vendor/aether/hal/power/service.cpp"],
+    shared_libs: [
+        "libbase",
+        "libcutils",
+        "libutils",
+        "liblog",
+        "libbinder_ndk",
+        "android.hardware.power-V5-ndk",
+    ],
+}
+
+cc_binary {
+    name: "aether.health@2.1-service",
+    vendor: true,
+    relative_install_path: "hw",
+    init_rc: ["init/aether.health@2.1-service.rc"],
+    srcs: ["../../../vendor/aether/hal/health/service.cpp"],
+    shared_libs: [
+        "libbase",
+        "libcutils",
+        "libutils",
+        "liblog",
+        "libhidlbase",
+        "android.hardware.health@2.1",
+        "android.hardware.health@2.0",
+    ],
+}
+
+// ── Gralloc allocator ─────────────────────────────────────────────────────────
+
+cc_library_shared {
+    name: "gralloc.aether",
+    vendor: true,
+    relative_install_path: "hw",
+    srcs: ["../../../vendor/aether/hal/gralloc/gralloc_aether.cpp"],
+    shared_libs: [
+        "libbase",
+        "libcutils",
+        "libutils",
+        "liblog",
+        "libhardware",
+        "libsync",
+    ],
+    header_libs: ["libhardware_headers"],
+}
+
+// ── Prebuilt etc files ───────────────────────────────────────────────────────
+
+prebuilt_etc {
+    name: "aether_vendor_manifest",
+    vendor: true,
+    src: "manifest.xml",
+    sub_dir: "vintf",
+    filename_from_src: false,
+    filename: "manifest.xml",
+}
+
+prebuilt_etc {
+    name: "aether_audio_policy",
+    vendor: true,
+    src: "configs/audio_policy_configuration.xml",
+    filename_from_src: false,
+    filename: "audio_policy_configuration.xml",
+}

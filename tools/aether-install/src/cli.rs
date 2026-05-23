@@ -42,6 +42,7 @@ pub enum Subcommand {
     Uninstall,
     Update,
     Status,
+    PrepareAospTree,
     Help,
     Version,
 }
@@ -83,6 +84,9 @@ pub struct CliArgs {
     pub gpu_override:   Option<GpuModeOverride>,
     pub no_gpu_prompt:  bool,
 
+    // prepare-aosp-tree flag (mode 2 of the installer: AOSP device-port copy).
+    pub prepare_aosp_tree: Option<String>,
+
     // For error reporting
     pub raw_args: Vec<String>,
 }
@@ -102,6 +106,7 @@ impl CliArgs {
             esp:           None,
             gpu_override:  None,
             no_gpu_prompt: false,
+            prepare_aosp_tree: None,
             raw_args:      Vec::new(),
         }
     }
@@ -141,7 +146,13 @@ pub fn parse() -> Result<CliArgs, CliError> {
 pub fn parse_from(argv: &[String]) -> Result<CliArgs, CliError> {
     let mut i = 0;
 
-    // ---- Handle global help/version before subcommand parsing -----------------
+    // ---- Handle global short-circuit flags before subcommand parsing ----------
+    //
+    // --help / --version / --prepare-aosp-tree are stand-alone modes that do
+    // not require a subcommand. The first two never take a value; the third
+    // takes a path either as `--prepare-aosp-tree=PATH` or as
+    // `--prepare-aosp-tree PATH`.
+    let mut apply_flag = false;
     while i < argv.len() {
         match argv[i].as_str() {
             "--help" | "-h" => {
@@ -154,8 +165,38 @@ pub fn parse_from(argv: &[String]) -> Result<CliArgs, CliError> {
                 out.raw_args = argv.to_vec();
                 return Ok(out);
             }
+            "--prepare-aosp-tree" => {
+                let mut out = CliArgs::empty(Subcommand::PrepareAospTree);
+                out.raw_args = argv.to_vec();
+                out.prepare_aosp_tree = Some(take_value(argv, &mut i)?);
+                // Re-scan remaining args for --apply.
+                i += 1;
+                while i < argv.len() {
+                    if argv[i] == "--apply" { out.apply = true; }
+                    i += 1;
+                }
+                out.apply = out.apply || apply_flag;
+                return Ok(out);
+            }
+            s if s.starts_with("--prepare-aosp-tree=") => {
+                let mut out = CliArgs::empty(Subcommand::PrepareAospTree);
+                out.raw_args = argv.to_vec();
+                out.prepare_aosp_tree = Some(s["--prepare-aosp-tree=".len()..].to_owned());
+                i += 1;
+                while i < argv.len() {
+                    if argv[i] == "--apply" { out.apply = true; }
+                    i += 1;
+                }
+                out.apply = out.apply || apply_flag;
+                return Ok(out);
+            }
+            "--apply" => {
+                apply_flag = true;
+                i += 1;
+                continue;
+            }
             s if s.starts_with('-') => {
-                // global flag before subcommand -- consume and continue
+                // other global flag before subcommand -- consume and continue
                 i += 1;
                 continue;
             }
@@ -198,6 +239,13 @@ pub fn parse_from(argv: &[String]) -> Result<CliArgs, CliError> {
             "--android-image"  => { out.android_image = Some(take_value(argv, &mut i)?); }
             "--target-disk"    => { out.target_disk   = Some(take_value(argv, &mut i)?); }
             "--esp"            => { out.esp           = Some(take_value(argv, &mut i)?); }
+            "--prepare-aosp-tree" => {
+                out.prepare_aosp_tree = Some(take_value(argv, &mut i)?);
+            }
+            s if s.starts_with("--prepare-aosp-tree=") => {
+                out.prepare_aosp_tree = Some(s["--prepare-aosp-tree=".len()..].to_owned());
+            }
+
             "--gpu"            => {
                 let v = take_value(argv, &mut i)?;
                 match GpuModeOverride::parse(&v) {
@@ -286,6 +334,16 @@ SUBCOMMANDS:
     status               Show current install state:
                          install present yes/no, version, active A/B slot,
                          GPU configuration, last update time.
+
+STAND-ALONE MODE (no subcommand needed):
+    --prepare-aosp-tree PATH
+                         Copy tools/aosp-device-port/ templates into an
+                         external AOSP checkout at PATH. Adds:
+                           PATH/device/aether/arm64/
+                           PATH/vendor/aether/
+                         Without --apply, prints what would be copied.
+                         Example:
+                           aether-install --prepare-aosp-tree=$AOSP_ROOT --apply
 
 INSTALL / UPDATE FLAGS:
     --hypervisor PATH        Path to hypervisor.efi (required with --apply)

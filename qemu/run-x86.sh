@@ -63,6 +63,17 @@ echo "    On success the screen turns solid green; serial reports:"
 echo "      [x86] VMCB exit_code = 0x078 HLT (Ch51 gate PASSED)"
 echo ""
 
+ANDROID_DRIVES=()
+if [[ -n "${BOOT_IMG:-}" ]]; then
+    if [[ ! -r "$BOOT_IMG" ]]; then
+        echo "BOOT_IMG=$BOOT_IMG is not readable" >&2
+        exit 2
+    fi
+    echo "==> Attaching BOOT_IMG=$BOOT_IMG as virtio-blk-pci"
+    ANDROID_DRIVES+=(-drive "file=$BOOT_IMG,if=none,id=android0,format=raw"
+                     -device "virtio-blk-pci,drive=android0")
+fi
+
 exec "$QEMU_BIN" \
     -machine q35,accel=tcg \
     -cpu      max \
@@ -71,4 +82,5 @@ exec "$QEMU_BIN" \
     -drive    format=raw,file=fat:rw:"$EFI_DIR" \
     -serial   file:"$SERIAL_LOG" \
     -vga      std \
-    -no-reboot
+    -no-reboot \
+    "${ANDROID_DRIVES[@]}"

@@ -43,6 +43,11 @@ pub mod irq_forward;      // ch36: Physical IRQ Forwarding Validated — timer P
 pub mod passthrough; // ch11: PCIe device assignment — IOMMU groups, FLR, BAR mapping, SMMU STE
 pub mod paravirt;    // ch12: paravirtualization — virtual modem (AT/3GPP), MEMS sensor suite (BMI160
                      //       Gaussian noise models), Phone Bridge Mode toggle
+pub mod virtio;      // Phase 3: virtio-mmio transport common (regs, virtqueue, chain walker)
+pub mod virtio_blk;  // Phase 3: read-only virtio-blk device — memory-backed, paravirt block
+pub mod mmio_emu;    // Phase 5: MMIO emulation table (PL011 UART, GIC stubs, virtio_blk routing)
+pub mod fex_dispatch;// Phase 5: VMEXIT -> FEX translate/dispatch loop + MMIO routing
+pub mod android_runtime; // Phase 6: live Android lifecycle orchestrator (UART line buffer + scanners + aggregate gate)
 #[cfg(target_arch = "aarch64")]
 pub mod gpu;         // ch13: GPU partitioning via SR-IOV — VF enumeration, assignment, isolation
 #[cfg(target_arch = "aarch64")]
@@ -144,6 +149,11 @@ pub mod acpi;        // ch18: Windows ACPI tables — RSDP, XSDT, MADT (ARM GIC 
 pub mod bootloader;  // ch19: Android bootloader — AVB2 VBMeta verification, boot image header v3/v4,
                      //       A/B slot selection (BCB), rollback protection, kernel command line builder,
                      //       BootloaderLockState (Locked/Unlocked/Orange), KernelLaunchParams
+pub mod android_handoff; // Phase 4: x86-tier Android handoff — boot.img scan + DTB build + FEX initial GPR file
+pub mod android_boot; // boot.img discovery & layout (target-arch-agnostic): scans a region for
+                     //       "ANDROID!" magic, returns AndroidBootLayout (header_pa, kernel_pa,
+                     //       kernel_size, ramdisk_pa, ramdisk_size, header_version). Used by both
+                     //       ARM64 ERET path and x86 FEX path to locate the kernel payload.
 pub mod kernel;      // ch20: Linux kernel — ARM64 Image header parser (64-byte header, 0x644D5241 magic),
                      //       FDT/DTB builder (DtbBuilder: structure+strings blocks, big-endian tokens),
                      //       GKI mandatory config tracker (GkiConfig), KernelState phase machine
