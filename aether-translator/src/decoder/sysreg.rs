@@ -258,6 +258,79 @@ pub enum SysReg {
     ApgaKeyLoEl1,   // 3, 0, 2, 3, 0
     ApgaKeyHiEl1,   // 3, 0, 2, 3, 1
 
+    // ----- PMU event counters / typers (op0=3, op1=3, CRn=14, CRm=8..15) -----
+    // PMEVCNTR0..30_EL0 and PMEVTYPER0..30_EL0 (31 of each). Encoded as:
+    //   PMEVCNTRn_EL0:  op0=3, op1=3, CRn=14, CRm=8+(n>>3), op2=n&7
+    //   PMEVTYPERn_EL0: op0=3, op1=3, CRn=14, CRm=12+(n>>3), op2=n&7
+    PmevCntr(u8),   // 0..=30
+    PmevTyper(u8),  // 0..=30
+
+    // ----- Debug breakpoint / watchpoint (op0=2, op1=0, CRn=0, CRm=0..15) -----
+    // DBGBVR0..15_EL1: op0=2, op1=0, CRn=0, CRm=N, op2=4
+    // DBGBCR0..15_EL1: op0=2, op1=0, CRn=0, CRm=N, op2=5
+    // DBGWVR0..15_EL1: op0=2, op1=0, CRn=0, CRm=N, op2=6
+    // DBGWCR0..15_EL1: op0=2, op1=0, CRn=0, CRm=N, op2=7
+    DbgBvr(u8),     // 0..=15
+    DbgBcr(u8),     // 0..=15
+    DbgWvr(u8),     // 0..=15
+    DbgWcr(u8),     // 0..=15
+
+    // ----- Extra feature / ID registers (op0=3, op1=0, CRn=0, various) -----
+    Mvfr0El1,       // 3, 0, 0, 3, 0
+    Mvfr1El1,       // 3, 0, 0, 3, 1
+    Mvfr2El1,       // 3, 0, 0, 3, 2
+    IdPfr0El1,      // 3, 0, 0, 1, 0  (AArch32)
+    IdPfr1El1,      // 3, 0, 0, 1, 1
+    IdPfr2El1,      // 3, 0, 0, 3, 4
+    IdDfr0El1,      // 3, 0, 0, 1, 2
+    IdAfr0El1,      // 3, 0, 0, 1, 3
+    IdMmfr0El1,     // 3, 0, 0, 1, 4
+    IdMmfr1El1,     // 3, 0, 0, 1, 5
+    IdMmfr2El1,     // 3, 0, 0, 1, 6
+    IdMmfr3El1,     // 3, 0, 0, 1, 7
+    IdIsar0El1,     // 3, 0, 0, 2, 0
+    IdIsar1El1,     // 3, 0, 0, 2, 1
+    IdIsar2El1,     // 3, 0, 0, 2, 2
+    IdIsar3El1,     // 3, 0, 0, 2, 3
+    IdIsar4El1,     // 3, 0, 0, 2, 4
+    IdIsar5El1,     // 3, 0, 0, 2, 5
+    IdIsar6El1,     // 3, 0, 0, 2, 7
+    IdMmfr4El1,     // 3, 0, 0, 2, 6
+    IdMmfr5El1,     // 3, 0, 0, 3, 6
+
+    // ----- SVE / VHE -----
+    ZcrEl1,         // 3, 0, 1, 2, 0 (SVE configurable; ARMv8.2-A)
+    ZcrEl2,         // 3, 4, 1, 2, 0
+    ZcrEl3,         // 3, 6, 1, 2, 0
+    Cnthps_CtlEl2,  // 3, 4, 14, 5, 1 (Hyp Secure Phys Timer Control)
+    Cnthps_CvalEl2, // 3, 4, 14, 5, 2
+    Cnthvs_CtlEl2,  // 3, 4, 14, 4, 1
+    Cnthvs_CvalEl2, // 3, 4, 14, 4, 2
+
+    // ----- Translation table base alternates (op0=3, op1=4, CRn=2) -----
+    TtbrEl12_0,     // 3, 5, 2, 0, 0 — TTBR0_EL1 alias from EL2
+    TtbrEl12_1,     // 3, 5, 2, 0, 1
+    TcrEl12,        // 3, 5, 2, 0, 2
+    SctlrEl12,      // 3, 5, 1, 0, 0
+    CpacrEl12,      // 3, 5, 1, 0, 2
+    SpsrEl12,       // 3, 5, 4, 0, 0
+    ElrEl12,        // 3, 5, 4, 0, 1
+    Afsr0El12,      // 3, 5, 5, 1, 0
+    Afsr1El12,      // 3, 5, 5, 1, 1
+    EsrEl12,        // 3, 5, 5, 2, 0
+    FarEl12,        // 3, 5, 6, 0, 0
+    MairEl12,       // 3, 5, 10, 2, 0
+    AmairEl12,      // 3, 5, 10, 3, 0
+    VbarEl12,       // 3, 5, 12, 0, 0
+    CntkctlEl12,    // 3, 5, 14, 1, 0
+    CntpCtlEl02,    // 3, 5, 14, 2, 1
+    CntpCvalEl02,   // 3, 5, 14, 2, 2
+    CntpTvalEl02,   // 3, 5, 14, 2, 0
+    CntvCtlEl02,    // 3, 5, 14, 3, 1
+    CntvCvalEl02,   // 3, 5, 14, 3, 2
+    CntvTvalEl02,   // 3, 5, 14, 3, 0
+    ContextidrEl12, // 3, 5, 13, 0, 1
+
     /// Decoded encoding is valid but not in the curated named catalog.
     OtherKnown(SysRegId),
 }
@@ -266,6 +339,36 @@ pub enum SysReg {
 pub fn lookup(id: SysRegId) -> SysReg {
     use SysReg::*;
     let key = (id.op0(), id.op1(), id.crn(), id.crm(), id.op2());
+
+    // PMU event counters: op0=3, op1=3, CRn=14, CRm in 8..=15, op2 in 0..=7.
+    //   CRm 8..=11 (n=0..=31): PMEVCNTRn_EL0 — n = ((CRm-8)<<3) | op2
+    //   CRm 12..=15 (n=0..=31): PMEVTYPERn_EL0 — n = ((CRm-12)<<3) | op2
+    // (n=31 = PMCCFILTR_EL0 already named separately; we skip n=31 here.)
+    if id.op0() == 3 && id.op1() == 3 && id.crn() == 14 && id.op2() < 8 {
+        if (8..=11).contains(&id.crm()) {
+            let n = ((id.crm() - 8) << 3) | id.op2();
+            if n < 31 {
+                return PmevCntr(n);
+            }
+        }
+        if (12..=15).contains(&id.crm()) {
+            let n = ((id.crm() - 12) << 3) | id.op2();
+            if n < 31 {
+                return PmevTyper(n);
+            }
+        }
+    }
+    // Debug breakpoint / watchpoint arrays: op0=2, op1=0, CRn=0, op2 in 4..=7.
+    if id.op0() == 2 && id.op1() == 0 && id.crn() == 0 && id.crm() < 16 {
+        match id.op2() {
+            4 => return DbgBvr(id.crm()),
+            5 => return DbgBcr(id.crm()),
+            6 => return DbgWvr(id.crm()),
+            7 => return DbgWcr(id.crm()),
+            _ => {}
+        }
+    }
+
     match key {
         // ----- Identification -----
         (3, 0, 0, 0, 0) => MidrEl1,
@@ -492,6 +595,64 @@ pub fn lookup(id: SysRegId) -> SysReg {
         (3, 0, 2, 2, 3) => ApdbKeyHiEl1,
         (3, 0, 2, 3, 0) => ApgaKeyLoEl1,
         (3, 0, 2, 3, 1) => ApgaKeyHiEl1,
+
+        // Feature/ID registers (AArch32 + AArch64 extras)
+        (3, 0, 0, 1, 0) => IdPfr0El1,
+        (3, 0, 0, 1, 1) => IdPfr1El1,
+        (3, 0, 0, 1, 2) => IdDfr0El1,
+        (3, 0, 0, 1, 3) => IdAfr0El1,
+        (3, 0, 0, 1, 4) => IdMmfr0El1,
+        (3, 0, 0, 1, 5) => IdMmfr1El1,
+        (3, 0, 0, 1, 6) => IdMmfr2El1,
+        (3, 0, 0, 1, 7) => IdMmfr3El1,
+        (3, 0, 0, 2, 0) => IdIsar0El1,
+        (3, 0, 0, 2, 1) => IdIsar1El1,
+        (3, 0, 0, 2, 2) => IdIsar2El1,
+        (3, 0, 0, 2, 3) => IdIsar3El1,
+        (3, 0, 0, 2, 4) => IdIsar4El1,
+        (3, 0, 0, 2, 5) => IdIsar5El1,
+        (3, 0, 0, 2, 6) => IdMmfr4El1,
+        (3, 0, 0, 2, 7) => IdIsar6El1,
+        (3, 0, 0, 3, 0) => Mvfr0El1,
+        (3, 0, 0, 3, 1) => Mvfr1El1,
+        (3, 0, 0, 3, 2) => Mvfr2El1,
+        (3, 0, 0, 3, 4) => IdPfr2El1,
+        (3, 0, 0, 3, 6) => IdMmfr5El1,
+
+        // SVE configuration
+        (3, 0, 1, 2, 0) => ZcrEl1,
+        (3, 4, 1, 2, 0) => ZcrEl2,
+        (3, 6, 1, 2, 0) => ZcrEl3,
+
+        // Hypervisor secure timer (ARMv8.4-A+)
+        (3, 4, 14, 5, 1) => Cnthps_CtlEl2,
+        (3, 4, 14, 5, 2) => Cnthps_CvalEl2,
+        (3, 4, 14, 4, 1) => Cnthvs_CtlEl2,
+        (3, 4, 14, 4, 2) => Cnthvs_CvalEl2,
+
+        // EL1 alias registers (op1=5; ARMv8.1 VHE)
+        (3, 5, 1, 0, 0) => SctlrEl12,
+        (3, 5, 1, 0, 2) => CpacrEl12,
+        (3, 5, 2, 0, 0) => TtbrEl12_0,
+        (3, 5, 2, 0, 1) => TtbrEl12_1,
+        (3, 5, 2, 0, 2) => TcrEl12,
+        (3, 5, 4, 0, 0) => SpsrEl12,
+        (3, 5, 4, 0, 1) => ElrEl12,
+        (3, 5, 5, 1, 0) => Afsr0El12,
+        (3, 5, 5, 1, 1) => Afsr1El12,
+        (3, 5, 5, 2, 0) => EsrEl12,
+        (3, 5, 6, 0, 0) => FarEl12,
+        (3, 5, 10, 2, 0) => MairEl12,
+        (3, 5, 10, 3, 0) => AmairEl12,
+        (3, 5, 12, 0, 0) => VbarEl12,
+        (3, 5, 13, 0, 1) => ContextidrEl12,
+        (3, 5, 14, 1, 0) => CntkctlEl12,
+        (3, 5, 14, 2, 0) => CntpTvalEl02,
+        (3, 5, 14, 2, 1) => CntpCtlEl02,
+        (3, 5, 14, 2, 2) => CntpCvalEl02,
+        (3, 5, 14, 3, 0) => CntvTvalEl02,
+        (3, 5, 14, 3, 1) => CntvCtlEl02,
+        (3, 5, 14, 3, 2) => CntvCvalEl02,
 
         _ => OtherKnown(id),
     }

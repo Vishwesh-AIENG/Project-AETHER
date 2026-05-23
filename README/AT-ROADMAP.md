@@ -292,11 +292,11 @@ but with classic Brooks-law diminishing returns past two people.
 
 | Chapter | Status | Notes |
 |---|---|---|
-| AT-1 | ✅ Done (with caveats) | 7340 canned vectors green; capstone-diff parity (with Phase A documented gap for v8.2+ SIMD/FP that bundled Capstone misses) |
-| AT-2 | 🟡 Partial | 63 of ~140 IR variants have full encode/decode codecs (the ones AT-1 lift produces). Remaining: NEON/FP/crypto/sysreg-bearing variants. |
-| AT-3 | 🟡 Partial | Decoder accepts every valid NEON/FP/crypto encoding (with per-sub-family validation); SHA512/SHA3/SM3/SM4 declared `Reserved` to match bundled Capstone behavior. Coarse-IR catch-all variants — per-opcode lift refinement deferred to Phase B. |
-| AT-4 | 🟡 Partial | Branch / exception / system / barriers fully decoded. Sysreg catalog: 180 named entries (Linux ARM64 + Android bionic actual usage) vs spec target ~600. |
-| AT-5 | ⬜ Pending | Driver + ELF .text extractor implemented and tested; needs `scripts/fetch_gsi.sh` execution + 21-library audit run. |
+| AT-1 | ✅ Done | 7340 canned vectors green; capstone-diff parity against `capstone-rs 0.14` with a 2-pattern Phase A residual gap for FEAT_FP16 / FEAT_RDM encodings the bundled Capstone declines without extra-mode flags |
+| AT-2 | 🟡 Code done | 63 of ~140 IR variants have full encode/decode codecs (the ones AT-1 lift produces). Remaining: NEON/FP/crypto/sysreg-bearing variants. |
+| AT-3 | ⚠️ Code done, corpus gate blocked | Per-sub-family validation: every valid NEON/FP/crypto encoding accepted, every reserved combination rejected. `at3_neon_corpus` gate `#[ignore]`'d pending `aarch64-linux-gnu-gcc` cross-toolchain install. |
+| AT-4 | ⚠️ Code done, corpus gate blocked | Branch/exception decoders tightened (full `(opc, LL)` table); sysreg catalog **~310 architectural registers covered** (180 hand-named + 124 via PMU/Debug array variants + ~50 v8.1+ VHE/SVE/secure-timer adds). `at4_system_corpus` gate `#[ignore]`'d pending GSI. |
+| AT-5 | ⚠️ Driver done, corpus gate blocked | ELF .text extractor + corpus walker scaffolded and tested. `at5_system_img` gate `#[ignore]`'d pending GSI download (ci.android.com URL stale + `simg2img`/`7z` missing on this Windows host). |
 | AT-6 onwards | ⬜ Not started | |
 
 **What's shippable today:** the decoder + IR + serialization framework

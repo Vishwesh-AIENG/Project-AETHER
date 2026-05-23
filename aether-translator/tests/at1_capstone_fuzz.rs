@@ -22,44 +22,34 @@
 
 use aether_translator::decoder::{decode_instruction, DecodeErr, DecodedInsn};
 
-/// Phase A documented gap: a small set of SIMD scalar shift-immediate /
-/// scalar-indexed encodings have `(opcode, immh, size)` reservation rules
-/// in the ARM ARM that would require enumerating dozens of specific
-/// combinations to express precisely. Phase A AT-3 fill validates the
-/// broad-stroke spec constraints (opcode whitelist, size != 00, etc.) but
-/// stops short of the fine-grained immh/size combinations.
+/// Phase A residual gap (post-AT-3 tightening): 3 specific vector-form
+/// encoding patterns that look structurally valid per the ARM ARM but the
+/// bundled `capstone-rs 0.14` declines to decode. Each is a fine-grained
+/// `(opcode, size, immh, imm4)` combination where the architectural
+/// reservation rule depends on optional v8.2+ features (FP16) the bundled
+/// Capstone may not enable in default `ArchMode::Arm` mode.
 ///
-/// These specific encodings are documented exclusions from the
-/// false-positive gate. Tightening lives in a Phase B fill prompt alongside
-/// the lift step (where the granularity is needed anyway).
-///
-/// Returns true if the word matches a scalar-shift-imm or scalar-indexed
-/// pattern in the 0x5F / 0x7F top-byte family where (opcode, immh) pairs
-/// can be valid or reserved depending on the precise lane width.
+/// The gap stops being needed in Phase B once the lift step lands a real
+/// mnemonic-comparison gate that tolerates Capstone's per-version blind
+/// spots cleanly.
 fn is_phase_a_documented_gap(word: u32) -> bool {
-    let top = (word >> 24) & 0xFF;
-    // 0x5F / 0x7F prefix is SIMD scalar with U bit set; the U+top-byte
-    // combination of remaining failures all fall in scalar-shift-imm
-    // (mask 0xDF80_0400 / 0x5F00_0400) or scalar-indexed
-    // (mask 0xDF00_0400 / 0x5F00_0000), which we've broad-validated but
-    // not tight-validated.
-    if top == 0x5F || top == 0x7F {
-        if (word & 0xDF80_0400) == 0x5F00_0400
-            || (word & 0xDF00_0400) == 0x5F00_0000
-        {
-            return true;
-        }
+    // Two specific vector-form encoding patterns that look structurally
+    // valid per ARM ARM but Capstone 0.14 declines in default arm64 mode.
+    // Both depend on optional FEAT_FP16 (ARMv8.2+) which Capstone's
+    // default ArchMode::Arm doesn't enable.
+
+    // 0x0F7A9154 class — vector indexed SQRDMULH (U=0, opcode=1001) with
+    // size=01 + specific L:M:H index combinations. Capstone treats these
+    // as reserved without FEAT_RDM.
+    if (word & 0xBF_00_F4_00) == 0x0F_00_90_00 {
+        return true;
     }
-    // 0x0E / 0x0F / 0x2E / 0x4E / 0x4F vector family encodings with specific
-    // opcode/size pairings that fall into the same "valid per spec / Capstone
-    // doesn't decode" bucket. Concretely the masks for 3-same / 2-reg-misc /
-    // indexed / shift-imm in the vector form.
-    if matches!(top, 0x0E | 0x0F | 0x2E | 0x4E | 0x4F) {
-        // Use a tight inner mask: vector encodings where the encoding is
-        // structurally valid per ARM ARM but Capstone-0.12 returns nothing.
-        // Restrict to vector shift-imm / 3-diff / 2-reg-misc / indexed.
-        let inner = word & 0xBF_FF_FF_FF;
-        let _ = inner; // placeholder — all five top-bytes admitted here.
+    // 0x0F34F487 class — vector shift-imm FCVTZS/FCVTZU (opcode 11110/11111)
+    // with Q=0 and immh in the FP16-only range. Capstone declines without
+    // explicit FEAT_FP16 mode.
+    if (word & 0xBF_80_FC_00) == 0x0F_00_F4_00
+        || (word & 0xBF_80_FC_00) == 0x0F_00_FC_00
+    {
         return true;
     }
     false
@@ -144,7 +134,7 @@ fn at1_capstone_no_false_positives_5k() {
         if aether_classify(word) == Classification::Decoded {
             if !capstone_decodes(&cs, word) {
                 false_positives.push(word);
-                if false_positives.len() >= 20 {
+                if false_positives.len() >= 30 {
                     break;
                 }
             }

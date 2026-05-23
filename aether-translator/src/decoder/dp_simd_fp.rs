@@ -318,20 +318,25 @@ fn decode_crypto_sha512(_word: u32) -> Result<DecodedInsn, DecodeErr> {
 // =============================================================================
 
 fn decode_simd_3same(word: u32) -> Result<DecodedInsn, DecodeErr> {
-    // size (bits[23:22]) and opcode (bits[15:11]) together. For Q=0 with size=11
-    // and certain opcodes, the encoding is reserved (no 2D NEON ops).
     let q = (word >> 30) & 1;
     let size = (word >> 22) & 0x3;
     let opcode = (word >> 11) & 0x1F;
-    // Many opcodes are valid across U/size. Reject specific known-bad combos:
-    //   - Q=0 with size=11 + opcode ∈ {add/sub/cmgt/cmge/cmtst/sshl/sqshl/srshl/
-    //     sqrshl/smax/smin/sabd/saba/...} would mean a 2D op in 64-bit form,
-    //     which is reserved (NEON 2D requires Q=1).
+    // Q=0 + size=11 reserved (NEON 2D requires Q=1).
     if q == 0 && size == 0b11 {
         return Err(DecodeErr::Reserved);
     }
-    // opcode 11000..11111 covers FP ops and pairwise — most are valid.
-    let _ = opcode;
+    // FP 3-same (opcode 11000..11111) uses size to select ftype:
+    //   size[1]=0 → single (S), size[1]=1 → double (D)
+    //   size[0]=0 → normal FP, size[0]=1 → reserved
+    // → size=11 is reserved in FP 3-same form.
+    if opcode >= 0b11000 && size == 0b11 {
+        return Err(DecodeErr::Reserved);
+    }
+    // SQDMULH/SQRDMULH (integer 3-same opcode 01101) is defined only for
+    // size in {01, 10} — there is no D-form saturating doubling multiply.
+    if opcode == 0b01101 && size == 0b11 {
+        return Err(DecodeErr::Reserved);
+    }
     Ok(DecodedInsn::AdvSimd { raw: word })
 }
 
@@ -403,9 +408,22 @@ fn decode_simd_across_lanes(word: u32) -> Result<DecodedInsn, DecodeErr> {
 }
 
 fn decode_simd_copy(word: u32) -> Result<DecodedInsn, DecodeErr> {
-    // imm5 (bits[20:16]) must be non-zero (else encoding is undefined).
     let imm5 = (word >> 16) & 0x1F;
     if imm5 == 0 {
+        return Err(DecodeErr::Reserved);
+    }
+    let q = (word >> 30) & 1;
+    let op = (word >> 29) & 1;
+    let imm4 = (word >> 11) & 0xF;
+    // INS (element) writes into a Q-register — Q must be 1.
+    if op == 1 && q == 0 {
+        return Err(DecodeErr::Reserved);
+    }
+    // For op=0 (DUP/SMOV/UMOV), imm4 must be in the valid set:
+    //   0000 DUP (element), 0001 DUP (general),
+    //   0101 SMOV, 0111 UMOV.
+    // op=1 (INS element) accepts arbitrary imm4 (lane index).
+    if op == 0 && !matches!(imm4, 0b0000 | 0b0001 | 0b0101 | 0b0111) {
         return Err(DecodeErr::Reserved);
     }
     Ok(DecodedInsn::AdvSimd { raw: word })
@@ -446,13 +464,30 @@ fn decode_simd_shift_imm(word: u32) -> Result<DecodedInsn, DecodeErr> {
 fn decode_simd_indexed(word: u32) -> Result<DecodedInsn, DecodeErr> {
     let size = (word >> 22) & 0x3;
     let opcode = (word >> 12) & 0xF;
-    // Vector indexed: size=00 has no valid element width (byte indexed makes
-    // no architectural sense). Reserved.
+    let u = (word >> 29) & 1;
     if size == 0b00 {
         return Err(DecodeErr::Reserved);
     }
     if opcode == 0b1011 || opcode == 0b1111 {
         return Err(DecodeErr::Reserved);
+    }
+    // Vector indexed valid (U, opcode) pairs per ARM ARM Table C4-11:
+    //   U=0: 0001 FMLA, 0011 SMLAL, 0101 SMLSL/FMUL, 0111 SQDMULH, 1001 SQDMLAL,
+    //        1101 SQDMULL, 1100 FMULX(?)
+    //   U=1: 0001 FMLA/FMLAL, 0011 UMLAL, 0101 UMLSL/FMULX, 0111 SQRDMULH, 1001 FMLA/SQRDMLAH,
+    //        1101 SQRDMLSH(?)
+    // Conservative validation: reject unallocated opcodes.
+    // Vector indexed with size=11 only valid for FP-form (FMLA/FMLS/FMUL/FMULX).
+    if size == 0b11 {
+        // FP opcodes for indexed: 0001 (FMLA), 0101 (FMUL), 1001 (FMULX FP).
+        let ok = match (u, opcode) {
+            (0, 0b0001 | 0b0101 | 0b1001) => true,
+            (1, 0b0001 | 0b0101 | 0b1001) => true,
+            _ => false,
+        };
+        if !ok {
+            return Err(DecodeErr::Reserved);
+        }
     }
     Ok(DecodedInsn::AdvSimd { raw: word })
 }
@@ -468,8 +503,12 @@ fn decode_simd_permute(word: u32) -> Result<DecodedInsn, DecodeErr> {
 }
 
 fn decode_simd_extract(word: u32) -> Result<DecodedInsn, DecodeErr> {
-    // imm4 (bits[14:11]): for Q=0, imm4<8 required; for Q=1, imm4<16. Always
-    // valid because imm4 is 4-bit.
+    // For Q=0, only the 8 low bytes are addressable — imm4 must be < 8.
+    let q = (word >> 30) & 1;
+    let imm4 = (word >> 11) & 0xF;
+    if q == 0 && imm4 >= 8 {
+        return Err(DecodeErr::Reserved);
+    }
     Ok(DecodedInsn::AdvSimd { raw: word })
 }
 
@@ -533,6 +572,13 @@ fn decode_simd_scalar_shift_imm(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if !valid_simd_shift_imm_opcode(opcode, u, /* scalar */ true) {
         return Err(DecodeErr::Reserved);
     }
+    // Scalar fixed-point convert opcodes (SCVTF/UCVTF/FCVTZS/FCVTZU =
+    // 11100..11111) require immh in {01xx (S form), 1xxx (D form)}, i.e.
+    // immh >= 4. immh = 001x in scalar shift-imm is reserved (no scalar
+    // FP16 fixed-point convert in base ARMv8).
+    if (0b11100..=0b11111).contains(&opcode) && immh < 0b0100 {
+        return Err(DecodeErr::Reserved);
+    }
     Ok(DecodedInsn::AdvSimd { raw: word })
 }
 
@@ -565,20 +611,24 @@ fn valid_simd_shift_imm_opcode(opcode: u32, u: u32, scalar: bool) -> bool {
 fn decode_simd_scalar_indexed(word: u32) -> Result<DecodedInsn, DecodeErr> {
     let size = (word >> 22) & 0x3;
     let opcode = (word >> 12) & 0xF;
-    // Scalar indexed: size=00 (byte element) is reserved — no byte-indexed
-    // scalar SIMD operations exist.
+    let u = (word >> 29) & 1;
+    // Scalar indexed: size=00 (byte element) is reserved.
     if size == 0b00 {
         return Err(DecodeErr::Reserved);
     }
-    // Valid scalar indexed opcodes per ARM ARM C4.1.6:
-    //   0001 FMLA (FP) / SQDMLAL/SQDMLAL2 (int, size!=00,11)
-    //   0011 FMLS (FP) / SQDMLSL/SQDMLSL2
-    //   0101 SQDMULL/SQDMULL2
-    //   0111 SQDMULH
-    //   1001 SQRDMULH
-    //   1101 SQRDMLAH/SQRDMLSH (ARMv8.1+)
-    // All other opcode values reserved.
-    if !matches!(opcode, 0b0001 | 0b0011 | 0b0101 | 0b0111 | 0b1001 | 0b1101) {
+    // Valid scalar indexed opcodes per ARM ARM C4.1.6. U bit gates:
+    //   U=0:
+    //     0001 FMLA (FP)              0011 FMLS (FP)
+    //     0101 FMUL/SQDMULL{2}        0111 SQDMULH
+    //     1001 SQRDMULH
+    //   U=1:
+    //     1001 FMULX (FP scalar)      1101 SQRDMLAH/SQRDMLSH (ARMv8.1+)
+    let ok = match (u, opcode) {
+        (0, 0b0001 | 0b0011 | 0b0101 | 0b0111 | 0b1001) => true,
+        (1, 0b1001 | 0b1101) => true,
+        _ => false,
+    };
+    if !ok {
         return Err(DecodeErr::Reserved);
     }
     Ok(DecodedInsn::AdvSimd { raw: word })
