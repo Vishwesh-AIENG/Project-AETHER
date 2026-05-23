@@ -1,0 +1,24 @@
+[package]
+name        = "aether-translator"
+version     = "0.0.1"
+edition     = "2021"
+description = "AETHER ARM64 -> x86_64 dynamic binary translator (Phase A: decoder + IR)"
+
+[lib]
+name = "aether_translator"
+path = "src/lib.rs"
+
+[features]
+# `std` is a default feature so host-side `cargo test` / `cargo check` work
+# out of the box. When the hypervisor links this crate it uses
+# `default-features = false` to drop back to `no_std`.
+default = ["std"]
+std = []
+
+[dev-dependencies]
+# AT-1 fuzz cross-check
+capstone = "0.12"
+# Hand-curated golden-vector tests don't need proptest, but keep door open.
+proptest = "1"
+
+# Profiles defined at workspace root.

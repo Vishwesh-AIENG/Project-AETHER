@@ -1,0 +1,30 @@
+# cargo-fuzz workspace for AETHER translator.
+#
+# Out of the parent workspace (excluded in root Cargo.toml) because cargo-fuzz
+# needs its own target dir + nightly libfuzzer-sys instrumentation.
+#
+# Build with:
+#   cargo install cargo-fuzz   # one-time
+#   cd aether-translator
+#   cargo +nightly fuzz run decode_capstone_diff -- -runs=10000000
+
+[package]
+name        = "aether-translator-fuzz"
+version     = "0.0.0"
+publish     = false
+edition     = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys     = "0.4"
+capstone          = "0.12"
+aether-translator = { path = ".." }
+
+[[bin]]
+name              = "decode_capstone_diff"
+path              = "fuzz_targets/decode_capstone_diff.rs"
+test              = false
+doc               = false
+bench             = false

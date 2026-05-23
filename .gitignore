@@ -2,6 +2,7 @@
 target/
 *.o
 *.a
+*.lib
 linux-ref/
 aether-skills/
 .claude/
@@ -12,3 +13,18 @@ qemu/ovmf_vars.fd
 qemu/com1.log
 qemu/screen.ppm
 qemu/screen.png
+
+# aether-translator corpora (Phase A AT-3/4/5; binary blobs, dev-local).
+aether-translator/corpus/system_img/
+aether-translator/corpus/.gsi-work/
+aether-translator/corpus/*.so
+aether-translator/corpus/*.so.aarch64
+aether-translator/corpus/*.o
+aether-translator/corpus/vmlinux-gki.aarch64
+aether-translator/corpus/libcrypto.so.aarch64
+aether-translator/corpus/libc.so.aarch64
+# cargo-fuzz artifacts (out-of-workspace crate)
+aether-translator/fuzz/target/
+aether-translator/fuzz/corpus/
+aether-translator/fuzz/artifacts/
+aether-translator/fuzz/Cargo.lock

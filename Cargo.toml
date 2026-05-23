@@ -4,6 +4,11 @@ members = [
     "hypervisor",
     "tools/compat-check",
     "tools/aether-install",
+    "aether-translator",
+]
+
+exclude = [
+    "aether-translator/fuzz",
 ]
 
 [profile.release]
