@@ -677,6 +677,32 @@ pub enum IrOp {
         imm: u8,
     },
 
+    // ----- Guest CPU state access (pre-SSA register/flag/PC plumbing) -----
+    //
+    // These ops bracket every basic block. Phase B SSA construction folds
+    // them into proper SSA values via memory-promotion + phi insertion at
+    // join points. Until then, every read/write of an architectural
+    // register goes through one of these.
+
+    /// Read 64-bit guest X<reg> (or zero-extended W<reg> if sf=false).
+    /// reg=31 means XZR (always reads as 0); decoder rewrites SP-context to ReadSp.
+    ReadGpr { dst: IrValueId, reg: u8, sf: bool },
+    /// Write guest X<reg> = src. If sf=false, low 32 bits written, upper 32 zeroed (ARM W-write semantics).
+    /// reg=31 means write to XZR (discarded).
+    WriteGpr { reg: u8, src: IrValueId, sf: bool },
+    /// Read/write SP (the stack pointer; encoding 31 in SP context).
+    ReadSp { dst: IrValueId, sf: bool },
+    WriteSp { src: IrValueId, sf: bool },
+    /// Read/write 128-bit guest V<reg>.
+    ReadFpr { dst: IrValueId, reg: u8 },
+    WriteFpr { reg: u8, src: IrValueId },
+    /// Read/write the NZCV flag bundle.
+    ReadFlags { dst: IrFlagsId },
+    WriteFlags { src: IrFlagsId },
+    /// Read/write the guest program counter.
+    ReadPc { dst: IrValueId },
+    WritePc { src: IrValueId },
+
     // ----- Sentinel -----
     /// The decoded encoding could not be lifted. Carries the source word so
     /// AT-5 can report exactly what was missed. Production lift paths MUST

@@ -58,13 +58,13 @@ pub fn audit_text(text: &[u8], offset_base: usize, path: &Path) -> CoverageRepor
                 Ok(()) => report.lifted += 1,
                 Err(LiftErr::Unimplemented(w)) => {
                     if w == 0 {
-                        // Phase A: lift doesn't yet carry the raw word for
-                        // most variants; treat as "decoded but unlifted" to
-                        // distinguish from genuine unknowns.
                         report.decoded_but_unlifted += 1;
                     } else {
                         report.unimplemented.push((off, w));
                     }
+                }
+                Err(LiftErr::Sentinel(w)) => {
+                    report.unknown.push((off, w));
                 }
             },
             Err(_) => report.decode_errors += 1,

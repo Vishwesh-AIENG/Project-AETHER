@@ -422,6 +422,38 @@ pub fn encode(op: &IrOp, out: &mut Vec<u8>) -> Result<(), SerErr> {
         }
         IrOp::Unimplemented(w) => put_u32(out, *w),
 
+        // Guest CPU state access
+        IrOp::ReadGpr { dst, reg, sf } => {
+            put_vid(out, *dst);
+            put_u8(out, *reg);
+            put_u8(out, if *sf { 1 } else { 0 });
+        }
+        IrOp::WriteGpr { reg, src, sf } => {
+            put_u8(out, *reg);
+            put_vid(out, *src);
+            put_u8(out, if *sf { 1 } else { 0 });
+        }
+        IrOp::ReadSp { dst, sf } => {
+            put_vid(out, *dst);
+            put_u8(out, if *sf { 1 } else { 0 });
+        }
+        IrOp::WriteSp { src, sf } => {
+            put_vid(out, *src);
+            put_u8(out, if *sf { 1 } else { 0 });
+        }
+        IrOp::ReadFpr { dst, reg } => {
+            put_vid(out, *dst);
+            put_u8(out, *reg);
+        }
+        IrOp::WriteFpr { reg, src } => {
+            put_u8(out, *reg);
+            put_vid(out, *src);
+        }
+        IrOp::ReadFlags { dst } => put_fid(out, *dst),
+        IrOp::WriteFlags { src } => put_fid(out, *src),
+        IrOp::ReadPc { dst } => put_vid(out, *dst),
+        IrOp::WritePc { src } => put_vid(out, *src),
+
         // Variants whose payload codec lands in a follow-up prompt:
         _ => return Err(SerErr::NotYetImplemented),
     }
@@ -515,6 +547,16 @@ pub fn decode(bytes: &[u8]) -> Result<(IrOp, usize), SerErr> {
         0xCA => IrOp::Sb,
         0xCB => IrOp::Hint { imm: r.u8()? },
         0x3A => IrOp::NzcvBitOp { dst: r.vid()?, flags: r.fid()?, bit: r.nzcv()? },
+        0xE0 => IrOp::ReadGpr { dst: r.vid()?, reg: r.u8()?, sf: r.u8()? != 0 },
+        0xE1 => IrOp::WriteGpr { reg: r.u8()?, src: r.vid()?, sf: r.u8()? != 0 },
+        0xE2 => IrOp::ReadSp { dst: r.vid()?, sf: r.u8()? != 0 },
+        0xE3 => IrOp::WriteSp { src: r.vid()?, sf: r.u8()? != 0 },
+        0xE4 => IrOp::ReadFpr { dst: r.vid()?, reg: r.u8()? },
+        0xE5 => IrOp::WriteFpr { reg: r.u8()?, src: r.vid()? },
+        0xE6 => IrOp::ReadFlags { dst: r.fid()? },
+        0xE7 => IrOp::WriteFlags { src: r.fid()? },
+        0xE8 => IrOp::ReadPc { dst: r.vid()? },
+        0xE9 => IrOp::WritePc { src: r.vid()? },
         0xFF => IrOp::Unimplemented(r.u32()?),
         other => return Err(SerErr::BadTag(other)),
     };
@@ -660,6 +702,18 @@ pub fn variant_tag(op: &IrOp) -> u8 {
         IrOp::Sb => 0xCA,
         IrOp::Hint { .. } => 0xCB,
 
+        // Guest CPU state access
+        IrOp::ReadGpr { .. } => 0xE0,
+        IrOp::WriteGpr { .. } => 0xE1,
+        IrOp::ReadSp { .. } => 0xE2,
+        IrOp::WriteSp { .. } => 0xE3,
+        IrOp::ReadFpr { .. } => 0xE4,
+        IrOp::WriteFpr { .. } => 0xE5,
+        IrOp::ReadFlags { .. } => 0xE6,
+        IrOp::WriteFlags { .. } => 0xE7,
+        IrOp::ReadPc { .. } => 0xE8,
+        IrOp::WritePc { .. } => 0xE9,
+
         IrOp::Unimplemented(_) => 0xFF,
     }
 }
@@ -730,6 +784,16 @@ pub fn is_codec_implemented(op: &IrOp) -> bool {
             | IrOp::Sb
             | IrOp::Hint { .. }
             | IrOp::NzcvBitOp { .. }
+            | IrOp::ReadGpr { .. }
+            | IrOp::WriteGpr { .. }
+            | IrOp::ReadSp { .. }
+            | IrOp::WriteSp { .. }
+            | IrOp::ReadFpr { .. }
+            | IrOp::WriteFpr { .. }
+            | IrOp::ReadFlags { .. }
+            | IrOp::WriteFlags { .. }
+            | IrOp::ReadPc { .. }
+            | IrOp::WritePc { .. }
             | IrOp::Unimplemented(_)
     )
 }
