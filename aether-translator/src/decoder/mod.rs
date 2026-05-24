@@ -521,6 +521,15 @@ pub enum DecodedInsn {
         raw: u32,
     },
 
+    // ----- Permanently undefined -----
+    /// `UDF #imm16` — bits[31:16] = 0x0000 (ARM ARM C6.2.401). A genuine
+    /// architectural instruction whose semantics are "raise an Undefined
+    /// Instruction exception". Encoders use it as a trap-on-execute marker
+    /// (compilers emit it for unreachable code, alignment padding, etc.).
+    Udf {
+        imm16: u16,
+    },
+
     // ----- Sentinel -----
     Unknown(u32),
 }

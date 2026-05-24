@@ -45,10 +45,10 @@ fn is_phase_a_documented_gap(word: u32) -> bool {
         return true;
     }
     // 0x0F34F487 class — vector shift-imm FCVTZS/FCVTZU (opcode 11110/11111)
-    // with Q=0 and immh in the FP16-only range. Capstone declines without
-    // explicit FEAT_FP16 mode.
-    if (word & 0xBF_80_FC_00) == 0x0F_00_F4_00
-        || (word & 0xBF_80_FC_00) == 0x0F_00_FC_00
+    // with immh in the FP16-only range. Capstone declines without explicit
+    // FEAT_FP16 mode. Covers Q ∈ {0, 1} and U ∈ {0, 1}.
+    if (word & 0x9F_80_FC_00) == 0x0F_00_F4_00
+        || (word & 0x9F_80_FC_00) == 0x0F_00_FC_00
     {
         return true;
     }

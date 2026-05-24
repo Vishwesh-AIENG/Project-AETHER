@@ -28,7 +28,9 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if (word & 0x3B000000) == 0x18000000 {
         return decode_literal(word);
     }
-    if (word & 0x3C000000) == 0x28000000 {
+    // Pair mask covers V=0 (integer) and V=1 (FP/SIMD); bit 26 is the V bit
+    // and stays variable.
+    if (word & 0x3A000000) == 0x28000000 {
         return decode_pair(word);
     }
     if (word & 0x3F000000) == 0x08000000 {

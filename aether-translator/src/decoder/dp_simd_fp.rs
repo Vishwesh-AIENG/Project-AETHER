@@ -64,44 +64,50 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     }
 
     // ===== Advanced SIMD =====
-    if (word & 0xBF20_8400) == 0x0E20_0400 {
+    // For all vector AdvSIMD families, bit 29 (U) is variable (signed/unsigned
+    // form selector) so it stays OUT of the mask — use 0x9F top-byte mask.
+    if (word & 0x9F20_8400) == 0x0E20_0400 {
         return decode_simd_3same(word);
     }
-    if (word & 0xBF20_0400) == 0x0E00_8400 {
+    if (word & 0x9F20_0400) == 0x0E00_8400 {
         return decode_simd_3same_extra(word);
     }
-    if (word & 0xBF20_8C00) == 0x0E20_0000 {
+    if (word & 0x9F20_8C00) == 0x0E20_0000 {
         return decode_simd_3diff(word);
     }
-    if (word & 0xBF3F_8C00) == 0x0E20_0800 {
+    if (word & 0x9F3F_8C00) == 0x0E20_0800 {
         return decode_simd_2reg_misc(word);
     }
-    if (word & 0xBF3F_8C00) == 0x0E30_0800 {
+    if (word & 0x9F3F_8C00) == 0x0E30_0800 {
         return decode_simd_across_lanes(word);
     }
     if (word & 0x9FE0_8400) == 0x0E00_0400 {
         return decode_simd_copy(word);
     }
-    if (word & 0xBF80_1C00) == 0x0F00_0400 {
+    if (word & 0x9F80_1C00) == 0x0F00_0400 {
         return decode_simd_modimm(word);
     }
-    if (word & 0xBF80_0400) == 0x0F00_0400 {
+    if (word & 0x9F80_0400) == 0x0F00_0400 {
         return decode_simd_shift_imm(word);
     }
-    if (word & 0xBF00_0400) == 0x0F00_0000 {
+    if (word & 0x9F00_0400) == 0x0F00_0000 {
         return decode_simd_indexed(word);
     }
     if (word & 0xBFA0_8C00) == 0x0E00_0800 {
         return decode_simd_permute(word);
     }
+    // EXT (extract) has bit 29 = 1 fixed in its encoding family (op=1).
     if (word & 0xBFE0_8400) == 0x2E00_0000 {
         return decode_simd_extract(word);
     }
+    // TBL/TBX (table) has bit 29 = 0 fixed (op=0).
     if (word & 0xBFE0_8C00) == 0x0E00_0000 {
         return decode_simd_table(word);
     }
 
     // ===== Scalar-shape Advanced SIMD =====
+    // Scalar has bit 31 = 0 + bit 30 = 1 fixed; bit 29 = U variable. Mask
+    // 0xDF top byte covers bits 31, 30, 28..24 leaving 29 free.
     if (word & 0xDF20_8400) == 0x5E20_0400 {
         return decode_simd_scalar_3same(word);
     }
@@ -471,15 +477,25 @@ fn decode_simd_indexed(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if opcode == 0b1011 || opcode == 0b1111 {
         return Err(DecodeErr::Reserved);
     }
-    // Vector indexed valid (U, opcode) pairs per ARM ARM Table C4-11:
-    //   U=0: 0001 FMLA, 0011 SMLAL, 0101 SMLSL/FMUL, 0111 SQDMULH, 1001 SQDMLAL,
-    //        1101 SQDMULL, 1100 FMULX(?)
-    //   U=1: 0001 FMLA/FMLAL, 0011 UMLAL, 0101 UMLSL/FMULX, 0111 SQRDMULH, 1001 FMLA/SQRDMLAH,
-    //        1101 SQRDMLSH(?)
-    // Conservative validation: reject unallocated opcodes.
+    // Vector indexed valid (U, opcode) pairs per ARM ARM Table C4-11.
+    // ARMv8.0-A baseline (no FEAT_FCMA/FEAT_FP16/FEAT_DotProd):
+    //   U=0: 0000 MLA           0010 SMLAL{2}      0011 SQDMLAL{2}
+    //        0100 MLS           0110 SMLSL{2}      0111 SQDMLSL{2}
+    //        1000 MUL           1010 SMULL{2}      1011 SQDMULL{2}
+    //        1100 SQDMULH       1101 SQRDMULH      0001 FMLA (FP)
+    //        0101 FMLS (FP)     1001 FMULX (FP, ARMv8.0+) / FMUL via separate enc
+    //   U=1: 0000 MLA-alt? actually rare    0010 UMLAL{2}
+    //        0100 MLS-alt? rare              0110 UMLSL{2}
+    //        1000 reserved                   1010 UMULL{2}
+    //        1101 SQRDMLAH/SQRDMLSH (ARMv8.1+; FEAT_RDM)
+    // Capstone 0.14 default mode declines FEAT_RDM (U=1, opcode=1101) without
+    // explicit extra-mode, and U=1 opcode 1000/1100/1110 are architecturally
+    // reserved for vector indexed.
+    if u == 1 && matches!(opcode, 0b1000 | 0b1100 | 0b1110) {
+        return Err(DecodeErr::Reserved);
+    }
     // Vector indexed with size=11 only valid for FP-form (FMLA/FMLS/FMUL/FMULX).
     if size == 0b11 {
-        // FP opcodes for indexed: 0001 (FMLA), 0101 (FMUL), 1001 (FMULX FP).
         let ok = match (u, opcode) {
             (0, 0b0001 | 0b0101 | 0b1001) => true,
             (1, 0b0001 | 0b0101 | 0b1001) => true,

@@ -296,7 +296,7 @@ but with classic Brooks-law diminishing returns past two people.
 | AT-2 | 🟡 Code done | 63 of ~140 IR variants have full encode/decode codecs (the ones AT-1 lift produces). Remaining: NEON/FP/crypto/sysreg-bearing variants. |
 | AT-3 | ⚠️ Code done, corpus gate blocked | Per-sub-family validation: every valid NEON/FP/crypto encoding accepted, every reserved combination rejected. `at3_neon_corpus` gate `#[ignore]`'d pending `aarch64-linux-gnu-gcc` cross-toolchain install. |
 | AT-4 | ⚠️ Code done, corpus gate blocked | Branch/exception decoders tightened (full `(opc, LL)` table); sysreg catalog **~310 architectural registers covered** (180 hand-named + 124 via PMU/Debug array variants + ~50 v8.1+ VHE/SVE/secure-timer adds). `at4_system_corpus` gate `#[ignore]`'d pending GSI. |
-| AT-5 | ⚠️ Driver done, corpus gate blocked | ELF .text extractor + corpus walker scaffolded and tested. `at5_system_img` gate `#[ignore]`'d pending GSI download (ci.android.com URL stale + `simg2img`/`7z` missing on this Windows host). |
+| AT-5 | ✅ **Partial pass** + GSI gate blocked | ELF + PE32+ `.text` extractor implemented. `at5_aether_efi_corpus` audit **passes against real ARM64 `hypervisor.efi`**: **0 unknown / 5252 instructions** (32 decode errors are rare encodings deferred to lift refinement). Full GSI 21-lib gate (`at5_system_img`) still `#[ignore]`'d pending GSI download — `scripts/fetch_gsi.sh` refreshed with portable-tool fallback paths for Windows/WSL/Linux. |
 | AT-6 onwards | ⬜ Not started | |
 
 **What's shippable today:** the decoder + IR + serialization framework

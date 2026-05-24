@@ -7,11 +7,15 @@
 //! This module is only built when `std` is enabled — it uses `std::path` and
 //! `std::fs` for corpus IO.
 
+pub mod extract;
+
 use std::path::{Path, PathBuf};
 
 use crate::decoder::{decode_instruction, DecodedInsn};
 use crate::ir::IrBlock;
 use crate::lift::{lift, LiftErr};
+
+pub use extract::{extract_elf64_text, extract_pe32plus_text, extract_text};
 
 #[derive(Debug, Default)]
 pub struct CoverageReport {

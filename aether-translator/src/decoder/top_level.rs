@@ -16,7 +16,13 @@ pub fn dispatch(word: u32) -> Result<DecodedInsn, DecodeErr> {
     // op0 = bits[28:25]
     let op0 = (word >> 25) & 0xF;
 
-    // Reserved bit pattern bits [31:25] == 0b0000_000x => UDF
+    // UDF #imm16 — bits[31:16] = 0x0000, imm16 in bits[15:0]. ARM ARM C6.2.401.
+    if (word >> 16) == 0 {
+        return Ok(DecodedInsn::Udf { imm16: word as u16 });
+    }
+
+    // Reserved bit pattern bits [31:25] == 0b0000_000x but bits[31:16] != 0 =>
+    // truly unallocated.
     if (word >> 25) == 0 {
         return Ok(DecodedInsn::Unknown(word));
     }
