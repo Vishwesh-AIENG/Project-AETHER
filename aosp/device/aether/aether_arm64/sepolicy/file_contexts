@@ -1,0 +1,22 @@
+# file_contexts — SELinux file labelling for AETHER device-specific binaries.
+#
+# Format: <regex>   u:object_r:<context>:s0
+#
+# Sourced by AOSP's sepolicy build at /system/etc/selinux/. AETHER's contexts
+# live alongside the AOSP base contexts. Adding a new HAL binary without a
+# label here lands it as the default vendor_file_t, which usually works for
+# read but fails for execute or hwbinder publication.
+
+# AETHER virtual HAL services — install path /vendor/bin/hw/
+/vendor/bin/hw/aether\.sensors@2\.1-service     u:object_r:hal_sensors_default_exec:s0
+/vendor/bin/hw/aether\.radio@2\.0-service       u:object_r:hal_telephony_default_exec:s0
+/vendor/bin/hw/aether\.camera@2\.7-service      u:object_r:hal_camera_default_exec:s0
+/vendor/bin/hw/aether\.power@5-service          u:object_r:hal_power_default_exec:s0
+/vendor/bin/hw/aether\.health@2\.1-service      u:object_r:hal_health_default_exec:s0
+
+# Gralloc shared library.
+/vendor/lib(64)?/hw/gralloc\.aether\.so         u:object_r:same_process_hal_file:s0
+
+# AETHER paravirt device nodes (ch12 modem/sensor shared pages surfaced via
+# /dev/aether — placeholder regex; real nodes land with the kernel driver).
+/dev/aether(/.*)?                               u:object_r:aether_device:s0

@@ -707,6 +707,173 @@ pub unsafe fn invept_single_context(eptp: Eptp) {
 pub unsafe fn invept_single_context(_eptp: Eptp) {}
 
 // ─────────────────────────────────────────────────────────────────────────────
+// W^X support — EPT leaf flip + INVEPT  (Step 3 of the AT integration plan)
+//
+// The translator's JIT cache lives in hypervisor-private host memory
+// (16 MiB at 0x2_0000_0000 by default). After serialising a translated
+// block the dispatcher must flip the covering page from RW to RX. On
+// Intel the EPT is the second-stage paging structure; flipping the leaf
+// W bit off / X bit on plus an INVEPT single-context invalidation makes
+// any subsequent guest-mode access trap (write fault → SmcWatcher; AT-23
+// invariant) while keeping the same host PA mapped for execution from
+// VMX root.
+//
+// `ACTIVE_EPT_PML4_PA` / `ACTIVE_EPTP_RAW` are populated by the boot
+// pipeline once `vmcs_write_exec_controls` has loaded the EPTP into the
+// active VMCS. The translator's W^X callback (see
+// `dbt_integration::dbt_ept_rx_flip`) reads them, walks the paging
+// structures, and invokes `invept_single_context`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// PA of the active EPT PML4. Zero until `set_active_ept` is called.
+pub static ACTIVE_EPT_PML4_PA: AtomicU64 = AtomicU64::new(0);
+/// Raw EPTP value (4 KiB-aligned PML4 PA OR'd with EPTP encoding flags).
+/// Zero until `set_active_ept` is called.
+pub static ACTIVE_EPTP_RAW: AtomicU64 = AtomicU64::new(0);
+
+/// Publish the active EPT root. The boot pipeline (or any per-vCPU
+/// switch) calls this immediately after VMWRITE-ing the EPTP into the
+/// VMCS. Idempotent; the most recent values win.
+pub fn set_active_ept(pml4_pa: u64, eptp: Eptp) {
+    ACTIVE_EPT_PML4_PA.store(pml4_pa, Ordering::Release);
+    ACTIVE_EPTP_RAW.store(eptp.0,       Ordering::Release);
+}
+
+/// Walk a 4-level EPT rooted at `pml4_pa` and flip the leaf covering
+/// `host_pa` (assumed already 4 KiB-aligned) from RW to RX.
+///
+/// Returns `false` if any intermediate level is non-present, if the
+/// leaf is mapped behind a 2 MiB or 1 GiB huge page (we do not split
+/// huge pages here — the JIT region is reserved as 4 KiB pages), or
+/// if the leaf does not have `EPT_READ` set.
+///
+/// # Safety
+/// `pml4_pa` must be a valid PML4 whose intermediate tables are reachable
+/// via identity-mapped raw-pointer dereference (true at VMX root after
+/// the UEFI handoff). The covered page must already be present in the
+/// EPT structure rooted at `pml4_pa`.
+pub unsafe fn ept_flip_leaf_to_rx(pml4_pa: u64, host_pa: u64) -> bool {
+    if pml4_pa == 0 || pml4_pa & 0xFFF != 0 {
+        return false;
+    }
+    let i4 = ((host_pa >> 39) & 0x1FF) as usize;
+    let i3 = ((host_pa >> 30) & 0x1FF) as usize;
+    let i2 = ((host_pa >> 21) & 0x1FF) as usize;
+    let i1 = ((host_pa >> 12) & 0x1FF) as usize;
+
+    // PML4 → PDPT
+    let pml4 = pml4_pa as *mut u64;
+    let pml4e = unsafe { core::ptr::read_volatile(pml4.add(i4)) };
+    if pml4e & EPT_READ == 0 { return false; }
+    // PDPT → PD
+    let pdpt = (pml4e & !0xFFFu64) as *mut u64;
+    let pdpte = unsafe { core::ptr::read_volatile(pdpt.add(i3)) };
+    if pdpte & EPT_READ == 0 { return false; }
+    if pdpte & EPT_PAGE_SIZE_BIT != 0 { return false; } // 1 GiB leaf — refuse
+    // PD → PT
+    let pd = (pdpte & !0xFFFu64) as *mut u64;
+    let pde = unsafe { core::ptr::read_volatile(pd.add(i2)) };
+    if pde & EPT_READ == 0 { return false; }
+    if pde & EPT_PAGE_SIZE_BIT != 0 { return false; } // 2 MiB leaf — refuse
+    // PT → 4 KiB leaf
+    let pt = (pde & !0xFFFu64) as *mut u64;
+    let leaf_ptr = unsafe { pt.add(i1) };
+    let leaf = unsafe { core::ptr::read_volatile(leaf_ptr) };
+    if leaf & EPT_READ == 0 { return false; }
+    // Clear W, set X. Preserve memory-type bits [5:3] and PFN [51:12].
+    let new_leaf = (leaf & !EPT_WRITE) | EPT_EXEC;
+    unsafe { core::ptr::write_volatile(leaf_ptr, new_leaf) };
+    true
+}
+
+/// EPT PDPT/PD page-size bit ("PS") — set when the entry is a leaf at
+/// the current level rather than a pointer to a lower table. Intel SDM
+/// §28.2.2 Table 28-1 bit 7.
+pub const EPT_PAGE_SIZE_BIT: u64 = 1 << 7;
+
+/// Walk a 4-level EPT rooted at `pml4_pa` and return the host PA that
+/// `guest_pa` maps to, or `None` if any level is non-present / behind a
+/// huge page (we don't currently split huge pages at lookup time).
+///
+/// # Safety
+/// Same identity-mapped EPT/raw-pointer-deref contract as the flip helpers.
+pub unsafe fn ept_lookup_host_pa(pml4_pa: u64, guest_pa: u64) -> Option<u64> {
+    if pml4_pa == 0 || pml4_pa & 0xFFF != 0 {
+        return None;
+    }
+    let i4 = ((guest_pa >> 39) & 0x1FF) as usize;
+    let i3 = ((guest_pa >> 30) & 0x1FF) as usize;
+    let i2 = ((guest_pa >> 21) & 0x1FF) as usize;
+    let i1 = ((guest_pa >> 12) & 0x1FF) as usize;
+    let page_off = guest_pa & 0xFFF;
+
+    let pml4 = pml4_pa as *mut u64;
+    let pml4e = unsafe { core::ptr::read_volatile(pml4.add(i4)) };
+    if pml4e & EPT_READ == 0 { return None; }
+    let pdpt = (pml4e & !0xFFFu64) as *mut u64;
+    let pdpte = unsafe { core::ptr::read_volatile(pdpt.add(i3)) };
+    if pdpte & EPT_READ == 0 { return None; }
+    if pdpte & EPT_PAGE_SIZE_BIT != 0 { return None; }
+    let pd = (pdpte & !0xFFFu64) as *mut u64;
+    let pde = unsafe { core::ptr::read_volatile(pd.add(i2)) };
+    if pde & EPT_READ == 0 { return None; }
+    if pde & EPT_PAGE_SIZE_BIT != 0 { return None; }
+    let pt = (pde & !0xFFFu64) as *mut u64;
+    let leaf = unsafe { core::ptr::read_volatile(pt.add(i1)) };
+    if leaf & EPT_READ == 0 { return None; }
+    Some((leaf & !0xFFFu64) | page_off)
+}
+
+/// Read up to `max_len` bytes of guest memory starting at `guest_pa` by
+/// walking the active EPT. Returns a `(host_va, byte_len)` pair where
+/// `host_va` points at the bytes (identity-readable from VMX root) and
+/// `byte_len` is the number of contiguous bytes available before crossing
+/// a 4 KiB page boundary (the walker doesn't currently span pages).
+///
+/// `None` if the active EPT root has not been published (`set_active_ept`
+/// not yet called) or `guest_pa` is not mapped.
+///
+/// # Safety
+/// Same identity-mapped contract as [`ept_lookup_host_pa`].
+pub unsafe fn ept_read_guest_window(guest_pa: u64, max_len: usize) -> Option<(*const u8, usize)> {
+    let pml4 = ACTIVE_EPT_PML4_PA.load(Ordering::Acquire);
+    if pml4 == 0 { return None; }
+    let host_pa = unsafe { ept_lookup_host_pa(pml4, guest_pa) }?;
+    let page_off = (host_pa & 0xFFF) as usize;
+    let page_remaining = 0x1000 - page_off;
+    let len = max_len.min(page_remaining);
+    Some((host_pa as *const u8, len))
+}
+
+/// Flip a contiguous host-PA range to RX, one 4 KiB page at a time,
+/// and issue a single `INVEPT single-context` covering the active EPTP.
+/// Returns `false` if any per-page flip failed (no partial commit:
+/// pages successfully flipped before the failure remain RX).
+///
+/// # Safety
+/// Same contract as [`ept_flip_leaf_to_rx`].
+pub unsafe fn ept_flip_range_to_rx(host_pa: u64, byte_len: usize) -> bool {
+    let pml4 = ACTIVE_EPT_PML4_PA.load(Ordering::Acquire);
+    if pml4 == 0 || byte_len == 0 {
+        return false;
+    }
+    let start = host_pa & !0xFFFu64;
+    let end   = (host_pa.wrapping_add(byte_len as u64).wrapping_add(0xFFF)) & !0xFFFu64;
+    let mut pa = start;
+    while pa < end {
+        if !unsafe { ept_flip_leaf_to_rx(pml4, pa) } {
+            return false;
+        }
+        pa = pa.wrapping_add(4096);
+    }
+    let eptp_raw = ACTIVE_EPTP_RAW.load(Ordering::Acquire);
+    unsafe { invept_single_context(Eptp(eptp_raw)) };
+    true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Raw x86 MSR read/write helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1074,7 +1241,61 @@ pub unsafe fn handle_vm_exit(state: &mut VtxFoundationState) -> VtxExitAction {
             VtxExitAction::Resume
         }
         EXIT_REASON_EPT_VIOLATION => {
-            // Record but do not resolve — no EPT fault fixer in this chapter.
+            // AT integration bridge (Step 2 of the integration plan):
+            // on instruction-fetch EPT violation the guest PC has not yet
+            // been translated. Hand the ARM64 PC (== VMCS GUEST_RIP in the
+            // AT model) to the translator's cold path; on a cache hit the
+            // dispatcher returns immediately. The translator owns the block
+            // cache + branch chain (AT-16 / AT-18); we never duplicate the
+            // cache here.
+            //
+            // Intel SDM §27.2.1 Table 27-7 — EPT exit qualification
+            //   bit 0 : data read
+            //   bit 1 : data write
+            //   bit 2 : instruction fetch
+            const EPT_QUAL_INSTR_FETCH: u64 = 1 << 2;
+            let (qual, qok) = unsafe { vmread(VMCS_EXIT_QUALIFICATION) };
+            if qok && (qual & EPT_QUAL_INSTR_FETCH) != 0 {
+                let (pc, ok_rip) = unsafe { vmread(VMCS_GUEST_RIP) };
+                if ok_rip {
+                    use aether_translator::dbt::{
+                        aether_dbt_dispatch_block, aether_dbt_translate_block,
+                        AetherDbtResult, MAX_INSNS_PER_BLOCK,
+                    };
+                    // Walk the active EPT to materialise the guest window
+                    // backing `pc`. Step A's translate_block reads up to
+                    // 64 instructions (= 256 bytes); the walker caps at the
+                    // 4 KiB page boundary so cross-page lifts terminate
+                    // cleanly. Any future-block cross-page flow is handled
+                    // by re-entering the bridge on the next EPT-violation.
+                    const WINDOW_BYTES: usize = MAX_INSNS_PER_BLOCK * 4;
+                    // SAFETY: ACTIVE_EPT_PML4_PA was published by the boot
+                    // pipeline via `set_active_ept`; the PML4 is identity-
+                    // readable from VMX root.
+                    let window = unsafe { ept_read_guest_window(pc, WINDOW_BYTES) };
+                    if let Some((host_va, len)) = window {
+                        // SAFETY: ept_read_guest_window returned a window of
+                        // `len` bytes starting at `host_va`, guaranteed not
+                        // to cross a 4 KiB page boundary.
+                        let guest_mem = unsafe {
+                            core::slice::from_raw_parts(host_va, len)
+                        };
+                        let t = aether_dbt_translate_block(pc, guest_mem);
+                        if t == AetherDbtResult::Ok {
+                            state.dbt_blocks_translated =
+                                state.dbt_blocks_translated.saturating_add(1);
+                            let d = aether_dbt_dispatch_block(pc, guest_mem);
+                            if d == AetherDbtResult::Ok {
+                                state.dbt_blocks_dispatched =
+                                    state.dbt_blocks_dispatched.saturating_add(1);
+                                return VtxExitAction::Resume;
+                            }
+                        }
+                    }
+                }
+            }
+            // Data-side EPT violation (MMIO emulation path is handled by
+            // dbt_dispatch.rs::handle_vmexit) or translator failure.
             state.gate.ept_violation_seen = true;
             VtxExitAction::Terminate
         }
@@ -1568,6 +1789,10 @@ pub struct VtxFoundationState {
     pub last_exit_reason: u32,
     pub vmcs_revision_id: u32,
     pub eptp: u64,
+    /// AT-integration counters — incremented on every DBT cold/hot dispatch
+    /// triggered by an EPT-violation instruction-fetch arm in `handle_vm_exit`.
+    pub dbt_blocks_translated: u64,
+    pub dbt_blocks_dispatched: u64,
 }
 
 impl VtxFoundationState {
@@ -1580,6 +1805,8 @@ impl VtxFoundationState {
             last_exit_reason: 0,
             vmcs_revision_id: 0,
             eptp: 0,
+            dbt_blocks_translated: 0,
+            dbt_blocks_dispatched: 0,
         }
     }
 
@@ -1722,6 +1949,103 @@ pub unsafe fn init_vtx_foundation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── W^X walker tests (Step 3 of the AT integration plan) ──────────────
+    //
+    // Build a synthetic 4-level EPT pointing at a single 4 KiB leaf, walk it
+    // with `ept_flip_leaf_to_rx`, and verify the leaf transitions RW → RX.
+    // All tables are aligned heap allocations leaked for the duration of the
+    // test; their host-VA == host-PA on the test process so the walker can
+    // dereference table PAs directly.
+
+    fn alloc_aligned_table() -> *mut u64 {
+        // 4 KiB aligned zeroed page.
+        let layout = std::alloc::Layout::from_size_align(4096, 4096).unwrap();
+        // SAFETY: layout is valid (non-zero size, power-of-two alignment).
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!ptr.is_null());
+        ptr as *mut u64
+    }
+
+    #[test]
+    fn ept_walker_flips_leaf_rw_to_rx() {
+        // Target: virtual host PA 0x2_0000_0000 + 0x1000 (one page above
+        // the JIT base) — the indices that the walker will use.
+        let host_pa: u64 = 0x2_0000_1000;
+        let i4 = ((host_pa >> 39) & 0x1FF) as usize;
+        let i3 = ((host_pa >> 30) & 0x1FF) as usize;
+        let i2 = ((host_pa >> 21) & 0x1FF) as usize;
+        let i1 = ((host_pa >> 12) & 0x1FF) as usize;
+
+        let pml4 = alloc_aligned_table();
+        let pdpt = alloc_aligned_table();
+        let pd   = alloc_aligned_table();
+        let pt   = alloc_aligned_table();
+
+        // Chain levels together with EPT_RWX non-leaf entries.
+        unsafe {
+            *pml4.add(i4) = (pdpt as u64) | EPT_RWX;
+            *pdpt.add(i3) = (pd   as u64) | EPT_RWX;
+            *pd  .add(i2) = (pt   as u64) | EPT_RWX;
+            // Leaf points at the same page; RW + WB.
+            *pt  .add(i1) = (host_pa & !0xFFF) | EPT_RWX | EPT_MEMTYPE_WB;
+        }
+
+        // Before flip: leaf is RWX.
+        let before = unsafe { *pt.add(i1) };
+        assert_ne!(before & EPT_WRITE, 0, "leaf must start writable");
+        assert_ne!(before & EPT_EXEC,  0, "RWX sanity");
+
+        let ok = unsafe { ept_flip_leaf_to_rx(pml4 as u64, host_pa) };
+        assert!(ok, "walker should succeed on a well-formed 4-level EPT");
+
+        let after = unsafe { *pt.add(i1) };
+        assert_eq!(after & EPT_WRITE, 0,        "W must be cleared");
+        assert_ne!(after & EPT_EXEC,  0,        "X must remain / be set");
+        assert_ne!(after & EPT_READ,  0,        "R preserved");
+        assert_eq!(after & !0xFFF, before & !0xFFF, "PFN preserved");
+    }
+
+    #[test]
+    fn ept_walker_refuses_huge_pages() {
+        let host_pa: u64 = 0x2_0020_0000; // 2 MiB-aligned
+        let i4 = ((host_pa >> 39) & 0x1FF) as usize;
+        let i3 = ((host_pa >> 30) & 0x1FF) as usize;
+        let i2 = ((host_pa >> 21) & 0x1FF) as usize;
+
+        let pml4 = alloc_aligned_table();
+        let pdpt = alloc_aligned_table();
+        let pd   = alloc_aligned_table();
+
+        unsafe {
+            *pml4.add(i4) = (pdpt as u64) | EPT_RWX;
+            *pdpt.add(i3) = (pd   as u64) | EPT_RWX;
+            // 2 MiB leaf at PD with PS bit set.
+            *pd  .add(i2) = (host_pa & !0xFFF) | EPT_RWX | EPT_MEMTYPE_WB | EPT_PAGE_SIZE_BIT;
+        }
+
+        let ok = unsafe { ept_flip_leaf_to_rx(pml4 as u64, host_pa) };
+        assert!(!ok, "walker must refuse 2 MiB huge-page leaves (split needed)");
+    }
+
+    #[test]
+    fn ept_walker_refuses_nonpresent_intermediate() {
+        let host_pa: u64 = 0x2_0001_0000;
+        let pml4 = alloc_aligned_table();
+        // PML4 entry zero → walk should bail at level 4.
+        let ok = unsafe { ept_flip_leaf_to_rx(pml4 as u64, host_pa) };
+        assert!(!ok, "walker must refuse non-present PML4 entries");
+    }
+
+    #[test]
+    fn ept_walker_rejects_zero_pml4() {
+        assert!(!unsafe { ept_flip_leaf_to_rx(0, 0x1000) });
+    }
+
+    #[test]
+    fn ept_walker_rejects_misaligned_pml4() {
+        assert!(!unsafe { ept_flip_leaf_to_rx(0x1001, 0x1000) });
+    }
 
     #[test]
     fn vmcs_field_encoding_sanity() {

@@ -87,18 +87,22 @@ use crate::android_handoff::{
 };
 use crate::boot::{BootContext, EfiSystemTable};
 #[cfg(feature = "fex_linked")]
-use crate::fex_integration::{
-    init_fex_integration, AotPreTranslationQueue, FexError, FexHostBindings, FexIntegrationConfig,
-    FexJitCache,
+use crate::dbt_integration::{
+    init_dbt_integration_hv, AotPreTranslationQueue, HvDbtError, DbtHostBindings, DbtIntegrationConfig,
+    DbtJitCache,
 };
 use crate::svm::{
-    init_svm_foundation, vmrun, NptTable, NptTableEntry,
+    init_svm_foundation, set_active_npt, vmrun, NptTable, NptTableEntry,
     SvmFoundationConfig, VmcbRegion, VMCB_SAVE_CR3,
     VMCB_EXIT_INFO_1, VMCB_EXIT_INFO_2,
 };
 use crate::vtx::{
-    init_vtx_foundation, vmread, vmwrite, EptTable, EptTableEntry,
-    VmcsRegion, VmxonRegion, VtxFoundationConfig, VMCS_GUEST_CR3,
+    init_vtx_foundation, set_active_ept, vmread, vmwrite, EptTable, EptTableEntry,
+    Eptp, VmcsRegion, VmxonRegion, VtxFoundationConfig, VMCS_GUEST_CR3,
+};
+use crate::dbt_integration::install_dbt_ept_callbacks;
+use aether_translator::dbt::{
+    aether_dbt_init as translator_dbt_init, JIT_CACHE_BYTES as TRANSLATOR_JIT_BYTES,
 };
 use crate::x86_hw_validation::CpuVendor;
 
@@ -327,9 +331,9 @@ static mut GUEST_RAM:     Page4K      = Page4K([0u8; 4096]);
 // arena — are pulled from the UEFI memory map at runtime by the
 // `fex_linked` build, never from BSS, to keep hypervisor.efi small.
 #[cfg(feature = "fex_linked")]
-static mut FEX_BINDINGS:  FexHostBindings        = FexHostBindings::new(0, 0);
+static mut FEX_BINDINGS:  DbtHostBindings        = DbtHostBindings::new(0, 0);
 #[cfg(feature = "fex_linked")]
-static mut FEX_JIT_CACHE: FexJitCache            = FexJitCache::new(0, 0);
+static mut FEX_JIT_CACHE: DbtJitCache            = DbtJitCache::new(0, 0);
 #[cfg(feature = "fex_linked")]
 static mut FEX_AOT_QUEUE: AotPreTranslationQueue = AotPreTranslationQueue::new();
 
@@ -564,9 +568,9 @@ unsafe fn build_npt_2mib_range(base_pa: u64, size_bytes: u64) {
 //
 // Phase 5 dispatch:
 //   1. VMREAD exit_reason + exit_qualification + guest-physical-address.
-//   2. fex_dispatch::classify_intel → FexExitClass.
+//   2. dbt_dispatch::classify_intel → DbtExitClass.
 //   3. If FEX dispatch is armed (Android handoff completed), call
-//      fex_dispatch::handle_vmexit and either VMRESUME (Reenter) or HALT.
+//      dbt_dispatch::handle_vmexit and either VMRESUME (Reenter) or HALT.
 //   4. Otherwise the foundation gate path: log + HALT (Ch50/51 behaviour).
 //
 // VMRESUME is NOT yet wired — see TODO Phase 5b. For now Reenter falls
@@ -599,13 +603,13 @@ unsafe extern "C" fn host_vmexit_entry() -> ! {
         }
 
         // Phase 5/5b dispatch path — only when boot path armed the FEX state.
-        if crate::fex_dispatch::is_armed() {
-            let exit = crate::fex_dispatch::classify_intel(basic, exit_qual, gpa);
-            let action = crate::fex_dispatch::with_global_mut(|s| {
-                crate::fex_dispatch::handle_vmexit(s, exit)
+        if crate::dbt_dispatch::is_armed() {
+            let exit = crate::dbt_dispatch::classify_intel(basic, exit_qual, gpa);
+            let action = crate::dbt_dispatch::with_global_mut(|s| {
+                crate::dbt_dispatch::handle_vmexit(s, exit)
             });
             match action {
-                crate::fex_dispatch::VmexitAction::Reenter => {
+                crate::dbt_dispatch::VmexitAction::Reenter => {
                     // Phase 5b: issue VMRESUME. On success the CPU transfers
                     // back to GUEST_RIP and the next VMEXIT will land here
                     // again. On failure (invalid VMCS / illegal transition)
@@ -624,7 +628,7 @@ unsafe extern "C" fn host_vmexit_entry() -> ! {
                         dual_puts(b"[fex] VMRESUME unexpectedly returned\n");
                     }
                 }
-                crate::fex_dispatch::VmexitAction::Halt => {
+                crate::dbt_dispatch::VmexitAction::Halt => {
                     dual_puts(b"[fex] dispatch -> Halt\n");
                 }
             }
@@ -644,6 +648,44 @@ pub unsafe fn boot_x86_hypervisor(
     system_table: *const c_void,
     vendor: Option<CpuVendor>,
 ) -> ! {
+    // ── 0. ESP file-protocol shim — runs while firmware boot services are
+    //       still alive. Reads \EFI\AETHER\boot.img into the staged region
+    //       at STAGED_BOOT_IMG_PA so prepare_android_handoff() finds the
+    //       "ANDROID!" magic there post-ExitBootServices.
+    //
+    //       Best-effort: if no boot.img is on the ESP the pipeline falls
+    //       back to the foundation gate (single HLT in GUEST_RAM).
+    {
+        use crate::android_handoff::{STAGED_BOOT_IMG_PA, STAGED_BOOT_IMG_SIZE};
+        use crate::boot_x86_esp::try_read_boot_img;
+        // SAFETY: STAGED_BOOT_IMG_PA is identity-mapped writable RAM
+        // (firmware leaves it as conventional memory pre-ExitBootServices).
+        // STAGED_BOOT_IMG_SIZE = 64 MiB is the staged region the handoff
+        // scanner walks for "ANDROID!".
+        let stage = unsafe {
+            core::slice::from_raw_parts_mut(
+                STAGED_BOOT_IMG_PA as *mut u8,
+                STAGED_BOOT_IMG_SIZE as usize,
+            )
+        };
+        // SAFETY: image_handle + system_table came from efi_main and are
+        // still valid before ExitBootServices.
+        let read = unsafe {
+            try_read_boot_img(
+                image_handle as *mut _,
+                system_table as *const EfiSystemTable,
+                stage,
+            )
+        };
+        if read > 0 {
+            // Diagnostic banner can't dual_puts yet (COM1 not init); the
+            // ConOut path is up via efi_main's puts, but boot_x86 doesn't
+            // hold the SystemTable in a typed form here. The handoff
+            // scanner will report the find on COM1 below.
+            let _ = read;
+        }
+    }
+
     // ── 1. ExitBootServices (capture RSDP first; same as ARM path) ───────────
     let boot_ctx = unsafe {
         BootContext::from_uefi(
@@ -710,7 +752,7 @@ pub unsafe fn boot_x86_hypervisor(
                 dual_puts(b" len=");
                 dual_puthex64(h.dtb_len as u64);
                 dual_puts(b" FEX x0=");
-                dual_puthex64(h.fex_regs.x[0]);
+                dual_puthex64(h.dbt_regs.x[0]);
                 dual_puts(b"\n");
                 Some(h)
             }
@@ -734,7 +776,7 @@ pub unsafe fn boot_x86_hypervisor(
             // ARM64 registers. host_vmexit_entry then drives the translate /
             // dispatch / classify loop on every exit.
             if let Some(ref h) = handoff {
-                crate::fex_dispatch::arm_global(h.fex_regs);
+                crate::dbt_dispatch::arm_global(h.dbt_regs);
             }
             // Phase 6: initialise the Android lifecycle scanner so PL011 DR
             // writes from the guest land in userspace_boot + app_compat
@@ -835,6 +877,35 @@ unsafe fn boot_intel(
         // Patch the guest CR3 the foundation init hardcoded to 0.
         let _ = vmwrite(VMCS_GUEST_CR3, guest_cr3);
 
+        // Publish the active EPT root + EPTP to the W^X subsystem and
+        // install the translator's commit_rx_via_ept callback. After this
+        // point any aether_dbt_translate_block that emits into the JIT
+        // arena will flip the corresponding host PA from RW to RX via the
+        // active EPT and trigger INVEPT single-context — fulfilling the
+        // Step 3 invariant on every translated block.
+        set_active_ept(ept_pml4_pa, Eptp::from_pml4_pa(ept_pml4_pa));
+        install_dbt_ept_callbacks();
+        dual_puts(b"[x86] EPT W^X callback installed (PML4 = ");
+        dual_puthex64(ept_pml4_pa);
+        dual_puts(b")\n");
+
+        // Initialise the translator runtime with the hypervisor-private JIT
+        // arena. After this point, the EPT-violation-on-fetch bridge in
+        // vtx::handle_vm_exit can decode + lift + lower guest ARM64 to real
+        // x86 bytes (Step A of the AT integration plan).
+        const JIT_CACHE_BASE_PA: u64 = 0x2_0000_0000;
+        const BUMP_ARENA_BASE_PA: u64 = 0x2_0100_0000;
+        const BUMP_ARENA_BYTES: usize = 1 * 1024 * 1024;
+        let _ = translator_dbt_init(
+            JIT_CACHE_BASE_PA,
+            TRANSLATOR_JIT_BYTES,
+            BUMP_ARENA_BASE_PA,
+            BUMP_ARENA_BYTES,
+        );
+        dual_puts(b"[x86] translator runtime initialised (JIT = ");
+        dual_puthex64(JIT_CACHE_BASE_PA);
+        dual_puts(b")\n");
+
         dual_puts(b"[x86] VMLAUNCH...\n");
         // VMLAUNCH transfers control: on entry the guest runs (HLT -> VMEXIT);
         // host_rip catches the VMEXIT.  If VMLAUNCH itself fails (e.g. invalid
@@ -912,6 +983,35 @@ unsafe fn boot_amd(
 
         vmcb.write_u64(VMCB_SAVE_CR3, guest_cr3);
 
+        // Publish the active NPT root + VMCB to the W^X subsystem and
+        // install the translator's commit_rx_via_ept callback. After this
+        // point any aether_dbt_translate_block that emits into the JIT
+        // arena will flip the corresponding host PA from RW to RX via the
+        // active NPT and arm a TLB_CTL = FLUSH_ALL on the next VMRUN
+        // (AMD has no INVNPT — flush executes during VMRUN transition).
+        set_active_npt(npt_pml4_pa, vmcb_pa);
+        install_dbt_ept_callbacks();
+        dual_puts(b"[x86] NPT W^X callback installed (PML4 = ");
+        dual_puthex64(npt_pml4_pa);
+        dual_puts(b", VMCB = ");
+        dual_puthex64(vmcb_pa);
+        dual_puts(b")\n");
+
+        // Initialise the translator runtime. Same JIT region as the Intel
+        // path — the runtime is single-vCPU regardless of vendor.
+        const JIT_CACHE_BASE_PA_AMD: u64 = 0x2_0000_0000;
+        const BUMP_ARENA_BASE_PA_AMD: u64 = 0x2_0100_0000;
+        const BUMP_ARENA_BYTES_AMD: usize = 1 * 1024 * 1024;
+        let _ = translator_dbt_init(
+            JIT_CACHE_BASE_PA_AMD,
+            TRANSLATOR_JIT_BYTES,
+            BUMP_ARENA_BASE_PA_AMD,
+            BUMP_ARENA_BYTES_AMD,
+        );
+        dual_puts(b"[x86] translator runtime initialised (JIT = ");
+        dual_puthex64(JIT_CACHE_BASE_PA_AMD);
+        dual_puts(b")\n");
+
         // Phase 5b: AMD VMRUN is round-trip — control returns here on every
         // VMEXIT with host state restored from HSAVE. Loop: classify exit,
         // emulate (MMIO etc.), VMRUN again on Reenter. Break on Halt.
@@ -930,7 +1030,7 @@ unsafe fn boot_amd(
             let exit_info_2 = vmcb.read_u64(VMCB_EXIT_INFO_2);
 
             // Decide whether to drive the FEX dispatch path or just log.
-            if !crate::fex_dispatch::is_armed() {
+            if !crate::dbt_dispatch::is_armed() {
                 // Foundation gate / single-exit smoke-test behaviour.
                 dual_puts(b"[x86] VMCB exit_code = ");
                 dual_puthex64(exit_code);
@@ -948,12 +1048,12 @@ unsafe fn boot_amd(
 
             // Armed: dispatch through FEX.
             let npf_gpa = exit_info_2;
-            let exit = crate::fex_dispatch::classify_amd(exit_code, npf_gpa);
-            let action = crate::fex_dispatch::with_global_mut(|s| {
-                crate::fex_dispatch::handle_vmexit(s, exit)
+            let exit = crate::dbt_dispatch::classify_amd(exit_code, npf_gpa);
+            let action = crate::dbt_dispatch::with_global_mut(|s| {
+                crate::dbt_dispatch::handle_vmexit(s, exit)
             });
             match action {
-                crate::fex_dispatch::VmexitAction::Reenter => {
+                crate::dbt_dispatch::VmexitAction::Reenter => {
                     if iter % 65536 == 0 {
                         dual_puts(b"[fex] dispatch iter=");
                         dual_puthex64(iter);
@@ -965,7 +1065,7 @@ unsafe fn boot_amd(
                     }
                     continue;
                 }
-                crate::fex_dispatch::VmexitAction::Halt => {
+                crate::dbt_dispatch::VmexitAction::Halt => {
                     dual_puts(b"[fex] dispatch -> Halt (exit_code=");
                     dual_puthex64(exit_code);
                     dual_puts(b")\n");
@@ -989,7 +1089,7 @@ fn halt() -> ! {
 // ─────────────────────────────────────────────────────────────────────────────
 // FEX bring-up bridge
 //
-// Calls `init_fex_integration` with the statically reserved JIT + bump arenas.
+// Calls `init_dbt_integration_hv` with the statically reserved JIT + bump arenas.
 // On a `--no-default-features` build (the default) the FEX library is stubbed
 // and this returns `FexLibNotLinked` — that's expected and is not an error
 // for the foundation gate; the message is just informational. On a build with
@@ -1001,7 +1101,7 @@ fn halt() -> ! {
 #[cfg(not(feature = "fex_linked"))]
 unsafe fn try_init_fex() -> bool {
     // Default build: FEX library is stubbed. Avoid allocating the full 16 MiB
-    // JIT cache + 8 MiB bump arena BSS regions that init_fex_integration's
+    // JIT cache + 8 MiB bump arena BSS regions that init_dbt_integration_hv's
     // validator requires. Log the skip and return false; the layered payload
     // path falls through to the foundation-gate HLT byte.
     unsafe {
@@ -1015,28 +1115,28 @@ unsafe fn try_init_fex() -> bool {
     unsafe {
         // With the feature on, the full-sized JIT and bump arenas must exist.
         // The smoke-test BSS regions in this file are too small; production
-        // builds wire init_fex_integration to UEFI-allocated memory ranges.
+        // builds wire init_dbt_integration_hv to UEFI-allocated memory ranges.
         // For the feature-on build we use aether_defaults() and rely on the
         // installer to have reserved that PA range in the EFI memory map.
-        let cfg = FexIntegrationConfig::aether_defaults();
-        dual_puts(b"[fex] init_fex_integration()\n");
+        let cfg = DbtIntegrationConfig::aether_defaults();
+        dual_puts(b"[fex] init_dbt_integration_hv()\n");
         let bindings  = &mut *ptr::addr_of_mut!(FEX_BINDINGS);
         let jit_cache = &mut *ptr::addr_of_mut!(FEX_JIT_CACHE);
         let queue     = &mut *ptr::addr_of_mut!(FEX_AOT_QUEUE);
 
-        match init_fex_integration(&cfg, bindings, jit_cache, queue) {
+        match init_dbt_integration_hv(&cfg, bindings, jit_cache, queue) {
             Ok(state) => {
                 dual_puts(b"[fex] init OK phase=");
                 dual_puthex64(state.phase as u64);
                 dual_puts(b"\n");
                 true
             }
-            Err(FexError::FexLibNotLinked) => {
+            Err(HvDbtError::FexLibNotLinked) => {
                 dual_puts(b"[fex] libfex.a not linked despite feature flag\n");
                 false
             }
             Err(_) => {
-                dual_puts(b"[fex] init FAILED (see FexError variant)\n");
+                dual_puts(b"[fex] init FAILED (see HvDbtError variant)\n");
                 false
             }
         }

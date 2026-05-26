@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  media_profiles.xml — MediaRecorder recording profile defaults.
+  Single 720p profile to satisfy the build; recording isn't in the gate scope.
+-->
+<MediaSettings>
+    <CamcorderProfiles cameraId="0">
+        <EncoderProfile quality="high" fileFormat="mp4" duration="60">
+            <Video codec="h264" bitRate="6000000" width="1280" height="720" frameRate="30"/>
+            <Audio codec="aac" bitRate="128000" sampleRate="48000" channels="2"/>
+        </EncoderProfile>
+        <EncoderProfile quality="low" fileFormat="mp4" duration="60">
+            <Video codec="h264" bitRate="1000000" width="640" height="480" frameRate="30"/>
+            <Audio codec="aac" bitRate="96000" sampleRate="44100" channels="1"/>
+        </EncoderProfile>
+        <ImageEncoding quality="95"/>
+        <ImageEncoding quality="80"/>
+        <ImageDecoding memCap="20000000"/>
+    </CamcorderProfiles>
+    <EncoderOutputFileFormat name="3gp" value="1"/>
+    <EncoderOutputFileFormat name="mp4" value="2"/>
+    <VideoEncoderCap name="h264" enabled="true"
+        minBitRate="64000" maxBitRate="20000000"
+        minFrameWidth="176" maxFrameWidth="1920"
+        minFrameHeight="144" maxFrameHeight="1080"
+        minFrameRate="1" maxFrameRate="30"/>
+    <AudioEncoderCap name="aac" enabled="true"
+        minBitRate="8000" maxBitRate="960000"
+        minSampleRate="8000" maxSampleRate="48000"
+        minChannels="1" maxChannels="6"/>
+    <VideoDecoderCap name="wmv" enabled="false"/>
+    <AudioDecoderCap name="wma" enabled="false"/>
+    <VideoEditorCap maxInputFrameWidth="1920" maxInputFrameHeight="1080"
+        maxOutputFrameWidth="1920" maxOutputFrameHeight="1080"
+        maxPrefetchYUVFrames="6"/>
+    <ExportVideoProfile name="h264" profile="1" level="2048"/>
+</MediaSettings>

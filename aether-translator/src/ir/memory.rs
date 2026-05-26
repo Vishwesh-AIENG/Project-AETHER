@@ -9,7 +9,7 @@ pub enum MemOrder {
     SeqCst,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LoadTy {
     U8,
     I8,

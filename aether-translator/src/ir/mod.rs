@@ -11,6 +11,7 @@ pub mod ops;
 pub mod serialize;
 pub mod value;
 
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
 pub use flags::{IrFlagsId, NzcvBit};
@@ -23,24 +24,40 @@ pub use value::{IrValueId, IrValueKind, LaneType};
 #[repr(transparent)]
 pub struct BlockId(pub u32);
 
+/// AT-6 SSA phi node at a block entry.
+///
+/// `incoming[i] = (pred_block_id, value_from_pred)`.  Every predecessor must
+/// appear exactly once in `incoming`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IrPhi {
+    pub dst: IrValueId,
+    pub incoming: Vec<(BlockId, IrValueId)>,
+}
+
 /// A linear basic block.
 #[derive(Debug, Clone, Default)]
 pub struct IrBlock {
     pub id: BlockId,
+    /// AT-6: phi nodes at block entry (empty in Phase A pre-SSA IR).
+    pub phis: Vec<IrPhi>,
     pub ops: Vec<IrOp>,
     /// Block-local value type table; index = `IrValueId`.
     pub values: Vec<IrValueKind>,
     /// Block-local flag table; index = `IrFlagsId`.
-    pub flags: Vec<()>, // placeholder; flags are positional in Phase A
+    pub flags: Vec<()>,
+    /// AT-8: flag IDs whose production can be suppressed on x86 (never read).
+    pub elided_flags: BTreeSet<u32>,
 }
 
 impl IrBlock {
     pub fn new(id: BlockId) -> Self {
         Self {
             id,
+            phis: Vec::new(),
             ops: Vec::new(),
             values: Vec::new(),
             flags: Vec::new(),
+            elided_flags: BTreeSet::new(),
         }
     }
 
@@ -52,6 +69,12 @@ impl IrBlock {
         let id = self.values.len() as u32;
         self.values.push(kind);
         IrValueId(id)
+    }
+
+    pub fn new_flags(&mut self) -> IrFlagsId {
+        let id = self.flags.len() as u32;
+        self.flags.push(());
+        IrFlagsId(id)
     }
 }
 

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  audio_policy_configuration.xml — minimum stub for AETHER.
+
+  AETHER has no audio hardware in the gate scope; this stub satisfies the
+  AOSP build's hard requirement that the file exist + be valid XML. Real
+  audio routing lands when the audio HAL is wired in (deferred).
+
+  Reference: source.android.com/devices/audio/implement-policy
+-->
+<audioPolicyConfiguration version="7.0" xmlns:xi="http://www.w3.org/2001/XInclude">
+    <globalConfiguration speaker_drc_enabled="false"/>
+    <modules>
+        <module name="primary" halVersion="3.0">
+            <attachedDevices>
+                <item>Speaker</item>
+            </attachedDevices>
+            <defaultOutputDevice>Speaker</defaultOutputDevice>
+            <mixPorts>
+                <mixPort name="primary output" role="source" flags="AUDIO_OUTPUT_FLAG_PRIMARY">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000"
+                             channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </mixPort>
+            </mixPorts>
+            <devicePorts>
+                <devicePort tagName="Speaker" type="AUDIO_DEVICE_OUT_SPEAKER" role="sink">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000"
+                             channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+            </devicePorts>
+            <routes>
+                <route type="mix" sink="Speaker" sources="primary output"/>
+            </routes>
+        </module>
+    </modules>
+</audioPolicyConfiguration>

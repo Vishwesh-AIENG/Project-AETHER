@@ -2,7 +2,7 @@
 //
 // Phase 5 deliverable. When FEX translates ARM64 LDR/STR to an MMIO IPA, the
 // resulting x86 host load/store triggers an EPT/NPT violation. The dispatch
-// loop in `fex_dispatch.rs` classifies the exit, decodes the access (FEX
+// loop in `dbt_dispatch.rs` classifies the exit, decodes the access (FEX
 // tells us the ARM64 instruction it was translating + the target register),
 // and routes here for emulation.
 //

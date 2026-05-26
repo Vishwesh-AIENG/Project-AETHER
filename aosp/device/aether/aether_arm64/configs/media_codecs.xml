@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  media_codecs.xml — software-only codec list for AETHER's initial drop.
+  Hardware codec entries (via Adreno video accelerators) land alongside the
+  real ch46 GPU enable.
+
+  Reference: source.android.com/devices/media#codecs
+-->
+<MediaCodecs>
+    <Decoders>
+        <MediaCodec name="OMX.google.h264.decoder" type="video/avc">
+            <Limit name="size" min="16x16" max="1920x1088"/>
+            <Limit name="alignment" value="2x2"/>
+            <Limit name="block-size" value="16x16"/>
+            <Limit name="blocks-per-second" range="1-244800"/>
+            <Limit name="bitrate" range="1-12000000"/>
+            <Feature name="adaptive-playback"/>
+        </MediaCodec>
+        <MediaCodec name="OMX.google.aac.decoder" type="audio/mp4a-latm">
+            <Limit name="channel-count" max="6"/>
+            <Limit name="sample-rate" ranges="8000,11025,12000,16000,22050,24000,32000,44100,48000"/>
+            <Limit name="bitrate" range="8000-960000"/>
+        </MediaCodec>
+    </Decoders>
+    <Encoders>
+        <MediaCodec name="OMX.google.h264.encoder" type="video/avc">
+            <Limit name="size" min="16x16" max="1920x1088"/>
+            <Limit name="alignment" value="2x2"/>
+            <Limit name="block-size" value="16x16"/>
+            <Limit name="blocks-per-second" range="1-244800"/>
+            <Limit name="bitrate" range="1-12000000"/>
+        </MediaCodec>
+        <MediaCodec name="OMX.google.aac.encoder" type="audio/mp4a-latm">
+            <Limit name="channel-count" max="6"/>
+            <Limit name="sample-rate" ranges="8000,11025,12000,16000,22050,24000,32000,44100,48000"/>
+            <Limit name="bitrate" range="8000-960000"/>
+        </MediaCodec>
+    </Encoders>
+</MediaCodecs>

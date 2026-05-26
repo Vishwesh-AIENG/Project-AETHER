@@ -6,7 +6,9 @@
 use std::path::PathBuf;
 
 #[test]
-#[ignore = "AT-4 gate; un-ignore once branch_sys + LSE/LL-SC fills land"]
+#[cfg_attr(not(feature = "linux_corpus"),
+           ignore = "AT-4 gate: needs corpus/vmlinux-gki.aarch64 (decompressed GKI vmlinux); \
+                     run with --features linux_corpus on a Linux host")]
 fn at4_vmlinux_zero_unknowns() {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("corpus");
@@ -22,7 +24,9 @@ fn at4_vmlinux_zero_unknowns() {
 }
 
 #[test]
-#[ignore = "AT-4 gate"]
+#[cfg_attr(not(feature = "linux_corpus"),
+           ignore = "AT-4 gate: needs corpus/libc.so.aarch64 from a GSI extract; \
+                     run with --features linux_corpus on a Linux host")]
 fn at4_bionic_libc_zero_unknowns() {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("corpus");

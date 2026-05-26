@@ -1,0 +1,35 @@
+# fstab.aether — partition mount table for the AETHER Android partition.
+#
+# Consumed by Android init's first-stage mount. Copied to both
+# $TARGET_COPY_OUT_RAMDISK/fstab.aether and $TARGET_COPY_OUT_VENDOR/etc/fstab.aether
+# by BoardConfig.mk PRODUCT_COPY_FILES.
+#
+# Format: <source>   <mount_point>   <fs_type>   <mount_options>   <fs_mgr_flags>
+#
+# fs_mgr_flags:
+#   wait              — block first-stage init until the device appears
+#   slotselect        — A/B partition (boot_a / boot_b chosen at boot)
+#   avb               — AVB-verified (verifyatboot in older codebases)
+#   logical           — lives inside the dynamic super partition
+#   first_stage_mount — mounted by first-stage init before SELinux load
+#   formattable       — userdata can be reformatted on factory reset
+#   fileencryption=…  — FBE (file-based encryption) parameters
+#   reservedsize=…    — reserve free space for filesystem metadata
+
+# System partition (A/B + dynamic + AVB).
+system    /system    ext4    ro,barrier=1,discard    wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+
+# Vendor partition (A/B + dynamic + AVB).
+vendor    /vendor    ext4    ro,barrier=1,discard    wait,slotselect,avb=vbmeta_vendor,logical,first_stage_mount
+
+# Product partition (A/B + dynamic + AVB-extended via vbmeta_system).
+product   /product   ext4    ro,barrier=1,discard    wait,slotselect,avb,logical,first_stage_mount
+
+# Userdata partition — F2FS, encrypted, single-slot (no A/B).
+/dev/block/by-name/userdata   /data   f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier    latemount,wait,check,formattable,quota,reservedsize=128M,fileencryption=aes-256-xts:aes-256-cts:v2,keydirectory=/metadata/vold/metadata_encryption
+
+# Metadata partition — small partition used by vold for encryption keys.
+/dev/block/by-name/metadata   /metadata   ext4    noatime,nosuid,nodev,discard,sync    wait,formattable,first_stage_mount
+
+# Misc — boot control block (A/B slot state), read/write, no A/B suffix.
+/dev/block/by-name/misc       /misc       emmc    defaults    defaults

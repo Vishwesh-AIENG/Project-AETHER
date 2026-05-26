@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  network_security_config.xml — AETHER's default network security policy.
+
+  Applied to apps that target API 24+. Disables cleartext traffic by default
+  (apps must opt-in via android:usesCleartextTraffic="true" or app-specific
+  domain rules). Pins the system CA store; apps can add their own trust
+  anchors per-domain.
+
+  Reference: developer.android.com/training/articles/security-config
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+
+    <!-- Cleartext is allowed only on local network (RFC 1918) for development
+         and the AETHER captive-portal probe URL. Production builds may want
+         to tighten further. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">10.0.0.0/8</domain>
+        <domain includeSubdomains="true">172.16.0.0/12</domain>
+        <domain includeSubdomains="true">192.168.0.0/16</domain>
+    </domain-config>
+</network-security-config>

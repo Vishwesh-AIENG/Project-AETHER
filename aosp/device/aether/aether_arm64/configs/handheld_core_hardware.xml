@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  handheld_core_hardware.xml — declares the hardware features AETHER exposes.
+
+  Read by PackageManager at boot. Apps that require any feature listed here as
+  android.hardware.* can be installed; apps that require features NOT listed
+  here are filtered out of the Play Store / FDroid / Aurora catalog at install
+  time.
+
+  AETHER deliberately does NOT advertise:
+    * camera.front, camera.flash         — no real camera hardware
+    * bluetooth, bluetooth_le, wifi.aware — out of scope for the gate
+    * fingerprint, biometric.*           — no biometric hardware
+    * nfc                                 — out of scope
+    * telephony.gsm                      — virtual modem is "No SIM" by default
+
+  Adding a feature here without an actual implementation is a fingerprint
+  hazard (apps will call into the corresponding API and fail unexpectedly).
+-->
+<permissions>
+    <!-- Display + input. -->
+    <feature name="android.hardware.touchscreen"/>
+    <feature name="android.hardware.touchscreen.multitouch"/>
+    <feature name="android.hardware.touchscreen.multitouch.distinct"/>
+    <feature name="android.hardware.touchscreen.multitouch.jazzhand"/>
+    <feature name="android.hardware.screen.portrait"/>
+    <feature name="android.hardware.screen.landscape"/>
+
+    <!-- Sensors (ch12 + ch47 VirtualSensorSuite). -->
+    <feature name="android.hardware.sensor.accelerometer"/>
+    <feature name="android.hardware.sensor.gyroscope"/>
+    <feature name="android.hardware.sensor.compass"/>
+
+    <!-- Networking. -->
+    <feature name="android.hardware.wifi"/>
+    <feature name="android.hardware.ethernet"/>
+
+    <!-- GPU. -->
+    <feature name="android.hardware.opengles.aep"/>
+    <feature name="android.hardware.vulkan.compute" version="0"/>
+    <feature name="android.hardware.vulkan.level" version="1"/>
+    <feature name="android.hardware.vulkan.version" version="4198400"/>
+
+    <!-- Required by Treble. -->
+    <feature name="android.software.app_widgets"/>
+    <feature name="android.software.connectionservice"/>
+    <feature name="android.software.input_methods"/>
+    <feature name="android.software.print"/>
+    <feature name="android.software.voice_recognizers" notLowRam="true"/>
+    <feature name="android.software.backup"/>
+    <feature name="android.software.companion_device_setup"/>
+    <feature name="android.software.device_admin"/>
+    <feature name="android.software.managed_users"/>
+    <feature name="android.software.webview"/>
+    <feature name="android.software.cant_save_state"/>
+</permissions>

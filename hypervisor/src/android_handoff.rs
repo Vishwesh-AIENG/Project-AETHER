@@ -6,7 +6,7 @@
 //     GKI Image inside a staged Android boot.img.
 //   * `kernel::build_android_dtb` — emits the Linux FDT the kernel reads at
 //     boot.
-//   * `FexInitialRegs` — ARM64 register file the FEX dispatcher (Phase 5)
+//   * `DbtInitialRegs` — ARM64 register file the FEX dispatcher (Phase 5)
 //     consults when it picks up translation at the kernel entry.
 //
 // QEMU staging contract:
@@ -19,7 +19,7 @@
 // `BootImageHeader::parse` pipeline reads `boot_a` off NVMe into the same
 // physical address before invoking the hypervisor. Phase 6 wires that path.
 //
-// Read-only — populates a `FexInitialRegs` value and an `AndroidHandoff`
+// Read-only — populates a `DbtInitialRegs` value and an `AndroidHandoff`
 // summary. Does no MMIO, no Stage 2 / EPT / NPT manipulation; that lives
 // in the platform-specific paging code.
 
@@ -61,7 +61,7 @@ pub const GUEST_DTB_SIZE: u64 = 2 * 1024 * 1024;
 pub const HANDOFF_REGION_SIZE: u64 = STAGED_BOOT_IMG_SIZE + GUEST_DTB_SIZE;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FexInitialRegs — ARM64 GPR file at kernel entry
+// DbtInitialRegs — ARM64 GPR file at kernel entry
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// ARM64 boot-protocol register state at kernel entry.
@@ -77,13 +77,13 @@ pub const HANDOFF_REGION_SIZE: u64 = STAGED_BOOT_IMG_SIZE + GUEST_DTB_SIZE;
 /// file before translating the first basic block.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
-pub struct FexInitialRegs {
+pub struct DbtInitialRegs {
     pub x:  [u64; 31],   // x0..x30
     pub sp: u64,
     pub pc: u64,
 }
 
-impl FexInitialRegs {
+impl DbtInitialRegs {
     pub const fn zero() -> Self {
         Self { x: [0; 31], sp: 0, pc: 0 }
     }
@@ -114,7 +114,7 @@ pub struct AndroidHandoff {
     /// Length of the DTB blob actually written.
     pub dtb_len:    usize,
     /// ARM64 GPR file Phase 5 hands to FEX before dispatching.
-    pub fex_regs:   FexInitialRegs,
+    pub dbt_regs:   DbtInitialRegs,
     /// PA of the kernel entry (== `layout.kernel_pa` for text_offset=0 GKI).
     pub kernel_pc:  u64,
     /// Base + size of the contiguous host PA range the EPT/NPT must map.
@@ -222,13 +222,13 @@ pub unsafe fn prepare_android_handoff() -> Result<AndroidHandoff, HandoffError> 
         return Err(HandoffError::DtbTooLarge);
     }
 
-    let fex_regs = FexInitialRegs::for_kernel_entry(layout.kernel_pa, GUEST_DTB_PA);
+    let dbt_regs = DbtInitialRegs::for_kernel_entry(layout.kernel_pa, GUEST_DTB_PA);
 
     Ok(AndroidHandoff {
         layout,
         dtb_pa:  GUEST_DTB_PA,
         dtb_len,
-        fex_regs,
+        dbt_regs,
         kernel_pc: layout.kernel_pa,
         region_pa:   STAGED_BOOT_IMG_PA,
         region_size: HANDOFF_REGION_SIZE,
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn fex_initial_regs_match_arm64_boot_protocol() {
-        let r = FexInitialRegs::for_kernel_entry(0x4080_0000, 0x4400_0000);
+        let r = DbtInitialRegs::for_kernel_entry(0x4080_0000, 0x4400_0000);
         assert_eq!(r.x[0], 0x4400_0000);          // x0 = DTB PA
         assert_eq!(r.x[1], 0);                    // x1 = 0
         assert_eq!(r.x[2], 0);                    // x2 = 0

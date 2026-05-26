@@ -457,6 +457,174 @@ impl VmcbRegion {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// W^X support — NPT leaf flip + VMCB TLB flush  (Step 3 of the AT integration plan)
+//
+// AMD provides no INVNPT instruction. NPT invalidation is per-VMCB: write
+// `TLB_CTL = FLUSH_ALL` and mark `VMCB_CLEAN = 0`; the processor flushes
+// atomically on the next VMRUN. The translator's W^X callback for AMD
+// hosts walks the active NPT, flips the leaf covering the JIT page from
+// RW to RX (clear bit 1 W, clear bit 63 NX), and arms the flush on the
+// active VMCB. SmcWatcher (AT-23) detects guest writes to translated
+// pages via NPF and triggers invalidate→retranslate as before.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// PA of the active NPT PML4. Zero until `set_active_npt` is called.
+pub static ACTIVE_NPT_PML4_PA: AtomicU64 = AtomicU64::new(0);
+/// PA of the active VMCB region. Zero until `set_active_npt` is called.
+pub static ACTIVE_VMCB_PA:     AtomicU64 = AtomicU64::new(0);
+
+/// Publish the active NPT root + VMCB. Boot pipeline / per-vCPU switch
+/// calls this immediately after writing N_CR3 into the VMCB. Idempotent.
+pub fn set_active_npt(pml4_pa: u64, vmcb_pa: u64) {
+    ACTIVE_NPT_PML4_PA.store(pml4_pa, Ordering::Release);
+    ACTIVE_VMCB_PA.store(vmcb_pa,     Ordering::Release);
+}
+
+/// NPT/x86_64 PDPT/PD page-size bit ("PS") — bit 7. Set on huge-page
+/// leaf entries (2 MiB at PD, 1 GiB at PDPT).
+pub const NPT_PAGE_SIZE_BIT: u64 = 1 << 7;
+/// NPT/x86_64 NX (no-execute) bit — bit 63. Clear to allow execute.
+pub const NPT_NX_BIT:        u64 = 1 << 63;
+
+/// Walk a 4-level NPT rooted at `pml4_pa` and flip the leaf covering
+/// `host_pa` (assumed already 4 KiB-aligned) from RW to RX. RX means
+/// `W=0` AND `NX=0` in AMD64 paging — both must be set correctly.
+///
+/// Returns `false` if any intermediate level is non-present, the leaf
+/// is mapped behind a 2 MiB or 1 GiB huge page, or the leaf is not
+/// present (`NPT_PRESENT == 0`).
+///
+/// # Safety
+/// `pml4_pa` must be a valid PML4 reachable via identity-mapped raw
+/// pointer dereference (true at SVM host mode after the UEFI handoff).
+pub unsafe fn npt_flip_leaf_to_rx(pml4_pa: u64, host_pa: u64) -> bool {
+    if pml4_pa == 0 || pml4_pa & 0xFFF != 0 {
+        return false;
+    }
+    let i4 = ((host_pa >> 39) & 0x1FF) as usize;
+    let i3 = ((host_pa >> 30) & 0x1FF) as usize;
+    let i2 = ((host_pa >> 21) & 0x1FF) as usize;
+    let i1 = ((host_pa >> 12) & 0x1FF) as usize;
+
+    let pml4 = pml4_pa as *mut u64;
+    let pml4e = unsafe { core::ptr::read_volatile(pml4.add(i4)) };
+    if pml4e & NPT_PRESENT == 0 { return false; }
+    let pdpt = (pml4e & !0xFFFu64) as *mut u64;
+    let pdpte = unsafe { core::ptr::read_volatile(pdpt.add(i3)) };
+    if pdpte & NPT_PRESENT == 0 { return false; }
+    if pdpte & NPT_PAGE_SIZE_BIT != 0 { return false; } // 1 GiB leaf
+    let pd = (pdpte & !0xFFFu64) as *mut u64;
+    let pde = unsafe { core::ptr::read_volatile(pd.add(i2)) };
+    if pde & NPT_PRESENT == 0 { return false; }
+    if pde & NPT_PAGE_SIZE_BIT != 0 { return false; } // 2 MiB leaf
+    let pt = (pde & !0xFFFu64) as *mut u64;
+    let leaf_ptr = unsafe { pt.add(i1) };
+    let leaf = unsafe { core::ptr::read_volatile(leaf_ptr) };
+    if leaf & NPT_PRESENT == 0 { return false; }
+    // RX = clear W, clear NX. Preserve PFN [51:12] and memory-type bits.
+    let new_leaf = (leaf & !(NPT_WRITABLE | NPT_NX_BIT)) /* | execute-enabled */;
+    unsafe { core::ptr::write_volatile(leaf_ptr, new_leaf) };
+    true
+}
+
+/// Walk a 4-level NPT rooted at `pml4_pa` and return the host PA that
+/// `guest_pa` maps to, or `None` if any level is non-present / behind a
+/// huge page.
+///
+/// # Safety
+/// Same identity-mapped NPT/raw-pointer-deref contract as the flip helpers.
+pub unsafe fn npt_lookup_host_pa(pml4_pa: u64, guest_pa: u64) -> Option<u64> {
+    if pml4_pa == 0 || pml4_pa & 0xFFF != 0 {
+        return None;
+    }
+    let i4 = ((guest_pa >> 39) & 0x1FF) as usize;
+    let i3 = ((guest_pa >> 30) & 0x1FF) as usize;
+    let i2 = ((guest_pa >> 21) & 0x1FF) as usize;
+    let i1 = ((guest_pa >> 12) & 0x1FF) as usize;
+    let page_off = guest_pa & 0xFFF;
+
+    let pml4 = pml4_pa as *mut u64;
+    let pml4e = unsafe { core::ptr::read_volatile(pml4.add(i4)) };
+    if pml4e & NPT_PRESENT == 0 { return None; }
+    let pdpt = (pml4e & !0xFFFu64) as *mut u64;
+    let pdpte = unsafe { core::ptr::read_volatile(pdpt.add(i3)) };
+    if pdpte & NPT_PRESENT == 0 { return None; }
+    if pdpte & NPT_PAGE_SIZE_BIT != 0 { return None; }
+    let pd = (pdpte & !0xFFFu64) as *mut u64;
+    let pde = unsafe { core::ptr::read_volatile(pd.add(i2)) };
+    if pde & NPT_PRESENT == 0 { return None; }
+    if pde & NPT_PAGE_SIZE_BIT != 0 { return None; }
+    let pt = (pde & !0xFFFu64) as *mut u64;
+    let leaf = unsafe { core::ptr::read_volatile(pt.add(i1)) };
+    if leaf & NPT_PRESENT == 0 { return None; }
+    Some((leaf & !0xFFFu64) | page_off)
+}
+
+/// Read up to `max_len` bytes of guest memory starting at `guest_pa` by
+/// walking the active NPT. Returns `(host_va, byte_len)` capped at the
+/// 4 KiB page boundary.
+///
+/// # Safety
+/// Same contract as [`npt_lookup_host_pa`].
+pub unsafe fn npt_read_guest_window(guest_pa: u64, max_len: usize) -> Option<(*const u8, usize)> {
+    let pml4 = ACTIVE_NPT_PML4_PA.load(Ordering::Acquire);
+    if pml4 == 0 { return None; }
+    let host_pa = unsafe { npt_lookup_host_pa(pml4, guest_pa) }?;
+    let page_off = (host_pa & 0xFFF) as usize;
+    let page_remaining = 0x1000 - page_off;
+    let len = max_len.min(page_remaining);
+    Some((host_pa as *const u8, len))
+}
+
+/// Flip a contiguous host-PA range to RX and arm a TLB flush on the
+/// active VMCB (TLB_CTL = FLUSH_ALL + VMCB_CLEAN = 0). The actual flush
+/// happens on the next VMRUN — AMD has no INVNPT instruction.
+///
+/// Returns `false` if any per-page flip failed.
+///
+/// # Safety
+/// Same contract as [`npt_flip_leaf_to_rx`]; additionally the value
+/// previously stored in `ACTIVE_VMCB_PA` must remain a valid VMCB
+/// region (not freed) for the duration of this call.
+pub unsafe fn npt_flip_range_to_rx(host_pa: u64, byte_len: usize) -> bool {
+    let pml4 = ACTIVE_NPT_PML4_PA.load(Ordering::Acquire);
+    if pml4 == 0 || byte_len == 0 {
+        return false;
+    }
+    let start = host_pa & !0xFFFu64;
+    let end   = (host_pa.wrapping_add(byte_len as u64).wrapping_add(0xFFF)) & !0xFFFu64;
+    let mut pa = start;
+    while pa < end {
+        if !unsafe { npt_flip_leaf_to_rx(pml4, pa) } {
+            return false;
+        }
+        pa = pa.wrapping_add(4096);
+    }
+    // Arm the per-VMCB flush — AMD has no INVNPT. Skip silently when no
+    // VMCB has been published (host / unit-test builds).
+    let vmcb_pa = ACTIVE_VMCB_PA.load(Ordering::Acquire);
+    if vmcb_pa != 0 {
+        let vmcb_bytes = vmcb_pa as *mut u8;
+        // SAFETY: ACTIVE_VMCB_PA was published by set_active_npt; it
+        // points at a 4 KiB VMCB region whose TLB_CTL (0x05C) and
+        // VMCB_CLEAN (0x0C0) offsets are stable per AMD APM Table B-2.
+        unsafe {
+            core::ptr::write_volatile(
+                vmcb_bytes.add(VMCB_TLB_CTL) as *mut u32,
+                TLB_CTL_FLUSH_ALL,
+            );
+            core::ptr::write_volatile(
+                vmcb_bytes.add(VMCB_CLEAN) as *mut u32,
+                0u32,
+            );
+        }
+    }
+    true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Host state save area — 4 KiB, 4 KiB-aligned
 //
 // VMRUN saves host state (RSP, RIP, CR0/3/4, EFER, RFLAGS, segments, etc.)
@@ -1060,6 +1228,50 @@ pub fn handle_vm_exit(vmcb: &mut VmcbRegion, state: &mut SvmFoundationState) -> 
             SvmExitAction::Resume
         }
         SVM_EXIT_NPF => {
+            // AT integration bridge (Step 2 of the integration plan):
+            // on instruction-fetch NPF the guest PC has not yet been
+            // translated. Hand the ARM64 PC (== VMCB GUEST_RIP in the
+            // AT model) to the translator's cold path; the dispatcher
+            // owns the block cache + branch chain (AT-16 / AT-18).
+            //
+            // AMD APM §15.25.6 — NPF EXITINFO1 encoding mirrors the
+            // standard page-fault error code. The instruction-fetch
+            // indicator is bit 4 (I/D) on AMD64; bit 2 is U/S (user vs
+            // supervisor). We accept either of:
+            //   * bit 4 set (modern AMD APM)
+            //   * bit 2 set (legacy plan text — kept for compat)
+            // to catch the cold-path signal regardless of the source.
+            const NPF_BIT_USER:        u64 = 1 << 2;
+            const NPF_BIT_INSTR_FETCH: u64 = 1 << 4;
+            let info1 = vmcb.read_u64(VMCB_EXIT_INFO_1);
+            if (info1 & (NPF_BIT_INSTR_FETCH | NPF_BIT_USER)) != 0 {
+                let pc = vmcb.guest_rip();
+                use aether_translator::dbt::{
+                    aether_dbt_dispatch_block, aether_dbt_translate_block,
+                    AetherDbtResult, MAX_INSNS_PER_BLOCK,
+                };
+                const WINDOW_BYTES: usize = MAX_INSNS_PER_BLOCK * 4;
+                // SAFETY: ACTIVE_NPT_PML4_PA published by `set_active_npt`.
+                let window = unsafe { npt_read_guest_window(pc, WINDOW_BYTES) };
+                if let Some((host_va, len)) = window {
+                    // SAFETY: npt_read_guest_window returned a single-page
+                    // window; the slice does not span page boundaries.
+                    let guest_mem = unsafe {
+                        core::slice::from_raw_parts(host_va, len)
+                    };
+                    let t = aether_dbt_translate_block(pc, guest_mem);
+                    if t == AetherDbtResult::Ok {
+                        state.dbt_blocks_translated =
+                            state.dbt_blocks_translated.saturating_add(1);
+                        let d = aether_dbt_dispatch_block(pc, guest_mem);
+                        if d == AetherDbtResult::Ok {
+                            state.dbt_blocks_dispatched =
+                                state.dbt_blocks_dispatched.saturating_add(1);
+                            return SvmExitAction::Resume;
+                        }
+                    }
+                }
+            }
             state.gate.npt_fault_seen = true;
             SvmExitAction::Terminate
         }
@@ -1217,6 +1429,10 @@ pub struct SvmFoundationState {
     pub asid_count: u32,
     pub npt_supported: bool,
     pub decode_assists: bool,
+    /// AT-integration counters — incremented on every DBT cold/hot dispatch
+    /// triggered by an NPF instruction-fetch arm in `handle_vm_exit`.
+    pub dbt_blocks_translated: u64,
+    pub dbt_blocks_dispatched: u64,
 }
 
 impl SvmFoundationState {
@@ -1230,6 +1446,8 @@ impl SvmFoundationState {
             asid_count:      0,
             npt_supported:   false,
             decode_assists:  false,
+            dbt_blocks_translated: 0,
+            dbt_blocks_dispatched: 0,
         }
     }
 
@@ -1349,6 +1567,83 @@ pub unsafe fn init_svm_foundation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn alloc_aligned_table() -> *mut u64 {
+        let layout = std::alloc::Layout::from_size_align(4096, 4096).unwrap();
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!ptr.is_null());
+        ptr as *mut u64
+    }
+
+    #[test]
+    fn npt_walker_flips_leaf_rw_to_rx() {
+        // Mirror of the EPT walker test: build a synthetic 4-level NPT, flip
+        // the leaf, verify W cleared AND NX cleared (RX semantics on AMD64).
+        let host_pa: u64 = 0x2_0000_1000;
+        let i4 = ((host_pa >> 39) & 0x1FF) as usize;
+        let i3 = ((host_pa >> 30) & 0x1FF) as usize;
+        let i2 = ((host_pa >> 21) & 0x1FF) as usize;
+        let i1 = ((host_pa >> 12) & 0x1FF) as usize;
+
+        let pml4 = alloc_aligned_table();
+        let pdpt = alloc_aligned_table();
+        let pd   = alloc_aligned_table();
+        let pt   = alloc_aligned_table();
+
+        unsafe {
+            *pml4.add(i4) = (pdpt as u64) | NPT_NONLEAF;
+            *pdpt.add(i3) = (pd   as u64) | NPT_NONLEAF;
+            *pd  .add(i2) = (pt   as u64) | NPT_NONLEAF;
+            // Leaf: RW + WB normal RAM + NX set (typical for stock data page).
+            *pt  .add(i1) = (host_pa & !0xFFF) | NPT_RAM_WB | NPT_NX_BIT;
+        }
+
+        let before = unsafe { *pt.add(i1) };
+        assert_ne!(before & NPT_WRITABLE, 0, "leaf starts writable");
+        assert_ne!(before & NPT_NX_BIT,   0, "leaf starts NX (non-exec)");
+
+        let ok = unsafe { npt_flip_leaf_to_rx(pml4 as u64, host_pa) };
+        assert!(ok);
+
+        let after = unsafe { *pt.add(i1) };
+        assert_eq!(after & NPT_WRITABLE, 0, "W cleared");
+        assert_eq!(after & NPT_NX_BIT,   0, "NX cleared → executable");
+        assert_ne!(after & NPT_PRESENT,  0, "P preserved");
+        assert_eq!(after & !0xFFFu64 & !NPT_NX_BIT,
+                   before & !0xFFFu64 & !NPT_NX_BIT,
+                   "PFN preserved");
+    }
+
+    #[test]
+    fn npt_walker_refuses_huge_pages() {
+        let host_pa: u64 = 0x2_0020_0000;
+        let i4 = ((host_pa >> 39) & 0x1FF) as usize;
+        let i3 = ((host_pa >> 30) & 0x1FF) as usize;
+        let i2 = ((host_pa >> 21) & 0x1FF) as usize;
+
+        let pml4 = alloc_aligned_table();
+        let pdpt = alloc_aligned_table();
+        let pd   = alloc_aligned_table();
+        unsafe {
+            *pml4.add(i4) = (pdpt as u64) | NPT_NONLEAF;
+            *pdpt.add(i3) = (pd   as u64) | NPT_NONLEAF;
+            *pd  .add(i2) = (host_pa & !0xFFF) | NPT_RAM_WB | NPT_PAGE_SIZE_BIT;
+        }
+        let ok = unsafe { npt_flip_leaf_to_rx(pml4 as u64, host_pa) };
+        assert!(!ok, "2 MiB PD leaf must be refused");
+    }
+
+    #[test]
+    fn npt_walker_refuses_nonpresent() {
+        let pml4 = alloc_aligned_table();
+        let ok = unsafe { npt_flip_leaf_to_rx(pml4 as u64, 0x2_0000_0000) };
+        assert!(!ok);
+    }
+
+    #[test]
+    fn npt_walker_rejects_misaligned_pml4() {
+        assert!(!unsafe { npt_flip_leaf_to_rx(0x1001, 0x2_0000_0000) });
+    }
 
     #[test]
     fn vmcb_offset_sanity() {

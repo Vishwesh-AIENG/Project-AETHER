@@ -912,7 +912,7 @@ impl AndroidX86State {
 
     /// Consumes one PL011 UART line and advances state. Mirrors the
     /// scan_uart_line() pattern from app_compat.rs / userspace_boot.rs /
-    /// fex_integration.rs — byte-pattern matching, no heap, no regex.
+    /// dbt_integration.rs — byte-pattern matching, no heap, no regex.
     pub fn process_line(&mut self, line: &[u8]) {
         if contains_bytes(line, X86_UART_SIG_VULKAN_INIT)
             && self.phase < AndroidX86Phase::VulkanInitialized

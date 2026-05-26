@@ -554,7 +554,7 @@ impl X86HwValidationState {
     /// Consumes one PL011 UART line and advances state.
     ///
     /// Mirrors the scan_uart_line() pattern from android_x86_userspace.rs,
-    /// fex_integration.rs, userspace_boot.rs -- byte-pattern matching, no heap,
+    /// dbt_integration.rs, userspace_boot.rs -- byte-pattern matching, no heap,
     /// no regex, no alloc. Phases advance strictly forward; lines that arrive
     /// out of the expected order are counted but do not regress the phase.
     pub fn process_line(&mut self, line: &[u8]) {
@@ -862,7 +862,7 @@ pub fn init_x86_hw_validation(
 // ─────────────────────────────────────────────────────────────────────────────
 // Utility: window-scan substring search
 //
-// Mirrors the helper in android_x86_userspace.rs / fex_integration.rs /
+// Mirrors the helper in android_x86_userspace.rs / dbt_integration.rs /
 // app_compat.rs / userspace_boot.rs. O(n x m), no heap, no regex. Used by
 // process_line() to match UART byte patterns without allocation.
 // ─────────────────────────────────────────────────────────────────────────────

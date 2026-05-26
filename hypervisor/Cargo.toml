@@ -18,9 +18,19 @@ name = "hypervisor"
 path = "src/lib.rs"
 
 [features]
-# ch52: link against libfex.a (FEX-Emu static archive built no_std-style).
-# When this feature is off, the extern "C" FEX FFI surface is stubbed so
-# `cargo check` succeeds without the upstream FEX dependency in the tree.
+# AT-24: link against the in-tree AETHER DBT translator. Inherits the
+# translator's `dbt_linked` feature so the FFI surface routes through the
+# real translator rather than the stub. Default keeps Step 1 buildable on
+# any host: the translator stubs return Ok and downstream code is unchanged.
 default = []
-fex_linked = []
+# Legacy ch52 name; preserved so external scripts don't break. Now an alias
+# for routing FFI calls through the translator's dbt_linked surface.
+fex_linked = ["aether-translator/dbt_linked"]
+
+[dependencies]
+# AT-24: AETHER ARM64 -> x86_64 dynamic binary translator. Pure Rust, no_std
+# when `std` feature is off. Provides the `aether_dbt_*` FFI surface that
+# `fex_integration.rs` / `fex_dispatch.rs` route into (Step 1 of the
+# integration plan; supersedes the libfex.a static archive).
+aether-translator = { path = "../aether-translator", default-features = false }
 

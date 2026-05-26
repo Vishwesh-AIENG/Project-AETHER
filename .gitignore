@@ -28,3 +28,7 @@ aether-translator/fuzz/target/
 aether-translator/fuzz/corpus/
 aether-translator/fuzz/artifacts/
 aether-translator/fuzz/Cargo.lock
+
+# ESP-staging produced by wsl-scripts/phase6_partial.sh — contains rebuildable
+# PE32+ EFI binaries that are outputs of `cargo build`, not source.
+esp-staging/

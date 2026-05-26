@@ -14,6 +14,15 @@ path = "src/lib.rs"
 # `default-features = false` to drop back to `no_std`.
 default = ["std"]
 std = []
+# Set when the native libaether_dbt.a static archive is linked; stubs compile otherwise.
+dbt_linked = []
+# AT-3/AT-4/AT-5 deferred corpus gates (Step 5 of the AT integration plan).
+# Off by default so the everyday `cargo test` skips the Android-GSI-dependent
+# corpus audits — they need `gcc-aarch64-linux-gnu`, `simg2img`, and a fresh
+# GSI build that the default Windows / macOS dev environment does not have.
+# The dedicated `corpus-gates` CI lane (.github/workflows/aether-translator.yml)
+# turns this feature on after installing those toolchains.
+linux_corpus = []
 
 [dev-dependencies]
 # AT-1 fuzz cross-check. 0.14 wraps Capstone 5.x with full ARMv8.2+ crypto

@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  manifest.xml — VINTF (Vendor Interface) manifest for AETHER's Android partition.
+
+  Declares which HAL services the vendor partition provides. Read by the Treble
+  framework-compatibility-matrix verifier at build time and at runtime by the
+  HIDL/AIDL service manager.
+
+  Mechanically derived from hypervisor/src/aosp_build.rs::AETHER_SOONG_MODULES.
+  Cross-checked at hypervisor build time by ch21 TrebleManifest::validate().
+
+  Reference: source.android.com/devices/architecture/vintf/objects#device-manifest
+-->
+<manifest version="3.0" type="device" target-level="7">
+
+    <!-- Virtual Sensor HAL (ch12 + ch47).
+         Surfaces VirtualSensorSuite to Android sensorservice. -->
+    <hal format="hidl">
+        <name>android.hardware.sensors</name>
+        <transport>hwbinder</transport>
+        <version>2.1</version>
+        <interface>
+            <name>ISensors</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <!-- Virtual Modem RIL (ch12 + ch47).
+         Translates Android AT commands to AETHER's paravirt modem page. -->
+    <hal format="hidl">
+        <name>android.hardware.radio</name>
+        <transport>hwbinder</transport>
+        <version>1.6</version>
+        <interface>
+            <name>IRadio</name>
+            <instance>slot1</instance>
+        </interface>
+    </hal>
+
+    <!-- Camera stub HAL (ch21).
+         Returns getCameraIdList() = []. -->
+    <hal format="hidl">
+        <name>android.hardware.camera.provider</name>
+        <transport>hwbinder</transport>
+        <version>2.7</version>
+        <interface>
+            <name>ICameraProvider</name>
+            <instance>internal/0</instance>
+        </interface>
+    </hal>
+
+    <!-- Power HAL (AIDL). -->
+    <hal format="aidl">
+        <name>android.hardware.power</name>
+        <version>5</version>
+        <interface>
+            <name>IPower</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <!-- Health HAL.
+         Returns a fixed 100% battery — host battery is invisible by design
+         (Host Opaqueness, CLAUDE.md No-Boundary Principle). -->
+    <hal format="hidl">
+        <name>android.hardware.health</name>
+        <transport>hwbinder</transport>
+        <version>2.1</version>
+        <interface>
+            <name>IHealth</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <!-- Graphics allocator (Gralloc4) — AETHER implementation. -->
+    <hal format="aidl">
+        <name>android.hardware.graphics.allocator</name>
+        <version>2</version>
+        <interface>
+            <name>IAllocator</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <!-- Graphics mapper (Gralloc4) — passthrough. -->
+    <hal format="hidl">
+        <name>android.hardware.graphics.mapper</name>
+        <transport arch="64">passthrough</transport>
+        <version>4.0</version>
+        <interface>
+            <name>IMapper</name>
+            <instance>default</instance>
+        </interface>
+    </hal>
+
+    <!-- ClearKey DRM (Widevine L3 fallback per ch49 compat strategy). -->
+    <hal format="hidl">
+        <name>android.hardware.drm</name>
+        <transport>hwbinder</transport>
+        <version>1.4</version>
+        <interface>
+            <name>ICryptoFactory</name>
+            <instance>clearkey</instance>
+        </interface>
+        <interface>
+            <name>IDrmFactory</name>
+            <instance>clearkey</instance>
+        </interface>
+    </hal>
+
+    <!-- Kernel API level + Treble VNDK. -->
+    <kernel target-level="7" version="5.15.0"/>
+    <sepolicy>
+        <version>33.0</version>
+    </sepolicy>
+
+</manifest>

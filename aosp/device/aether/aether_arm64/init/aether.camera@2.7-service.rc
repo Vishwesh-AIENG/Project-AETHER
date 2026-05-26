@@ -1,0 +1,6 @@
+service aether-camera-2-7 /vendor/bin/hw/aether.camera@2.7-service
+    interface android.hardware.camera.provider@2.7::ICameraProvider default
+    class hal
+    user cameraserver
+    group audio camera input drmrpc
+    oneshot

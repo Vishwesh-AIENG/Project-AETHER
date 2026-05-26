@@ -2,6 +2,71 @@
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Global allocator — minimal bump arena backed by a static byte buffer.
+//
+// Added in Step 1 of the AT integration plan: linking the `aether-translator`
+// crate pulls in `extern crate alloc;` which requires a `#[global_allocator]`
+// for the final EFI binary. The arena is hypervisor-private memory and is
+// NEVER mapped into any guest's Stage 2 / EPT / NPT.
+//
+// Dealloc is a no-op (bump). Translations outlive the guest; the arena is
+// reclaimed only at full hypervisor restart.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(not(test))]
+mod global_alloc {
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 1 MiB. Hypervisor allocations during boot are tiny — DTB staging,
+    /// translator metadata, transient Vec/String buffers in the gate
+    /// state machines. The DBT JIT cache has its own arena (16 MiB at
+    /// 0x2_0000_0000) and does NOT come from this heap.
+    const HEAP_SIZE: usize = 1024 * 1024;
+
+    #[repr(align(16))]
+    struct AlignedHeap([u8; HEAP_SIZE]);
+
+    static mut HEAP: AlignedHeap = AlignedHeap([0u8; HEAP_SIZE]);
+    static HEAD: AtomicUsize = AtomicUsize::new(0);
+
+    struct BumpAllocator;
+
+    unsafe impl GlobalAlloc for BumpAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let align = layout.align();
+            let size = layout.size();
+            let mut head = HEAD.load(Ordering::Relaxed);
+            loop {
+                let aligned = (head + align - 1) & !(align - 1);
+                let next = match aligned.checked_add(size) {
+                    Some(n) if n <= HEAP_SIZE => n,
+                    _ => return core::ptr::null_mut(),
+                };
+                match HEAD.compare_exchange_weak(
+                    head, next, Ordering::AcqRel, Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        // SAFETY: aligned < HEAP_SIZE; pointer into the
+                        // static buffer is valid for `size` bytes.
+                        return unsafe {
+                            (core::ptr::addr_of_mut!(HEAP) as *mut u8).add(aligned)
+                        };
+                    }
+                    Err(observed) => head = observed,
+                }
+            }
+        }
+
+        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+            // Bump arena: dealloc is a no-op. See module docs.
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: BumpAllocator = BumpAllocator;
+}
+
 // AETHER hypervisor — core library
 // All code here runs at EL2 on bare-metal ARM64.
 // There is no host OS; std is unavailable by design.
@@ -20,8 +85,21 @@ pub mod arm64; // ch04: ARM64 substrate — regs, barriers, paging constants
 // Part III — The Hypervisor (Chapters 7–11)
 pub mod boot;        // ch07: UEFI handoff, ExitBootServices, ACPI discovery, guest ERET
 #[cfg(target_arch = "x86_64")]
-pub mod boot_x86;    // x86_64 boot pipeline: ExitBootServices -> EPT/NPT build ->
-                     //       init_vtx/svm_foundation -> VMLAUNCH/VMRUN -> first VMEXIT.
+pub mod boot_x86;     // x86_64 boot pipeline: ExitBootServices -> EPT/NPT build ->
+                      //       init_vtx/svm_foundation -> VMLAUNCH/VMRUN -> first VMEXIT.
+#[cfg(target_arch = "x86_64")]
+pub mod boot_x86_esp; // UEFI File-Protocol shim: reads files from the ESP at
+                      //       boot time. Chains LoadedImage → SimpleFileSystem
+                      //       → root → Open → Read. Used by boot_x86 to load
+                      //       \EFI\AETHER\boot.img before ExitBootServices,
+                      //       feeds boot_x86_avb::load_boot_img.
+#[cfg(target_arch = "x86_64")]
+pub mod boot_x86_avb; // Step B of the AT integration plan: Android boot.img
+                      //       loader for the x86 tier. Parses v3/v4 header,
+                      //       AVB-verifies (structural), copies kernel +
+                      //       ramdisk into guest RAM, returns X86BootImgLayout
+                      //       for the DBT dispatcher to consume on the first
+                      //       VMRUN/VMRESUME. Mirrors ch43 avb_boot.rs.
 #[cfg(target_arch = "aarch64")]
 pub mod memory;      // ch08: Stage 2 page tables, bump allocator, SMMU v3 stream table
 #[cfg(target_arch = "aarch64")]
@@ -46,7 +124,7 @@ pub mod paravirt;    // ch12: paravirtualization — virtual modem (AT/3GPP), ME
 pub mod virtio;      // Phase 3: virtio-mmio transport common (regs, virtqueue, chain walker)
 pub mod virtio_blk;  // Phase 3: read-only virtio-blk device — memory-backed, paravirt block
 pub mod mmio_emu;    // Phase 5: MMIO emulation table (PL011 UART, GIC stubs, virtio_blk routing)
-pub mod fex_dispatch;// Phase 5: VMEXIT -> FEX translate/dispatch loop + MMIO routing
+pub mod dbt_dispatch;// Phase 5: VMEXIT -> FEX translate/dispatch loop + MMIO routing
 pub mod android_runtime; // Phase 6: live Android lifecycle orchestrator (UART line buffer + scanners + aggregate gate)
 #[cfg(target_arch = "aarch64")]
 pub mod gpu;         // ch13: GPU partitioning via SR-IOV — VF enumeration, assignment, isolation
@@ -887,28 +965,28 @@ pub mod secure_boot;     // ch57: Secure Boot Integration — shim + MOK path.
                          //       violates Ch3. Gate: Intel AND AMD independently boot Android via FEX;
                          //       EPT/NPT invalidation enforced on every mapping change; no workarounds.
 
-pub mod fex_integration; // ch52: FEX-Emu Integration in Hypervisor — embeds FEX-Emu (ARM64 → x86_64
+pub mod dbt_integration; // ch52: FEX-Emu Integration in Hypervisor — embeds FEX-Emu (ARM64 → x86_64
                          //       dynamic binary translator) into the EFI image as a no_std static
                          //       library. Host OS dependencies (malloc/free, pthread, file I/O)
-                         //       replaced with bare-metal equivalents: FexHostBindings (bump arena
-                         //       + FexSpinLock atomic test-and-set) feed FEX's allocator/lock FFI.
-                         //       JIT code cache (FEX_JIT_CACHE_SIZE = 16 MiB) lives in hypervisor
-                         //       memory; FexJitCache.guest_invisible invariant — region must never
+                         //       replaced with bare-metal equivalents: DbtHostBindings (bump arena
+                         //       + DbtSpinLock atomic test-and-set) feed FEX's allocator/lock FFI.
+                         //       JIT code cache (DBT_JIT_CACHE_SIZE = 16 MiB) lives in hypervisor
+                         //       memory; DbtJitCache.guest_invisible invariant — region must never
                          //       appear in EPT (Intel) or NPT (AMD) page tables. JIT cache leaking
                          //       into guest = arbitrary x86_64 injection into VMX root / SVM host
                          //       = instant hypervisor compromise. ELF64 parser (Elf64Header /
                          //       Elf64ProgramHeader / Elf64ArmBinary): validates magic (7F 45 4C
                          //       46), class=ELFCLASS64, data=ELFDATA2LSB, machine=EM_AARCH64 (183;
                          //       NOT 40 which is 32-bit EM_ARM), type=ET_EXEC|ET_DYN, e_phentsize=
-                         //       56, at least one PT_LOAD segment with PF_X set. FexBlockHashTable
-                         //       (FEX_BLOCK_HASH_BUCKETS=8192, multiplicative hash with 0x9E37
+                         //       56, at least one PT_LOAD segment with PF_X set. DbtBlockHashTable
+                         //       (DBT_BLOCK_HASH_BUCKETS=8192, multiplicative hash with 0x9E37
                          //       _79B9_7F4A_7C15, 8-slot linear probe): ARM64 VA → x86_64 host PA
                          //       + length, dispatcher consults on every guest branch. extern "C"
-                         //       FFI surface to libfex.a: fex_init / fex_load_arm64_elf / fex_
-                         //       translate_block / fex_dispatch_block / fex_shutdown (FexResult
+                         //       FFI surface to libfex.a: aether_dbt_init_hv / aether_dbt_load_arm64_elf_hv / fex_
+                         //       translate_block / aether_dbt_dispatch_block_hv / aether_dbt_shutdown_hv (DbtResult
                          //       enum). Stubbed when fex_linked feature is off so cargo check
                          //       passes without upstream FEX in the source tree. AotPreTranslation
-                         //       Queue (FEX_AOT_QUEUE_CAPACITY=64): AOT_DEFAULT_LIBRARIES (21
+                         //       Queue (DBT_AOT_QUEUE_CAPACITY=64): AOT_DEFAULT_LIBRARIES (21
                          //       entries — libc / libm / libdl / libart / libartbase / libart
                          //       palette / libhwui / libgui / libsurfaceflinger / libui / lib
                          //       binder / libbinder_ndk / libutils / libcutils / libandroid_
@@ -921,26 +999,26 @@ pub mod fex_integration; // ch52: FEX-Emu Integration in Hypervisor — embeds F
                          //       step rejects any hypervisor.efi whose symbol table contains any
                          //       entry from this list — single source of truth shared with build_
                          //       system.rs. symbol_is_forbidden() + contains_bytes() helpers.
-                         //       UART signature constants FEX_HELLO_WORLD_SIGNATURE ("Hello,
-                         //       AETHER") + FEX_BLOCK_TRANSLATED_SIGNATURE ("[fex] translated
-                         //       block at pc=") + FEX_DISPATCHER_STALL_SIGNATURE ("[fex]
-                         //       dispatcher stalled"). FexIntegrationConfig (jit_cache_base_pa /
+                         //       UART signature constants DBT_HELLO_WORLD_SIGNATURE ("Hello,
+                         //       AETHER") + DBT_BLOCK_TRANSLATED_SIGNATURE ("[fex] translated
+                         //       block at pc=") + DBT_DISPATCHER_STALL_SIGNATURE ("[fex]
+                         //       dispatcher stalled"). DbtIntegrationConfig (jit_cache_base_pa /
                          //       jit_cache_size / bump_arena_base_pa / bump_arena_size / run_in_
                          //       hypervisor / enable_aot + aether_defaults() + validate()),
-                         //       FexIntegrationGate (fex_linked + allocator_bound + jit_cache_
+                         //       DbtIntegrationGate (fex_linked + allocator_bound + jit_cache_
                          //       ready + arm64_elf_validated + hello_world_observed + no_libc_
                          //       symbols; passes() / hypervisor_side_ready()),
                          //       FexIntegrationError (HostUserlandRejected — No-Boundary enforcement
                          //       per Chapter 3 / Unaligned* / JitCacheTooSmall / BumpArenaTooSmall
                          //       / JitBumpOverlap / NotX86_64Host / Elf* / FexLibNotLinked /
-                         //       FexInitFailed / TranslationFailed / DispatchFailed / Guest
+                         //       DbtInitFailed / TranslationFailed / DispatchFailed / Guest
                          //       VisibleJitCache / LibcSymbolDetected / HelloWorldNotObserved),
-                         //       FexIntegrationPhase (NotStarted → FexLinked → AllocatorBound →
+                         //       DbtIntegrationPhase (NotStarted → FexLinked → AllocatorBound →
                          //       JitCacheReady → ArmElfLoaded → BlockTranslated → HelloWorld
                          //       Executed → GatePassed; strictly ordered),
-                         //       FexIntegrationState (process_line() / record_block_translation()
+                         //       DbtIntegrationState (process_line() / record_block_translation()
                          //       / record_block_cache_hit() / gate() / is_gate_passed()),
-                         //       init_fex_integration() — 8-step pipeline: validate config → x86_64
+                         //       init_dbt_integration_hv() — 8-step pipeline: validate config → x86_64
                          //       target guard → verify libfex.a linkage → bind host bindings →
                          //       construct JIT cache + isolation check → load AOT queue → libc
                          //       symbol guard → return state at JitCacheReady. process_elf_load()

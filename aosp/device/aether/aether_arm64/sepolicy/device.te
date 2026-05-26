@@ -1,0 +1,9 @@
+# device.te — SELinux type declarations for AETHER device-specific objects.
+#
+# Each `type X dev_type, …` line registers a new SELinux type that
+# file_contexts can refer to. The base types (hal_sensors_default,
+# hal_camera_default, etc.) are inherited from AOSP's system/sepolicy/.
+
+# AETHER paravirt device nodes (ch12 modem + sensor shared pages, ch47 HVC
+# vendor calls). Surfaced under /dev/aether/.
+type aether_device, dev_type;

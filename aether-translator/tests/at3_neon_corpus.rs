@@ -5,7 +5,9 @@
 use std::path::PathBuf;
 
 #[test]
-#[ignore = "AT-3 gate; un-ignore once SIMD/FP decoder fills land"]
+#[cfg_attr(not(feature = "linux_corpus"),
+           ignore = "AT-3 gate: needs aarch64-linux-gnu-gcc-compiled neon_compile.o; run \
+                     with --features linux_corpus on a Linux host or via the corpus-gates CI lane")]
 fn at3_neon_compile_o_has_zero_unknowns() {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("corpus");
@@ -27,7 +29,9 @@ fn at3_neon_compile_o_has_zero_unknowns() {
 }
 
 #[test]
-#[ignore = "AT-3 gate"]
+#[cfg_attr(not(feature = "linux_corpus"),
+           ignore = "AT-3 gate: needs corpus/libcrypto.so.aarch64 from a GSI extract; \
+                     run with --features linux_corpus on a Linux host")]
 fn at3_libcrypto_has_zero_unknowns() {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("corpus");

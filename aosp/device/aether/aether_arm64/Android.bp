@@ -1,0 +1,150 @@
+// Android.bp — Soong build declarations for AETHER device-specific modules.
+//
+// First-pass: each cc_binary is a minimum SLEEPING STUB (~10-20 lines of C++
+// each) that satisfies Soong's source dependency and lets the AOSP build
+// produce boot/system/vendor/vbmeta/userdata images. The stubs register no
+// concrete interface — Android will treat each HAL as "not available" at
+// runtime, which is enough to reach the home screen and validate the full
+// build → boot → translator pipeline. Real VirtualSensorSuite / VirtualModem
+// / Gralloc4 implementations land in a later iteration, once the first boot
+// is observed on Ryzen silicon.
+//
+// Mechanically derived from hypervisor/src/aosp_build.rs::AETHER_SOONG_MODULES,
+// with dependency lists cross-checked against AOSP 14's own default HALs:
+//   * sensors:  hardware/interfaces/sensors/2.1/default/Android.bp
+//   * radio:    hardware/interfaces/radio/aidl/default/Android.bp
+//   * camera:   hardware/interfaces/camera/provider/2.7/default/Android.bp
+//   * power:    hardware/interfaces/power/aidl/default/Android.bp
+//   * health:   hardware/interfaces/health/2.1/default/Android.bp
+
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+// ── Shared cc_defaults (minimum HIDL service deps) ────────────────────────────
+
+cc_defaults {
+    name: "aether_hal_defaults_hidl",
+    vendor: true,
+    relative_install_path: "hw",
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wno-unused-parameter",
+        "-DLOG_TAG=\"aether-hal\"",
+    ],
+    shared_libs: [
+        "libbase",
+        "libcutils",
+        "libutils",
+        "libhidlbase",
+        "liblog",
+    ],
+}
+
+cc_defaults {
+    name: "aether_hal_defaults_aidl",
+    vendor: true,
+    relative_install_path: "hw",
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wno-unused-parameter",
+        "-DLOG_TAG=\"aether-hal\"",
+    ],
+    shared_libs: [
+        "libbase",
+        "libbinder_ndk",
+        "libcutils",
+        "libutils",
+        "liblog",
+    ],
+}
+
+// ── Virtual Sensor HAL (ch12 + ch47) ──────────────────────────────────────────
+// First-pass stub. Real implementation surfaces VirtualSensorSuite to
+// sensorservice (Gaussian-noise accel/gyro/mag).
+cc_binary {
+    name: "aether.sensors@2.1-service",
+    defaults: ["aether_hal_defaults_hidl"],
+    init_rc: ["init/aether.sensors@2.1-service.rc"],
+    vintf_fragments: ["vintf/aether.sensors@2.1.xml"],
+    srcs: ["hal/sensors/service.cpp"],
+}
+
+// ── Virtual Modem RIL (ch12 + ch47) ───────────────────────────────────────────
+// First-pass stub. Real implementation talks to the paravirt modem page at
+// AETHER_MODEM_IPA. The radio HAL stub takes no upstream lib deps beyond
+// the HIDL plumbing in aether_hal_defaults_hidl.
+cc_binary {
+    name: "aether.radio@2.0-service",
+    defaults: ["aether_hal_defaults_hidl"],
+    init_rc: ["init/aether.radio@2.0-service.rc"],
+    vintf_fragments: ["vintf/aether.radio@2.0.xml"],
+    srcs: ["hal/radio/service.cpp"],
+}
+
+// ── Camera stub HAL (ch21) ────────────────────────────────────────────────────
+// First-pass stub. Returns no cameras.
+cc_binary {
+    name: "aether.camera@2.7-service",
+    defaults: ["aether_hal_defaults_hidl"],
+    init_rc: ["init/aether.camera@2.7-service.rc"],
+    vintf_fragments: ["vintf/aether.camera@2.7.xml"],
+    srcs: ["hal/camera/service.cpp"],
+}
+
+// ── Power HAL (AIDL) ──────────────────────────────────────────────────────────
+// First-pass stub. AOSP 14 ships android.hardware.power AIDL V2; the real
+// implementation will report a fixed-battery handheld power profile.
+cc_binary {
+    name: "aether.power@5-service",
+    defaults: ["aether_hal_defaults_aidl"],
+    init_rc: ["init/aether.power@5-service.rc"],
+    vintf_fragments: ["vintf/aether.power@5.xml"],
+    srcs: ["hal/power/service.cpp"],
+}
+
+// ── Health HAL ────────────────────────────────────────────────────────────────
+// First-pass stub. Real implementation reports fixed 100% battery (host
+// battery invisible per Host Opaqueness invariant).
+cc_binary {
+    name: "aether.health@2.1-service",
+    defaults: ["aether_hal_defaults_hidl"],
+    init_rc: ["init/aether.health@2.1-service.rc"],
+    vintf_fragments: ["vintf/aether.health@2.1.xml"],
+    srcs: ["hal/health/service.cpp"],
+}
+
+// ── Gralloc allocator (ch13 + ch46) ───────────────────────────────────────────
+// First-pass stub: shared library with no concrete IAllocator export.
+// Android's allocator service will fall back to the AOSP default gralloc
+// mapper passthrough. Real implementation routes through the Adreno KMS
+// driver and the system DMA-BUF heap (ch46).
+cc_library_shared {
+    name: "gralloc.aether",
+    vendor: true,
+    relative_install_path: "hw",
+    srcs: ["hal/gralloc/GrallocAllocator.cpp"],
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-DLOG_TAG=\"gralloc.aether\"",
+    ],
+    shared_libs: [
+        "libbase",
+        "liblog",
+    ],
+}
+
+// ── Vendor VINTF manifest prebuilt ────────────────────────────────────────────
+// Copied to vendor/etc/vintf/manifest.xml at install time. The dedicated
+// per-HAL VINTF fragments above are also merged in.
+prebuilt_etc {
+    name: "aether_vendor_manifest",
+    src: "manifest.xml",
+    vendor: true,
+    sub_dir: "vintf",
+    filename_from_src: false,
+    filename: "manifest.xml",
+}

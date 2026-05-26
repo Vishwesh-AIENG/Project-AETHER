@@ -283,7 +283,18 @@ pub struct EfiBootServices {
     _install_protocol_interface:     usize, // offset 128
     _reinstall_protocol_interface:   usize, // offset 136
     _uninstall_protocol_interface:   usize, // offset 144
-    _handle_protocol:                usize, // offset 152
+    /// HandleProtocol — look up a protocol interface on a handle.
+    ///
+    /// Used by the x86 ESP boot.img reader (`boot_x86_esp::read_esp_file`)
+    /// to chain LoadedImage → SimpleFileSystem → root EfiFile. Kept typed
+    /// here so callers don't have to `transmute` the raw `usize`.
+    ///
+    /// Source: UEFI Spec 2.10 Section 7.3 (EFI_BOOT_SERVICES.HandleProtocol)
+    pub handle_protocol: unsafe extern "efiapi" fn(
+        handle:     EfiHandle,
+        protocol:   *const EfiGuid,
+        interface:  *mut *mut c_void,
+    ) -> EfiStatus,                          // offset 152
     _pc_handle_protocol:             usize, // offset 160  (reserved)
     _register_protocol_notify:       usize, // offset 168
     _locate_handle:                  usize, // offset 176

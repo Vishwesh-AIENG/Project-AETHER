@@ -180,3 +180,121 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Cheapest signal we have that a decoder/IR/lift change didn't regress real-world ARM64 coverage." >> $GITHUB_STEP_SUMMARY
           echo "Replaced by the real AT-5 21-library gate once Android GSI corpus is wired into CI." >> $GITHUB_STEP_SUMMARY
+
+  corpus-gates:
+    # Step 5 of the AT integration plan — close the deferred corpus gates.
+    # Linux-only lane: needs gcc-aarch64-linux-gnu (compile AT-3 NEON corpus),
+    # simg2img (sparse → raw GSI image), p7zip-full (ext4 extraction fallback).
+    # Marked `continue-on-error` until the GSI build pin (fetch_gsi.sh) is
+    # auto-rotated — Android CI build IDs rotate every ~30 days and a 404 from
+    # ci.android.com would otherwise red-line the whole pipeline. AT-3 NEON,
+    # which is fully self-contained, ALWAYS runs and is the hard gate of this
+    # lane; AT-3 libcrypto / AT-4 vmlinux+libc / AT-5 21-library run when the
+    # corpus is fetched, and they are tolerant of any missing file (they early-
+    # return without failing).
+    name: AT-3/4/5 corpus gates (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: host-tests
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-corpus-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-corpus-
+
+      - name: Install AArch64 cross toolchain + Android GSI utils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            android-sdk-libsparse-utils \
+            p7zip-full \
+            file
+
+      - name: Compile AT-3 NEON corpus (neon_compile.o)
+        # Self-contained, reproducible, no network. This is the always-pass
+        # signal that the AT-3 SIMD/FP decoder fills cover real GCC output.
+        working-directory: aether-translator/corpus
+        run: |
+          aarch64-linux-gnu-gcc -O2 -march=armv8-a+crypto \
+            -c neon_compile.c -o neon_compile.o
+          file neon_compile.o
+          test -s neon_compile.o
+
+      - name: Fetch Android GSI (best-effort)
+        # ci.android.com build pins rotate every ~30 days. If the fetch fails
+        # the lane is marked SOFT-FAIL: AT-3 libcrypto / AT-4 / AT-5 individual
+        # tests early-return without failing when their corpus file is absent,
+        # so the run still produces meaningful AT-3 NEON results.
+        id: gsi
+        run: |
+          cd aether-translator
+          if sudo -E ./scripts/fetch_gsi.sh; then
+            echo "available=1" >> $GITHUB_OUTPUT
+            ls -la corpus/system_img/ || true
+          else
+            echo "available=0" >> $GITHUB_OUTPUT
+            echo "::warning::GSI fetch failed (build ID rotated?); AT-3 libcrypto, AT-4, AT-5 will skip individual cases as their corpus files won't be present"
+          fi
+        continue-on-error: true
+
+      - name: Symlink GSI extracts into AT-3 / AT-4 corpus paths
+        if: steps.gsi.outputs.available == '1'
+        working-directory: aether-translator/corpus
+        run: |
+          # AT-3 libcrypto + AT-4 libc expect a `*.so.aarch64` suffix
+          # next to neon_compile.o. The fetch script drops the libs in
+          # corpus/system_img/<libname>.so; symlink the right ones up.
+          if [ -f system_img/libcrypto.so ]; then
+            ln -sf system_img/libcrypto.so libcrypto.so.aarch64
+            echo "  AT-3 libcrypto corpus: present"
+          fi
+          if [ -f system_img/libc.so ]; then
+            ln -sf system_img/libc.so libc.so.aarch64
+            echo "  AT-4 libc corpus: present"
+          fi
+          # AT-4 vmlinux is fetched separately (not part of system.img);
+          # no automatic provisioning yet. Test will early-return cleanly.
+          ls -la *.aarch64 2>/dev/null || true
+          ls -la *.o 2>/dev/null || true
+
+      - name: Run AT-3/AT-4/AT-5 corpus gates (--features linux_corpus)
+        run: |
+          cargo +nightly test \
+            -p aether-translator \
+            --features linux_corpus \
+            --test at3_neon_corpus \
+            --test at4_system_corpus \
+            --test at5_system_img \
+            --no-fail-fast \
+            -- --nocapture
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## AT-3 / AT-4 / AT-5 corpus gates" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Gate | Corpus | Source |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| AT-3 NEON | corpus/neon_compile.o | compiled in-lane from neon_compile.c (always) |" >> $GITHUB_STEP_SUMMARY
+          echo "| AT-3 libcrypto | corpus/libcrypto.so.aarch64 | GSI symlink (best-effort) |" >> $GITHUB_STEP_SUMMARY
+          echo "| AT-4 vmlinux | corpus/vmlinux-gki.aarch64 | manual (not auto-fetched yet) |" >> $GITHUB_STEP_SUMMARY
+          echo "| AT-4 libc | corpus/libc.so.aarch64 | GSI symlink (best-effort) |" >> $GITHUB_STEP_SUMMARY
+          echo "| AT-5 21-lib | corpus/system_img/*.so | fetch_gsi.sh (best-effort) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Lane is marked \`continue-on-error\` until fetch_gsi.sh auto-rotates its pinned build ID." >> $GITHUB_STEP_SUMMARY
+          echo "AT-3 NEON (the self-contained gate) is the hard signal of this lane." >> $GITHUB_STEP_SUMMARY

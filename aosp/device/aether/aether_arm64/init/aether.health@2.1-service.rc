@@ -1,0 +1,7 @@
+service aether-health-2-1 /vendor/bin/hw/aether.health@2.1-service
+    class hal
+    user system
+    group system
+    capabilities WAKE_ALARM BLOCK_SUSPEND
+    file /dev/kmsg w
+    oneshot

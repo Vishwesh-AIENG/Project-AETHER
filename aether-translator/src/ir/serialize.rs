@@ -557,6 +557,8 @@ pub fn decode(bytes: &[u8]) -> Result<(IrOp, usize), SerErr> {
         0xE7 => IrOp::WriteFlags { src: r.fid()? },
         0xE8 => IrOp::ReadPc { dst: r.vid()? },
         0xE9 => IrOp::WritePc { src: r.vid()? },
+        0xF0 => IrOp::X86Mfence,
+        0xF1 => IrOp::X86Cpuid,
         0xFF => IrOp::Unimplemented(r.u32()?),
         other => return Err(SerErr::BadTag(other)),
     };
@@ -714,6 +716,8 @@ pub fn variant_tag(op: &IrOp) -> u8 {
         IrOp::ReadPc { .. } => 0xE8,
         IrOp::WritePc { .. } => 0xE9,
 
+        IrOp::X86Mfence => 0xF0,
+        IrOp::X86Cpuid => 0xF1,
         IrOp::Unimplemented(_) => 0xFF,
     }
 }
