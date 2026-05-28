@@ -4,6 +4,7 @@ members = [
     "hypervisor",
     "tools/compat-check",
     "tools/aether-install",
+    "tools/aether-setup",
     "aether-translator",
 ]
 

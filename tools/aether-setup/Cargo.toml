@@ -1,0 +1,22 @@
+[package]
+name = "aether-setup"
+version = "0.1.0"
+edition = "2021"
+description = "AETHER Setup — Windows GUI installer that wraps aether-install."
+publish = false
+
+[[bin]]
+name = "aether-setup"
+path = "src/main.rs"
+
+[dependencies]
+eframe     = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui       = "0.29"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.build-dependencies]
+embed-manifest = "1.4"
+
+# The installer ships as a single .exe; release profile mirrors the rest of
+# the workspace (panic=abort + lto + opt-level=s come from the workspace root).
