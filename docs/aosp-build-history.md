@@ -176,3 +176,30 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja very late
 **Outcome**: same checkvintf failure persisted because the bare `PRODUCT_ENFORCE_VINTF_MANIFEST := false` got overwritten by the config.mk treble-derivation block.
 **Fix for run 29**: `device.mk` set BOTH `PRODUCT_ENFORCE_VINTF_MANIFEST := false` AND `PRODUCT_ENFORCE_VINTF_MANIFEST_OVERRIDE := false` (the `_OVERRIDE` suffix wins the config.mk ternary that runs after product inherits).
+
+## Run 29
+
+**Phase**: ninja complete
+**Outcome**: build finished. Final image set under `out/target/product/aether_arm64/`:
+
+| Image           | Size       |
+|-----------------|------------|
+| boot.img        | 64 MiB     |
+| system.img      | 943 MiB    |
+| vendor.img      | 33 MiB     |
+| vbmeta.img      | 8 KiB      |
+| userdata.img    | 6.2 MiB    |
+| product.img     | 273 MiB    |
+| vbmeta_system   | 4 KiB      |
+| vbmeta_vendor   | 4 KiB      |
+| vendor_boot.img | 80 KiB     |
+| ramdisk.img     | 1.4 MiB    |
+
+AVB chain verified: `avbtool info_image` on vbmeta.img shows RSA-4096 SHA256 root with chain partition descriptors for vbmeta_system and vbmeta_vendor + hash descriptors for boot + vendor_boot.
+
+**Total wall time**: ~2 hours of compute time across 29 build attempts, plus
+about 6 hours of debug/sweep/restart work threaded in between (mostly fighting
+AOSP 14's strict VINTF check_vintf_compatible step on the last 5% of work).
+
+**Outcome**: bootable image set ready for ESP staging and first Ryzen
+hypervisor boot test.
