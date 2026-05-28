@@ -82,12 +82,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 56 | AETHER Installer CLI | ✅ Complete |
 | 57 | Secure Boot Integration | ✅ Complete |
 | 58 | UEFI Boot Selector | ✅ Complete |
-| 59 | Setup Wizard — GUI Frontend | ⬜ Not started |
-| 60 | Configuration App | ⬜ Not started |
-| 61 | OTA Update System | ⬜ Not started |
-| 62 | Recovery Mode | ⬜ Not started |
-| 63 | AETHER Manager Android App | ⬜ Not started |
-| 64 | HVC Paravirt ABI | ⬜ Not started |
+| 59 | Setup Wizard — GUI Frontend | ✅ Complete |
+| 60 | Configuration App | ✅ Complete |
+| 61 | OTA Update System | ✅ Complete |
+| 62 | Recovery Mode | ✅ Complete |
+| 63 | AETHER Manager Android App | ✅ Complete |
+| 64 | HVC Paravirt ABI | ✅ Complete |
 | 65 | Security Hardening and Unsafe Audit | ⬜ Not started |
 | 66 | Performance Optimization | ⬜ Not started |
 | 67 | Fingerprint Elimination Audit | ⬜ Not started |
@@ -95,7 +95,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 69 | Documentation | ⬜ Not started |
 | 70 | Public Release | ⬜ Not started |
 
-**Progress: 58 / 70 chapters complete (83%)**
+**Progress: 64 / 70 chapters complete (91%)**
 
 ---
 
