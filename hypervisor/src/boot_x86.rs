@@ -77,10 +77,120 @@ unsafe fn fb_fill(rgb: u32) {
     }
 }
 
-#[allow(dead_code)] const FB_GREEN: u32 = 0x00_00FF00;
-#[allow(dead_code)] const FB_RED:   u32 = 0x00_FF0000;
-#[allow(dead_code)] const FB_AMBER: u32 = 0x00_FFAA00;
-#[allow(dead_code)] const FB_BLUE:  u32 = 0x00_0000FF;
+// Real-hardware verification (May 2026 Ryzen boot test) showed the GOP
+// framebuffer on a modern AMD board displays RED and BLUE swapped vs what
+// the bgr_format detection in capture_framebuffer assumes. GREEN/AMBER/
+// PURPLE are invariant under R/B swap. Keep the human-readable name on the
+// LHS and put the byte-pattern that paints the EXPECTED COLOR on the RHS:
+//
+//   FB_RED  paints red  on this hardware (was 0xFF0000 → showed as blue)
+//   FB_BLUE paints blue on this hardware (was 0x0000FF → showed as red)
+const FB_GREEN: u32 = 0x00_00FF00;
+const FB_RED:   u32 = 0x00_0000FF;   // hardware-corrected (was 0xFF0000)
+const FB_AMBER: u32 = 0x00_FFAA00;
+const FB_BLUE:  u32 = 0x00_FF0000;   // hardware-corrected (was 0x0000FF)
+#[allow(dead_code)] const FB_PURPLE: u32 = 0x00_8000FF;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Visual + audible diagnostics post-ExitBootServices.
+//
+// On a modern UEFI-only AMD board with no serial cable, our dual_puts(...)
+// output (VGA text mode 0xB8000 + COM1 0x3F8) is invisible — there is no
+// legacy VGA text framebuffer and there is no physical serial port.
+//
+// These checkpoints give the user observable feedback through the GOP
+// framebuffer (captured pre-EBS) and the PC speaker (PIT channel 2 + port
+// 0x61, hardware-only, no firmware deps):
+//
+//   GREEN flash + 1 beep   = ExitBootServices returned OK
+//   BLUE  flash + 2 beeps  = about to enter the guest (VMLAUNCH/VMRUN)
+//   AMBER flash            = VMEXIT handler ran (we're servicing the guest)
+//   RED   flash + 3 beeps  = halt() reached (fatal — fix and reboot)
+//
+// All four work without UEFI services and without a serial cable.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// PC speaker beep — PIT channel 2 drives the speaker at the given frequency
+/// for ~150 ms. The 1.193182 MHz PIT clock divides down to `freq` Hz.
+/// Implementation: SDM-equivalent port I/O sequence used since the IBM PC.
+#[inline]
+unsafe fn beep_once(freq_hz: u32) {
+    unsafe {
+        let divisor: u16 = (1_193_182u32 / freq_hz.max(1)).min(0xFFFF) as u16;
+        // Program PIT channel 2: mode 3 (square wave), access lobyte then hibyte.
+        outb(0x43, 0xB6);
+        outb(0x42, (divisor & 0xFF) as u8);
+        outb(0x42, ((divisor >> 8) & 0xFF) as u8);
+        // Enable speaker (port 0x61 bits 0 and 1).
+        let prev = inb(0x61);
+        outb(0x61, prev | 0x03);
+        // Hold for ~150 ms — busy loop. We don't have time services here.
+        // Calibrated against a ~3 GHz core; doesn't need to be exact.
+        for _ in 0..200_000_000u32 {
+            core::arch::asm!("pause", options(nomem, nostack));
+        }
+        outb(0x61, prev & !0x03);
+    }
+}
+
+#[inline]
+unsafe fn beep_n(n: u32, freq_hz: u32) {
+    unsafe {
+        for _ in 0..n {
+            beep_once(freq_hz);
+            // Gap between beeps so they're distinguishable.
+            for _ in 0..40_000_000u32 {
+                core::arch::asm!("pause", options(nomem, nostack));
+            }
+        }
+    }
+}
+
+/// One-shot status indicator: paint the framebuffer + beep.
+unsafe fn checkpoint(color: u32, beeps: u32, freq_hz: u32) {
+    unsafe {
+        fb_fill(color);
+        beep_n(beeps, freq_hz);
+    }
+}
+
+/// Bisection marker — emit a distinct PITCH for each step the hypervisor
+/// reaches. The user identifies the LAST clearly-audible pitch to know
+/// which step it reached. Followed by a ~1-second clear silence so each
+/// group is unambiguous.
+///
+/// Pitch ladder (rising — higher pitch = deeper in boot):
+///   step 2  -> 500 Hz   (low-medium)   past post-EBS PA-print block
+///   step 3  -> 600 Hz                  past prepare_android_handoff
+///   step 4  -> 700 Hz                  past try_init_fex
+///   step 5  -> 800 Hz                  inside boot_amd, past NPT identity
+///   step 6  -> 900 Hz                  past build_npt_2mib_range (1-GiB)
+///   step 7  -> 1000 Hz                 past build_guest_page_table
+///   step 8  -> 1200 Hz                 past init_svm_foundation
+///   step 9  -> 1500 Hz  (highest)      past translator_dbt_init
+///   then BLUE + 2 beeps @ 1100 Hz = entering VMRUN loop.
+unsafe fn bisect(step: u32) {
+    let freq = match step {
+        2 => 500,
+        3 => 600,
+        4 => 700,
+        5 => 800,
+        6 => 900,
+        7 => 1000,
+        8 => 1200,
+        9 => 1500,
+        _ => 660,
+    };
+    unsafe {
+        // Single ~150 ms beep at the step's distinct pitch.
+        beep_once(freq);
+        // ~1 second of clear silence so this group is unambiguously
+        // separated from the next bisect/checkpoint.
+        for _ in 0..600_000_000u32 {
+            core::arch::asm!("pause", options(nomem, nostack));
+        }
+    }
+}
 
 use crate::android_handoff::{
     prepare_android_handoff, AndroidHandoff, HandoffError,
@@ -677,12 +787,23 @@ pub unsafe fn boot_x86_hypervisor(
                 stage,
             )
         };
-        if read > 0 {
-            // Diagnostic banner can't dual_puts yet (COM1 not init); the
-            // ConOut path is up via efi_main's puts, but boot_x86 doesn't
-            // hold the SystemTable in a typed form here. The handoff
-            // scanner will report the find on COM1 below.
-            let _ = read;
+        // Pre-EBS audible signal — distinct from any post-EBS bisect pitch.
+        //
+        //   2 KiloHz short beeps × 2  = boot.img LOADED successfully
+        //   300 Hz   long  beep × 1  = boot.img MISSING / read failed
+        //                              (foundation-gate fallback path)
+        //
+        // PIT speaker is hardware-only — works pre-EBS, post-EBS, anywhere.
+        // The user hears this BEFORE the GREEN flash so it's easy to tell
+        // apart from the rest of the boot ladder.
+        unsafe {
+            if read > 0 {
+                beep_once(2000);
+                beep_once(2000);
+            } else {
+                // Long low tone — extends to ~300 ms by chaining frequency 300.
+                beep_once(300);
+            }
         }
     }
 
@@ -699,6 +820,10 @@ pub unsafe fn boot_x86_hypervisor(
     unsafe {
         com1_init();
         vga_clear();
+        // GREEN flash + 1 beep = ExitBootServices succeeded. Without this the
+        // user has no way to tell post-EBS code is running on a modern
+        // UEFI-only board (no legacy VGA text mode, no physical serial port).
+        checkpoint(FB_GREEN, 1, 880);
         dual_puts(b"\n[x86] ExitBootServices: OK\n");
     }
 
@@ -723,6 +848,7 @@ pub unsafe fn boot_x86_hypervisor(
         dual_puts(b"[x86] EPT PML4 PA     = "); dual_puthex64(ept_pml4_pa); dual_puts(b"\n");
         dual_puts(b"[x86] Guest RAM PA    = "); dual_puthex64(guest_ram_pa); dual_puts(b"\n");
         dual_puts(b"[x86] Host RIP        = "); dual_puthex64(host_rip);  dual_puts(b"\n");
+        bisect(2);
     }
 
     // ── 4. Stage guest payload — Phase 4 Android handoff or foundation gate ─
@@ -766,6 +892,7 @@ pub unsafe fn boot_x86_hypervisor(
             }
         }
     };
+    unsafe { bisect(3); }
 
     let fex_ok = unsafe { try_init_fex() };
 
@@ -782,11 +909,20 @@ pub unsafe fn boot_x86_hypervisor(
             // writes from the guest land in userspace_boot + app_compat
             // diagnostic state.
             crate::android_runtime::init_global();
+            // 4 rising beeps = FEX armed, real Android dispatch on first VMRUN.
+            beep_once(800);
+            beep_once(1000);
+            beep_once(1200);
+            beep_once(1500);
         } else {
             // Fallback: foundation-gate payload — a HLT at GUEST_RAM_PA.
             let guest = ptr::addr_of_mut!(GUEST_RAM) as *mut u8;
             *guest = 0xF4;
+            // 2 falling beeps = foundation-gate fallback, first VMRUN will HLT.
+            beep_once(800);
+            beep_once(500);
         }
+        bisect(4);
     }
 
     // ── 5. Branch on vendor ─────────────────────────────────────────────────
@@ -853,7 +989,14 @@ unsafe fn boot_intel(
             ept_pml4_pa,
             kernel_entry_pa,
             guest_ram_base:  guest_ram_pa,
-            guest_ram_size:  4096,         // 4 KiB foundation-gate window
+            // 1 GiB guest RAM window. 4 KiB was the original ch50 foundation-
+            // gate value used only to fire one HLT-VMEXIT — it OOM's any real
+            // Android kernel before init even runs. The actual mapped span is
+            // controlled by `extra_region` (HANDOFF_REGION_SIZE for Android),
+            // but this field is what the VtxFoundationConfig::validate() check
+            // and a handful of downstream EPT-violation handlers compare GPAs
+            // against, so it must reflect the real accessible window.
+            guest_ram_size:  1024 * 1024 * 1024,
             mmio_base:       0,
             mmio_size:       0,
             guest_64bit:     true,         // long mode -> simpler VMCB
@@ -907,6 +1050,10 @@ unsafe fn boot_intel(
         dual_puts(b")\n");
 
         dual_puts(b"[x86] VMLAUNCH...\n");
+        // BLUE flash + 2 beeps = entire host-side setup is good; we are
+        // about to enter the guest. If user sees blue + hears 2 beeps,
+        // EPT + VMCS + EBS + handoff all worked.
+        checkpoint(FB_BLUE, 2, 1100);
         // VMLAUNCH transfers control: on entry the guest runs (HLT -> VMEXIT);
         // host_rip catches the VMEXIT.  If VMLAUNCH itself fails (e.g. invalid
         // VMCS), CF/ZF are set and execution continues past it — we halt.
@@ -943,6 +1090,7 @@ unsafe fn boot_amd(
     unsafe {
         dual_puts(b"[x86] AMD path: building NPT identity map...\n");
         build_npt_identity_map(guest_ram_pa);
+        bisect(5);
         if let Some((base, size)) = extra_region {
             dual_puts(b"[x86] NPT 2-MiB map for Android handoff: base=");
             dual_puthex64(base);
@@ -951,7 +1099,9 @@ unsafe fn boot_amd(
             dual_puts(b"\n");
             build_npt_2mib_range(base, size);
         }
+        bisect(6);
         let guest_cr3 = build_guest_page_table(guest_ram_pa);
+        bisect(7);
         dual_puts(b"[x86] Guest CR3 (PML4)= "); dual_puthex64(guest_cr3); dual_puts(b"\n");
         dual_puts(b"[x86] kernel_entry_pa = "); dual_puthex64(kernel_entry_pa); dual_puts(b"\n");
 
@@ -961,7 +1111,12 @@ unsafe fn boot_amd(
             npt_pml4_pa,
             kernel_entry_pa,
             guest_ram_base:  guest_ram_pa,
-            guest_ram_size:  4096,
+            // 1 GiB — see matching boot_intel comment for rationale.
+            // The Android handoff region (HANDOFF_REGION_SIZE in
+            // android_handoff.rs) is what gets NPT-mapped via `extra_region`;
+            // this field is what foundation validation + EPT/NPT-violation
+            // bounds-checks compare GPAs against.
+            guest_ram_size:  1024 * 1024 * 1024,
             mmio_base:       0,
             mmio_size:       0,
             guest_64bit:     true,
@@ -980,6 +1135,7 @@ unsafe fn boot_amd(
                 halt();
             }
         }
+        bisect(8);
 
         vmcb.write_u64(VMCB_SAVE_CR3, guest_cr3);
 
@@ -1011,6 +1167,7 @@ unsafe fn boot_amd(
         dual_puts(b"[x86] translator runtime initialised (JIT = ");
         dual_puthex64(JIT_CACHE_BASE_PA_AMD);
         dual_puts(b")\n");
+        bisect(9);
 
         // Phase 5b: AMD VMRUN is round-trip — control returns here on every
         // VMEXIT with host state restored from HSAVE. Loop: classify exit,
@@ -1019,6 +1176,10 @@ unsafe fn boot_amd(
         // The loop body deliberately re-reads VMCB fields after every VMRUN
         // because emulation may have updated them (e.g. EXITINFO2 for NPF).
         dual_puts(b"[x86] VMRUN dispatch loop start\n");
+        // BLUE flash + 2 beeps before the first VMRUN. If user sees blue
+        // and hears 2 beeps, every host-side setup step (EBS, NPT identity
+        // map, VMCB build, HSAVE, MSR setup, translator init) succeeded.
+        checkpoint(FB_BLUE, 2, 1100);
         const MAX_VMRUN_ITERATIONS: u64 = 1_000_000;
         let mut iter: u64 = 0;
         loop {
@@ -1081,6 +1242,11 @@ unsafe fn boot_amd(
 
 #[inline(never)]
 fn halt() -> ! {
+    // Final visible/audible fatal indicator before the CPU is parked.
+    // RED screen + 3 low beeps. Beeps repeat in the loop so the user can
+    // confirm the halt is real (CPU still alive servicing port I/O via
+    // string-loop) rather than a triple-fault reboot.
+    unsafe { checkpoint(FB_RED, 3, 440); }
     loop {
         unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }
     }
