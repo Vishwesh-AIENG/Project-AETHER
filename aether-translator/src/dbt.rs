@@ -115,6 +115,17 @@ pub struct DbtRuntime {
     pub stat_decode_failures:      u64,
     pub stat_lift_failures:        u64,
     pub stat_lower_failures:       u64,
+    /// Pinpoint diagnostic: the guest PC and raw 32-bit instruction word
+    /// from the most recent translate_block failure. Zeroed at construction
+    /// and overwritten on every failure. The hypervisor reads these via
+    /// `last_failure_pc()` / `last_failure_word()` on `TranslationFailed`
+    /// return so the user can look up the encoding in ARM ARM C4.1 instead
+    /// of bisecting kernel binary by hand.
+    last_fail_pc:   u64,
+    last_fail_word: u32,
+    /// 0 = none, 1 = decode failure, 2 = lift failure, 3 = too-short input,
+    /// 4 = no insns lifted (block ended before producing any IR).
+    last_fail_kind: u8,
 }
 
 impl DbtRuntime {
@@ -130,8 +141,21 @@ impl DbtRuntime {
             stat_decode_failures:          0,
             stat_lift_failures:            0,
             stat_lower_failures:           0,
+            last_fail_pc:                  0,
+            last_fail_word:                0,
+            last_fail_kind:                0,
         }
     }
+
+    /// PC of the most recent translation failure (0 if none yet).
+    #[inline]
+    pub fn last_failure_pc(&self) -> u64 { self.last_fail_pc }
+    /// Raw 32-bit instruction word at the most recent failure.
+    #[inline]
+    pub fn last_failure_word(&self) -> u32 { self.last_fail_word }
+    /// 1=decode, 2=lift, 3=too-short input, 4=no-insns; 0=none.
+    #[inline]
+    pub fn last_failure_kind(&self) -> u8 { self.last_fail_kind }
 
     /// Whether a DecodedInsn ends the current basic block. A terminator is any
     /// control-flow change (branches), system call (SVC/HVC/SMC), or fault
@@ -175,6 +199,9 @@ impl DbtRuntime {
     pub fn translate_block(&mut self, pc: u64, guest_mem: &[u8]) -> AetherDbtResult {
         if guest_mem.len() < 4 {
             self.stat_decode_failures = self.stat_decode_failures.saturating_add(1);
+            self.last_fail_pc   = pc;
+            self.last_fail_word = 0;
+            self.last_fail_kind = 3;
             return AetherDbtResult::TranslationFailed;
         }
 
@@ -203,6 +230,9 @@ impl DbtRuntime {
                     // Decode failure mid-block: stop and keep what we lifted.
                     self.stat_decode_failures =
                         self.stat_decode_failures.saturating_add(1);
+                    self.last_fail_pc   = cur_pc;
+                    self.last_fail_word = word;
+                    self.last_fail_kind = 1;
                     if !first_word_ok {
                         return AetherDbtResult::TranslationFailed;
                     }
@@ -214,6 +244,9 @@ impl DbtRuntime {
             if let Err(_) = lift_at(&insn, block, cur_pc) {
                 self.stat_lift_failures =
                     self.stat_lift_failures.saturating_add(1);
+                self.last_fail_pc   = cur_pc;
+                self.last_fail_word = word;
+                self.last_fail_kind = 2;
                 if insns_lifted == 0 {
                     return AetherDbtResult::TranslationFailed;
                 }
@@ -228,6 +261,11 @@ impl DbtRuntime {
         }
 
         if insns_lifted == 0 {
+            if self.last_fail_kind == 0 {
+                self.last_fail_pc   = pc;
+                self.last_fail_word = 0;
+                self.last_fail_kind = 4;
+            }
             return AetherDbtResult::TranslationFailed;
         }
 
@@ -463,6 +501,16 @@ pub fn aether_dbt_dispatch_block(guest_pc: u64, guest_mem: &[u8]) -> AetherDbtRe
 /// Shut down the DBT subsystem and release all resources. Idempotent.
 pub fn aether_dbt_shutdown() -> AetherDbtResult {
     AetherDbtResult::Ok
+}
+
+/// Read back the most recent translation failure for diagnostics.
+/// Returns (pc, word, kind) where kind is 1=decode, 2=lift, 3=too-short,
+/// 4=no-insns, 0=none. Used by the hypervisor's VMEXIT handler to print
+/// the offending guest PC + raw u32 on the GOP framebuffer.
+pub fn aether_dbt_last_failure() -> (u64, u32, u8) {
+    global::with(|rt| {
+        (rt.last_failure_pc(), rt.last_failure_word(), rt.last_failure_kind())
+    }).unwrap_or((0, 0, 0))
 }
 
 // ── Symbol audit helpers ──────────────────────────────────────────────────────

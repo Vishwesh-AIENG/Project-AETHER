@@ -371,11 +371,191 @@ pub unsafe fn vga_puthex64(v: u64) {
 
 /// Print to both COM1 (serial) and VGA text mode.
 pub unsafe fn dual_puts(s: &[u8]) {
-    unsafe { com1_puts(s); vga_puts(s); }
+    unsafe { com1_puts(s); vga_puts(s); fb_text_puts(s); }
 }
 
 pub unsafe fn dual_puthex64(v: u64) {
-    unsafe { com1_puthex64(v); vga_puthex64(v); }
+    unsafe { com1_puthex64(v); vga_puthex64(v); fb_text_puthex64(v); }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GOP framebuffer text painter — the third leg of dual_puts.
+//
+// On a modern UEFI-only AMD board with no serial cable and no legacy VGA
+// text mode (writes to 0xB8000 go to unmapped memory), neither com1_puts
+// nor vga_puts produces visible output. The GOP framebuffer captured
+// pre-EBS is the only post-EBS surface that actually works.
+//
+// fb_text_puts wraps `setup_wizard::FramebufferPainter::draw_glyph` with a
+// scrolling cursor. State:
+//
+//   FB_TEXT_X, FB_TEXT_Y   — cursor position in pixels (top-left of next
+//                            8×8 glyph)
+//   FB_TEXT_INIT           — whether fb_text_clear() has run (first call
+//                            clears the FB and sets pixel order)
+//
+// On `\n`, cursor advances one row. On line overflow, cursor wraps to
+// column 0 and advances. On row overflow, the framebuffer scrolls up by
+// one row (8 px) — this keeps the latest output always visible at the
+// bottom rather than wrapping back to the top, which would interleave
+// new and stale text.
+//
+// All operations are no-ops if FB_INFO is None or if drawing is disabled
+// via the kill switch (set on framebuffer-driver assignment, never used
+// in current code path).
+// ─────────────────────────────────────────────────────────────────────────────
+
+use crate::setup_wizard::{FramebufferPainter, PixelOrder, FONT_8X8_FIRST_CHAR};
+
+static mut FB_TEXT_X:    u32  = 0;
+static mut FB_TEXT_Y:    u32  = 0;
+static mut FB_TEXT_INIT: bool = false;
+
+// Light gray on dark navy — matches the wizard's WIZ_COLOR_FG / WIZ_COLOR_BG
+// constants so the boot log visually flows into the wizard screens.
+const FB_TEXT_FG: u32 = 0x00_E0E0E0;
+const FB_TEXT_BG: u32 = 0x00_0E1117;
+
+/// Borrow the captured GOP framebuffer as a FramebufferPainter. Returns
+/// None if no framebuffer was captured (legacy BIOS / SimpleText-only
+/// firmware). Caller must ensure no other code is concurrently painting
+/// — this hypervisor is single-threaded post-EBS so that holds trivially.
+unsafe fn fb_painter() -> Option<FramebufferPainter<'static>> {
+    let fb = unsafe { FB_INFO? };
+    if fb.base == 0 || fb.width == 0 || fb.height == 0 || fb.pitch_px == 0 {
+        return None;
+    }
+    // The pre-EBS bgr_format flag was unreliable on the May 2026 Ryzen
+    // test board, so the call sites that paint solid color rectangles
+    // (checkpoint / fb_fill) work around it by swapping FB_RED/FB_BLUE
+    // constants directly. For text we accept the flag at face value;
+    // worst case the foreground appears in a different but legible
+    // color (gray ↔ gray-ish), which is fine for diagnostic output.
+    let order = if fb.bgr_format { PixelOrder::Bgr } else { PixelOrder::Rgb };
+    let len_px = (fb.pitch_px as usize) * (fb.height as usize);
+    let slice  = unsafe {
+        core::slice::from_raw_parts_mut(fb.base as *mut u32, len_px)
+    };
+    Some(FramebufferPainter::new(slice, fb.width, fb.height, fb.pitch_px, order))
+}
+
+/// Clear the framebuffer to the boot-log background color and reset the
+/// text cursor. Called lazily on first fb_text_puts.
+unsafe fn fb_text_clear() {
+    if let Some(mut p) = unsafe { fb_painter() } {
+        p.clear(FB_TEXT_BG);
+    }
+    unsafe {
+        FB_TEXT_X = 0;
+        FB_TEXT_Y = 0;
+        FB_TEXT_INIT = true;
+    }
+}
+
+/// Scroll the entire framebuffer up by one 8-pixel row, clearing the
+/// bottom row to the background. Called when the cursor would advance
+/// past the last visible row.
+unsafe fn fb_text_scroll_one_row() {
+    let fb = match unsafe { FB_INFO } {
+        Some(f) => f,
+        None    => return,
+    };
+    if fb.base == 0 || fb.height < 8 || fb.pitch_px == 0 {
+        return;
+    }
+    let pitch_bytes = (fb.pitch_px as usize) * 4;
+    let row_bytes   = 8 * pitch_bytes;
+    let total_bytes = (fb.height as usize) * pitch_bytes;
+    if row_bytes >= total_bytes {
+        return;
+    }
+    unsafe {
+        let base = fb.base as *mut u8;
+        // memmove: src = base + row_bytes, dst = base, len = total - row_bytes.
+        // Source and dest overlap (forward shift); copy lowest-to-highest is
+        // wrong direction. Use core::ptr::copy which handles overlap.
+        core::ptr::copy(
+            base.add(row_bytes),
+            base,
+            total_bytes - row_bytes,
+        );
+        // Clear the now-stale bottom 8-pixel row to background.
+        let bg = match fb.bgr_format {
+            true  => FB_TEXT_BG & 0x00FF_FFFF,
+            false => {
+                let r = (FB_TEXT_BG >> 16) & 0xFF;
+                let g = (FB_TEXT_BG >> 8)  & 0xFF;
+                let b =  FB_TEXT_BG        & 0xFF;
+                (b << 16) | (g << 8) | r
+            }
+        };
+        let bottom_start = (fb.height - 8) as usize * fb.pitch_px as usize;
+        let pix          = (fb.base as *mut u32).add(bottom_start);
+        let pix_count    = 8 * fb.pitch_px as usize;
+        for i in 0..pix_count {
+            *pix.add(i) = bg;
+        }
+    }
+}
+
+unsafe fn fb_text_newline(p: &mut FramebufferPainter<'_>) {
+    let _ = p; // painter passed for symmetry; not used here directly
+    unsafe {
+        FB_TEXT_X = 0;
+        if FB_TEXT_Y + 8 >= (FB_INFO.map(|f| f.height).unwrap_or(0)) {
+            fb_text_scroll_one_row();
+            // Cursor stays on the last row after scroll.
+        } else {
+            FB_TEXT_Y += 8;
+        }
+    }
+}
+
+/// Paint `s` on the framebuffer at the current cursor, advancing it.
+/// Handles `\n` and right-edge wrapping. Non-printable bytes are skipped.
+pub unsafe fn fb_text_puts(s: &[u8]) {
+    unsafe {
+        if !FB_TEXT_INIT {
+            fb_text_clear();
+        }
+    }
+    let mut p = match unsafe { fb_painter() } {
+        Some(p) => p,
+        None    => return,
+    };
+    for &ch in s {
+        if ch == b'\n' {
+            unsafe { fb_text_newline(&mut p); }
+            continue;
+        }
+        if ch == b'\r' {
+            unsafe { FB_TEXT_X = 0; }
+            continue;
+        }
+        // Skip control chars outside the printable IBM 8x8 range.
+        if ch < FONT_8X8_FIRST_CHAR {
+            continue;
+        }
+        unsafe {
+            if FB_TEXT_X + 8 > p.width {
+                fb_text_newline(&mut p);
+            }
+            p.draw_glyph(FB_TEXT_X, FB_TEXT_Y, ch, FB_TEXT_FG, FB_TEXT_BG);
+            FB_TEXT_X += 8;
+        }
+    }
+}
+
+/// Paint a hex u64 in the same `0xAABBCCDDEEFF0011` format as com1_puthex64.
+pub unsafe fn fb_text_puthex64(v: u64) {
+    let mut buf = [0u8; 18];
+    buf[0] = b'0';
+    buf[1] = b'x';
+    for i in 0..16 {
+        let nib = ((v >> (60 - i * 4)) & 0xF) as u8;
+        buf[2 + i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+    }
+    unsafe { fb_text_puts(&buf); }
 }
 
 pub unsafe fn com1_puthex64(mut v: u64) {
@@ -416,6 +596,15 @@ static mut NPT_PML4:      Page4K      = Page4K([0u8; 4096]);
 static mut NPT_PDPT:      Page4K      = Page4K([0u8; 4096]);
 static mut NPT_PD:        Page4K      = Page4K([0u8; 4096]);
 static mut NPT_PT:        Page4K      = Page4K([0u8; 4096]);
+
+// Dedicated PD pages for the translator JIT cache + bump arena, which live
+// at PA 0x2_0000_0000 (8 GiB). That falls in PDPT index 8 — distinct from
+// the guest-RAM PDPT slot (index 2) — so it needs its own PD. Without
+// these mappings, executing translated code at 0x2_0000_0000 would NPF
+// because that GPA is above the UEFI 4 GiB identity map and not covered
+// by build_npt_identity_map / build_npt_2mib_range.
+static mut EPT_PD_JIT:    Page4K      = Page4K([0u8; 4096]);
+static mut NPT_PD_JIT:    Page4K      = Page4K([0u8; 4096]);
 
 // Guest page tables (4-level identity map for long-mode guest).  These live
 // in HOST physical memory; the guest's CR3 points at GUEST_PML4 and the NPT
@@ -660,6 +849,86 @@ unsafe fn build_npt_2mib_range(base_pa: u64, size_bytes: u64) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// JIT cache mapping helpers — EPT (Intel) and NPT (AMD).
+//
+// The translator JIT cache + bump arena live at PA 0x2_0000_0000 (8 GiB) /
+// 0x2_0100_0000. That falls in PDPT index 8 for both PML4 trees, which is
+// distinct from the guest-RAM PDPT slot (index 2 for 0x8000_0000). So the
+// existing EPT_PD / NPT_PD statics — already chained under PDPT[2] — can
+// not be reused; we need dedicated PD pages (EPT_PD_JIT / NPT_PD_JIT) so
+// that PDPT[8] points somewhere valid.
+//
+// W^X is enforced post-mapping: the page starts RWX, then commit_rx_via_ept
+// (registered by install_dbt_ept_callbacks) flips individual 2-MiB leaves
+// from RW to RX as the translator commits new blocks. The initial RWX is
+// safe because the guest has no path to GPA 0x2_0000_0000 — the guest CR3
+// only walks the guest page table built by build_guest_page_table around
+// guest_ram_pa, which lives at PDPT[2], not PDPT[8].
+//
+// SAFETY: caller must guarantee `base_pa` and `size_bytes` are 2-MiB
+// multiples, and that the entire window fits within a single PDPT entry
+// (i.e. less than 1 GiB and not straddling a 1-GiB boundary).
+unsafe fn build_ept_2mib_jit_range(base_pa: u64, size_bytes: u64) {
+    const MIB2: u64 = 2 * 1024 * 1024;
+    if size_bytes == 0 || base_pa & (MIB2 - 1) != 0 || size_bytes & (MIB2 - 1) != 0 {
+        unsafe { dual_puts(b"[ept-jit] refuse: misaligned base/size\n"); }
+        return;
+    }
+
+    let pml4 = unsafe { &mut *(ptr::addr_of_mut!(EPT_PML4)   as *mut EptTable) };
+    let pdpt = unsafe { &mut *(ptr::addr_of_mut!(EPT_PDPT)   as *mut EptTable) };
+    let pd   = unsafe { &mut *(ptr::addr_of_mut!(EPT_PD_JIT) as *mut EptTable) };
+
+    let pdpt_pa   = ptr::addr_of!(EPT_PDPT)   as u64;
+    let pd_jit_pa = ptr::addr_of!(EPT_PD_JIT) as u64;
+
+    let pml4_idx = ((base_pa >> 39) & 0x1FF) as usize;
+    let pdpt_idx = ((base_pa >> 30) & 0x1FF) as usize;
+    pml4.set(pml4_idx, EptTableEntry::pointing_to(pdpt_pa).0);
+    pdpt.set(pdpt_idx, EptTableEntry::pointing_to(pd_jit_pa).0);
+
+    // EPT leaf: R/W/X = 0x07, memtype WB = 6 << 3, PS = bit 7.
+    let mut pa = base_pa;
+    let end = base_pa + size_bytes;
+    while pa < end {
+        let pd_idx = ((pa >> 21) & 0x1FF) as usize;
+        let leaf = (pa & !(MIB2 - 1)) | 0x07 | (6 << 3) | (1 << 7);
+        pd.set(pd_idx, leaf);
+        pa += MIB2;
+    }
+}
+
+unsafe fn build_npt_2mib_jit_range(base_pa: u64, size_bytes: u64) {
+    const MIB2: u64 = 2 * 1024 * 1024;
+    if size_bytes == 0 || base_pa & (MIB2 - 1) != 0 || size_bytes & (MIB2 - 1) != 0 {
+        unsafe { dual_puts(b"[npt-jit] refuse: misaligned base/size\n"); }
+        return;
+    }
+
+    let pml4 = unsafe { &mut *(ptr::addr_of_mut!(NPT_PML4)   as *mut NptTable) };
+    let pdpt = unsafe { &mut *(ptr::addr_of_mut!(NPT_PDPT)   as *mut NptTable) };
+    let pd   = unsafe { &mut *(ptr::addr_of_mut!(NPT_PD_JIT) as *mut NptTable) };
+
+    let pdpt_pa   = ptr::addr_of!(NPT_PDPT)   as u64;
+    let pd_jit_pa = ptr::addr_of!(NPT_PD_JIT) as u64;
+
+    let pml4_idx = ((base_pa >> 39) & 0x1FF) as usize;
+    let pdpt_idx = ((base_pa >> 30) & 0x1FF) as usize;
+    pml4.set(pml4_idx, NptTableEntry::pointing_to(pdpt_pa).0);
+    pdpt.set(pdpt_idx, NptTableEntry::pointing_to(pd_jit_pa).0);
+
+    // NPT leaf: P|R/W|U/S = 0x07, PS=bit 7, WB default, NX=0.
+    let mut pa = base_pa;
+    let end = base_pa + size_bytes;
+    while pa < end {
+        let pd_idx = ((pa >> 21) & 0x1FF) as usize;
+        let leaf = (pa & !(MIB2 - 1)) | 0x07 | (1 << 7);
+        pd.set(pd_idx, leaf);
+        pa += MIB2;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Host VMEXIT handler (Intel path)
 //
 // vmcs_write_host_state writes host_rip = address of this function. The
@@ -820,10 +1089,12 @@ pub unsafe fn boot_x86_hypervisor(
     unsafe {
         com1_init();
         vga_clear();
-        // GREEN flash + 1 beep = ExitBootServices succeeded. Without this the
-        // user has no way to tell post-EBS code is running on a modern
-        // UEFI-only board (no legacy VGA text mode, no physical serial port).
-        checkpoint(FB_GREEN, 1, 880);
+        // Removed: checkpoint(FB_GREEN, 1, 880). fb_fill paints the whole
+        // screen one solid color, which wipes every dual_puts line that
+        // follows. With the new fb_text_puts wired into dual_puts the
+        // text-mode "[x86] ExitBootServices: OK" is now the visible
+        // confirmation. Pre-EBS probe beeps above and the RED halt-loop
+        // flash below are kept as last-resort audible signals.
         dual_puts(b"\n[x86] ExitBootServices: OK\n");
     }
 
@@ -848,7 +1119,8 @@ pub unsafe fn boot_x86_hypervisor(
         dual_puts(b"[x86] EPT PML4 PA     = "); dual_puthex64(ept_pml4_pa); dual_puts(b"\n");
         dual_puts(b"[x86] Guest RAM PA    = "); dual_puthex64(guest_ram_pa); dual_puts(b"\n");
         dual_puts(b"[x86] Host RIP        = "); dual_puthex64(host_rip);  dual_puts(b"\n");
-        bisect(2);
+        // bisect(2): now redundant — the dual_puts above already tells
+        // the user we reached this stage on the framebuffer.
     }
 
     // ── 4. Stage guest payload — Phase 4 Android handoff or foundation gate ─
@@ -892,7 +1164,8 @@ pub unsafe fn boot_x86_hypervisor(
             }
         }
     };
-    unsafe { bisect(3); }
+    // bisect(3) removed — dual_puts above already prints the boot.img /
+    // handoff status; an audible tone here added nothing.
 
     let fex_ok = unsafe { try_init_fex() };
 
@@ -909,20 +1182,17 @@ pub unsafe fn boot_x86_hypervisor(
             // writes from the guest land in userspace_boot + app_compat
             // diagnostic state.
             crate::android_runtime::init_global();
-            // 4 rising beeps = FEX armed, real Android dispatch on first VMRUN.
-            beep_once(800);
-            beep_once(1000);
-            beep_once(1200);
-            beep_once(1500);
+            // 4-ascending-beep FEX-armed signal removed — the dual_puts
+            // banner above now prints the same information on the
+            // framebuffer.
         } else {
             // Fallback: foundation-gate payload — a HLT at GUEST_RAM_PA.
             let guest = ptr::addr_of_mut!(GUEST_RAM) as *mut u8;
             *guest = 0xF4;
-            // 2 falling beeps = foundation-gate fallback, first VMRUN will HLT.
-            beep_once(800);
-            beep_once(500);
+            dual_puts(b"[x86] foundation-gate fallback (no FEX/handoff)\n");
+            // 2-falling-beep foundation-gate signal removed — see above.
         }
-        bisect(4);
+        // bisect(4) removed.
     }
 
     // ── 5. Branch on vendor ─────────────────────────────────────────────────
@@ -1039,6 +1309,18 @@ unsafe fn boot_intel(
         const JIT_CACHE_BASE_PA: u64 = 0x2_0000_0000;
         const BUMP_ARENA_BASE_PA: u64 = 0x2_0100_0000;
         const BUMP_ARENA_BYTES: usize = 1 * 1024 * 1024;
+        // Map the JIT cache + bump arena into the active EPT before the
+        // translator emits any code. JIT lives at PDPT idx 8 (8 GiB),
+        // well above the UEFI 4 GiB identity map, so without this call
+        // the first JMP into translated code would EPT-violate. 32 MiB
+        // covers 16 MiB JIT + 1 MiB bump arena with headroom for growth.
+        const JIT_NPT_MAP_BYTES: u64 = 32 * 1024 * 1024;
+        build_ept_2mib_jit_range(JIT_CACHE_BASE_PA, JIT_NPT_MAP_BYTES);
+        dual_puts(b"[x86] EPT JIT region mapped: base=");
+        dual_puthex64(JIT_CACHE_BASE_PA);
+        dual_puts(b" size=");
+        dual_puthex64(JIT_NPT_MAP_BYTES);
+        dual_puts(b"\n");
         let _ = translator_dbt_init(
             JIT_CACHE_BASE_PA,
             TRANSLATOR_JIT_BYTES,
@@ -1158,6 +1440,18 @@ unsafe fn boot_amd(
         const JIT_CACHE_BASE_PA_AMD: u64 = 0x2_0000_0000;
         const BUMP_ARENA_BASE_PA_AMD: u64 = 0x2_0100_0000;
         const BUMP_ARENA_BYTES_AMD: usize = 1 * 1024 * 1024;
+        // Map the JIT cache + bump arena into the active NPT before the
+        // translator emits any code. JIT lives at PDPT idx 8 (8 GiB),
+        // well above the UEFI 4 GiB identity map, so without this call
+        // the first JMP into translated code would nested-page-fault.
+        // 32 MiB covers 16 MiB JIT + 1 MiB bump arena with headroom.
+        const JIT_NPT_MAP_BYTES_AMD: u64 = 32 * 1024 * 1024;
+        build_npt_2mib_jit_range(JIT_CACHE_BASE_PA_AMD, JIT_NPT_MAP_BYTES_AMD);
+        dual_puts(b"[x86] NPT JIT region mapped: base=");
+        dual_puthex64(JIT_CACHE_BASE_PA_AMD);
+        dual_puts(b" size=");
+        dual_puthex64(JIT_NPT_MAP_BYTES_AMD);
+        dual_puts(b"\n");
         let _ = translator_dbt_init(
             JIT_CACHE_BASE_PA_AMD,
             TRANSLATOR_JIT_BYTES,

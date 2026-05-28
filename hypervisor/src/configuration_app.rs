@@ -40,7 +40,7 @@ pub enum ConfigKey {
 }
 
 impl ConfigKey {
-    pub fn ordinal(self) -> u8 { self as u8 }
+    pub const fn ordinal(self) -> u8 { self as u8 }
     pub fn from_ordinal(o: u8) -> Option<Self> {
         match o {
             0 => Some(ConfigKey::BridgeMode),

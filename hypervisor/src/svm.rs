@@ -1269,6 +1269,35 @@ pub fn handle_vm_exit(vmcb: &mut VmcbRegion, state: &mut SvmFoundationState) -> 
                                 state.dbt_blocks_dispatched.saturating_add(1);
                             return SvmExitAction::Resume;
                         }
+                        // Dispatch failed AFTER successful translate — rare
+                        // (would mean JIT corruption); fall through.
+                        unsafe {
+                            crate::boot_x86::dual_puts(b"[dbt] dispatch failed pc=");
+                            crate::boot_x86::dual_puthex64(pc);
+                            crate::boot_x86::dual_puts(b"\n");
+                        }
+                    } else {
+                        // Translation failed — read the precise (pc, word,
+                        // kind) the translator just stashed and print them.
+                        // Without this, every grind iteration would just
+                        // see "Terminate" with no clue what to lift next.
+                        let (fpc, fw, fkind) =
+                            aether_translator::dbt::aether_dbt_last_failure();
+                        unsafe {
+                            crate::boot_x86::dual_puts(b"[dbt] TranslateFail pc=");
+                            crate::boot_x86::dual_puthex64(fpc);
+                            crate::boot_x86::dual_puts(b" word=");
+                            crate::boot_x86::dual_puthex64(fw as u64);
+                            crate::boot_x86::dual_puts(b" kind=");
+                            crate::boot_x86::dual_puthex64(fkind as u64);
+                            crate::boot_x86::dual_puts(b" (1=decode 2=lift 3=short 4=empty)\n");
+                        }
+                    }
+                } else {
+                    unsafe {
+                        crate::boot_x86::dual_puts(b"[dbt] NPT window read failed pc=");
+                        crate::boot_x86::dual_puthex64(pc);
+                        crate::boot_x86::dual_puts(b"\n");
                     }
                 }
             }

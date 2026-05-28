@@ -827,6 +827,10 @@ pub mod x86_hw_validation; // ch54: x86 Tier Hardware Validation
 // Part V — Installer & Management (Chapters 55–64)
 pub mod aether_installer;  // ch56: AETHER Installer CLI — spec module mirroring the
                          //       userland binary at tools/aether-install/.
+                         //       Companion GUI launcher: tools/aether-setup/ (Windows
+                         //       .exe; eframe). aether-setup is the downloadable end-user
+                         //       artifact; it gathers ch59 selections + spawns aether-
+                         //       install as a subprocess to do the actual install work.
                          //       Subcommand enum (Check / Install / Uninstall / Update
                          //       / Status; .is_destructive() classifies),
                          //       InstallerSafetyMode (DryRun | Apply; byte roundtrip),
@@ -1074,7 +1078,15 @@ pub mod setup_wizard;    // ch59: Setup Wizard GUI Frontend — first-boot confi
                          //       AetherSetupComplete (u8) / AetherLanguage / AetherKb
                          //       Layout / AetherTimeZone / AetherBridgeMode / Aether
                          //       SensorProfile. On every subsequent boot the wizard is
-                         //       skipped if AetherSetupComplete == 1. WizardSelections
+                         //       skipped if AetherSetupComplete == 1. Selections may also
+                         //       be pre-populated by the Windows-side aether-setup GUI
+                         //       installer (tools/aether-setup/), which writes setup-
+                         //       config.json to the ESP root. On first boot the runtime
+                         //       parses that file, calls WizardState::try_apply_preconfig
+                         //       (PreconfigInput { language, keyboard_layout, timezone,
+                         //       bridge_mode, sensor_profile }) and short-circuits the
+                         //       five choice steps; image-manifest verification + UEFI
+                         //       variable persistence (steps 6–7) still run.  WizardSelections
                          //       (fixed-size ASCII buffers + enums — no heap), Bridge
                          //       ModeDefault (Off/On with to_byte/from_byte roundtrip),
                          //       SensorProfile (Stationary/InHand/Driving — seeds the
