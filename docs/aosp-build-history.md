@@ -170,3 +170,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja very late
 **Outcome**: dropping the fragments cleared the deprecation messages, but the kernel-version mismatch and cas declaration mismatch persisted. The check_vintf rule fired regardless of `PRODUCT_ENFORCE_VINTF_MANIFEST := false` (set in device.mk).
 **Fix for run 28**: discovered that AOSP `build/make/core/config.mk:777` overrides `PRODUCT_ENFORCE_VINTF_MANIFEST` from `PRODUCT_FULL_TREBLE` unless `PRODUCT_ENFORCE_VINTF_MANIFEST_OVERRIDE` is set.
+
+## Run 28
+
+**Phase**: ninja very late
+**Outcome**: same checkvintf failure persisted because the bare `PRODUCT_ENFORCE_VINTF_MANIFEST := false` got overwritten by the config.mk treble-derivation block.
+**Fix for run 29**: `device.mk` set BOTH `PRODUCT_ENFORCE_VINTF_MANIFEST := false` AND `PRODUCT_ENFORCE_VINTF_MANIFEST_OVERRIDE := false` (the `_OVERRIDE` suffix wins the config.mk ternary that runs after product inherits).
