@@ -18,11 +18,20 @@ mod global_alloc {
     use core::alloc::{GlobalAlloc, Layout};
     use core::sync::atomic::{AtomicUsize, Ordering};
 
-    /// 1 MiB. Hypervisor allocations during boot are tiny — DTB staging,
-    /// translator metadata, transient Vec/String buffers in the gate
-    /// state machines. The DBT JIT cache has its own arena (16 MiB at
-    /// 0x2_0000_0000) and does NOT come from this heap.
-    const HEAP_SIZE: usize = 1024 * 1024;
+    /// 32 MiB. The original 1 MiB sized this for "boot scratchpad only" on
+    /// the assumption that the DBT JIT cache had its own arena at
+    /// `0x2_0000_0000`. In practice `CodeBuf::new(JIT_CACHE_BYTES)` calls
+    /// `alloc::vec![0u8; 16 MiB]` against THIS global allocator — so the
+    /// JIT cache DOES come from this heap. With 1 MiB the allocator
+    /// returned NULL, Vec hit the alloc error handler, and the hypervisor
+    /// hung silently after `init_svm_foundation`.
+    ///
+    /// 32 MiB covers: 16 MiB JIT vec + 4 MiB block-cache hash table +
+    /// transient gate / DTB / handoff buffers + headroom. The .bss
+    /// expansion is invisible in the PE32+ file size but the UEFI loader
+    /// reserves 32 MiB of conventional memory at image load — fine on any
+    /// desktop with ≥ 4 GiB RAM.
+    const HEAP_SIZE: usize = 32 * 1024 * 1024;
 
     #[repr(align(16))]
     struct AlignedHeap([u8; HEAP_SIZE]);
@@ -1026,6 +1035,109 @@ pub mod dbt_integration; // ch52: FEX-Emu Integration in Hypervisor — embeds F
                          //       Gate: ARM64 hello-world ELF runs through FEX on x86 hardware and
                          //       prints "Hello, AETHER" on PL011 UART; no libc/pthread symbols in
                          //       hypervisor.efi; JIT cache never mapped into guest EPT/NPT.
+
+pub mod setup_wizard;    // ch59: Setup Wizard GUI Frontend — first-boot configuration
+                         //       UI rendered by the hypervisor on the GOP framebuffer
+                         //       BEFORE the Android partition launches. Six forward-pass
+                         //       steps: Language / Keyboard layout / Time zone / Bridge
+                         //       Mode default / Sensor profile / Confirmation. Outcome
+                         //       persisted via six UEFI variables (AETHER_VARIABLE_GUID):
+                         //       AetherSetupComplete (u8) / AetherLanguage / AetherKb
+                         //       Layout / AetherTimeZone / AetherBridgeMode / Aether
+                         //       SensorProfile. On every subsequent boot the wizard is
+                         //       skipped if AetherSetupComplete == 1. WizardSelections
+                         //       (fixed-size ASCII buffers + enums — no heap), Bridge
+                         //       ModeDefault (Off/On with to_byte/from_byte roundtrip),
+                         //       SensorProfile (Stationary/InHand/Driving — seeds the
+                         //       virtual IMU Gaussian motion model), LANGUAGE_OPTIONS
+                         //       (10: en/hi/ta/te/ja/fr/de/es/pt/zh-CN), KEYBOARD_LAYOUT
+                         //       _OPTIONS (5: qwerty/qwertz/azerty/dvorak/colemak),
+                         //       REGION_OPTIONS (7 IANA tz strings — full list scrolls
+                         //       in the GUI). WizardConfig (per_step_timeout_secs=600 /
+                         //       enforce_no_network=true; aether_defaults + validate —
+                         //       enforce_no_network=false is rejected per No-Boundary
+                         //       Principle ch3), WizardGate (framebuffer_painted +
+                         //       all_steps_acknowledged + selections_persisted +
+                         //       no_network_round_trip; passes()), WizardError (12
+                         //       variants: UnknownLanguage / UnknownKeyboardLayout /
+                         //       InvalidTimezone / SelectionBufferOverflow / Variable
+                         //       ReadError / VariableWriteError / FramebufferUnavailable
+                         //       / NetworkRoundTripDetected / UserCancelled / Phase
+                         //       Regression / StepTimeout / PersistenceVerifyFailed),
+                         //       WizardPhase (9 phases, strictly monotonic via PartialOrd
+                         //       /Ord: NotStarted → FramebufferReady → LanguageChosen →
+                         //       KbLayoutChosen → TimezoneChosen → BridgeModeChosen →
+                         //       SensorProfileChosen → SetupComplete → GatePassed),
+                         //       WizardState (process_line() UART scanner; advance_phase
+                         //       rejects regression). UART signatures (8 byte patterns):
+                         //       WIZ_UART_SIG_STARTED / FRAMEBUFFER_OK / LANGUAGE_CHOSEN
+                         //       / KB_LAYOUT_CHOSEN / TIMEZONE_CHOSEN / BRIDGE_CHOSEN /
+                         //       SENSOR_CHOSEN / SETUP_COMPLETE. init_setup_wizard() —
+                         //       8-step pipeline: validate config → read Aether Setup
+                         //       Complete → if 1, skip wizard with gate pre-passed → else
+                         //       NotStarted → paint framebuffer → step through Language /
+                         //       KbLayout / Timezone / BridgeMode / SensorProfile → write
+                         //       five field variables + AetherSetupComplete → read-back
+                         //       to verify persistence. Inviolables: no remote font/asset
+                         //       fetch, no network round-trip during wizard, no Google/
+                         //       Apple/MS account credential capture. Gate:
+                         //       framebuffer_painted + all_steps_acknowledged +
+                         //       selections_persisted + no_network_round_trip.
+
+pub mod configuration_app; // ch60: Configuration App — post-install runtime config
+                         //       surface. Persists Bridge Mode toggle, sensor profile,
+                         //       fingerprint elimination strictness, OTA channel, etc.
+                         //       via the same UEFI variable namespace as the Setup
+                         //       Wizard. ConfigKey enum + ConfigValue (typed: U8/U32/
+                         //       AsciiStr) + ConfigChange record. ConfigApp Config /
+                         //       Gate / Error / Phase. Read paths must be lock-free
+                         //       (Android-side queries are hot); write paths take a
+                         //       global spinlock. RECOVERY mode (ch62) can reset all
+                         //       values to aether_defaults().
+
+pub mod ota_update;      // ch61: OTA Update System — A/B slot update flow with
+                         //       rollback. SlotA / SlotB targets, OtaImage (boot.img +
+                         //       system.img + vendor.img + vbmeta.img + product.img),
+                         //       AVB chain verification on the inactive slot before
+                         //       slot switch. Rollback uses ch58's boot-attempt counter
+                         //       (≥ 3 failed boots → revert). OtaError covers download
+                         //       failure / signature mismatch / disk full / partial
+                         //       write. OtaPhase: Idle → Downloaded → Verified → Slot
+                         //       Switched → BootedNewSlot → Confirmed. Confirmed only
+                         //       after one successful boot of the new slot.
+
+pub mod recovery_mode;   // ch62: Recovery Mode — boot-loop trap + factory reset
+                         //       + sideload entry. Triggered by ch58's rollback guard
+                         //       OR by holding Ctrl+Alt+Tab at the boot selector.
+                         //       Renders on the GOP framebuffer; same painter as ch58/
+                         //       ch59. RecoveryAction enum: NoOp / ReturnToSelector /
+                         //       FactoryReset (wipes userdata partition) / Sideload
+                         //       (accept a signed boot.img from USB ESP) / SlotRollback
+                         //       (revert to the previous A/B slot). Every destructive
+                         //       action requires a typed confirmation phrase.
+
+pub mod aether_manager;  // ch63: AETHER Manager Android App — the Android-side
+                         //       companion app. Lives in /system/priv-app on the
+                         //       AETHER device; surfaces VirtualSensorSuite tuning,
+                         //       Bridge Mode toggle, identity-feed (IMEI / MAC), and
+                         //       OTA controls to the user. Talks to the hypervisor via
+                         //       the HVC vendor range (ch64). PackageMetadata (package
+                         //       name = com.aether.manager; minSdk = 33; targetSdk = 34;
+                         //       signature: AETHER_PLATFORM_KEY), required permissions,
+                         //       selinux contexts. ch63's hypervisor-side declaration
+                         //       is the spec; the actual app source lives under
+                         //       packages/apps/AetherManager/ in AOSP.
+
+pub mod hvc_paravirt_abi; // ch64: HVC Paravirt ABI — formalises the AETHER HVC
+                         //       vendor range 0x86000001-0x86000006 as a typed ABI.
+                         //       AetherHvcFn enum (GetVersion / BridgeModeGet /
+                         //       BridgeModeSet / SensorRead / UpdateStage / DiagLog
+                         //       Read), HvcArg / HvcRet typed registers, version
+                         //       compatibility check (caller passes the AETHER ABI
+                         //       version it was built against → hypervisor refuses
+                         //       cross-version calls). Mirrors x86 path (vendor range
+                         //       0x8600_xxxx via VMMCALL/VMCALL) and ARM64 path (HVC
+                         //       immediate via SMCCC vendor range).
 
 // Support
 pub mod uart;        // PL011 UART driver — polled TX for boot diagnostics
