@@ -134,3 +134,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja late
 **Outcome**: `checkfc` rejected `u:object_r:hal_telephony_default_exec:s0` on the radio service file. AOSP 14 renamed the HIDL radio HAL's exec type to `hal_radio_default_exec`.
 **Fix for run 22**: `sepolicy/file_contexts` updated for the radio binary; the other four HALs (`sensors/camera/power/health`) were validated to still use their original `hal_*_default_exec` names.
+
+## Run 22
+
+**Phase**: ninja very late (3 images already produced)
+**Outcome**: Go-side `fileslist` tool unconditionally walks `out/target/product/<dev>/vendor_ramdisk` even when we ship no vendor_ramdisk content. `panic: lstat ... vendor_ramdisk: no such file or directory`.
+**Fix for run 23**: one-shot `mkdir -p` of the three expected ramdisk dirs (vendor_ramdisk, vendor_debug_ramdisk, debug_ramdisk). The tool then walks empty dirs and emits empty JSON, build proceeds. No repo change (operational workaround).
