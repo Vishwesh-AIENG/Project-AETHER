@@ -56,3 +56,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: Kati 100% / writing module rules
 **Outcome**: 1:45 — `build/make/core/base_rules.mk:497: error: overriding commands for target out/.../vendor/etc/vintf/manifest.xml`. Soong's `prebuilt_etc { name: "aether_vendor_manifest" }` collided with Make's `DEVICE_MANIFEST_FILE`.
 **Fix for run 9**: removed the `aether_vendor_manifest` `prebuilt_etc` block from `Android.bp`; `DEVICE_MANIFEST_FILE` is the canonical Treble path because it triggers `assemble_vintf` to merge with per-HAL fragments.
+
+## Run 9
+
+**Phase**: Soong bootstrap
+**Outcome**: 6:20 — kernel OOM killer fired; `soong_build` total-vm 37 GB, anon-rss 15 GB inside a 15 GiB WSL allocation
+**Fix for run 10**: `C:\Users\<user>\.wslconfig` with `memory=26GB swap=24GB processors=8`; `wsl --shutdown`. No repo change. Free RAM went from 0 → ~24 GiB.
