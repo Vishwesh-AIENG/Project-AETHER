@@ -825,6 +825,35 @@ pub mod android_x86_userspace; // ch53: Android on x86 — Userspace. Wires the 
 pub mod x86_hw_validation; // ch54: x86 Tier Hardware Validation
 
 // Part V — Installer & Management (Chapters 55–64)
+pub mod aether_installer;  // ch56: AETHER Installer CLI — spec module mirroring the
+                         //       userland binary at tools/aether-install/.
+                         //       Subcommand enum (Check / Install / Uninstall / Update
+                         //       / Status; .is_destructive() classifies),
+                         //       InstallerSafetyMode (DryRun | Apply; byte roundtrip),
+                         //       InstallStep (8 ordered steps: CompatReport / GpuPlan
+                         //       / NvmeNamespaceCreated / EspBinaryWritten /
+                         //       BootEntryRegistered / InstallStatePersisted /
+                         //       MokEnrolled / HypervisorObserved). InstallerConfig
+                         //       (min_disk_bytes=32 GiB / default_safety=DryRun /
+                         //       forbid_network_for_non_update=true; aether_defaults +
+                         //       validate). InstallerGate (compat_report_ok +
+                         //       namespace_created + esp_populated + boot_entry_
+                         //       registered + mok_enrolled + hypervisor_observed;
+                         //       passes()). InstallerError (14 variants including
+                         //       DisableSecureBootForbidden tripwire — the installer
+                         //       NEVER instructs the user to disable Secure Boot).
+                         //       InstallerPhase (11 phases, strictly monotonic).
+                         //       check_safety() refuses destructive subcommands
+                         //       without --apply, AND refuses --apply on read-only
+                         //       subcommands. UART signatures (8 byte patterns):
+                         //       INSTALLER_UART_SIG_COMPAT_OK / GPU_PLAN_OK /
+                         //       NAMESPACE_CREATED / ESP_WRITTEN / BOOT_ENTRY_OK /
+                         //       STATE_PERSISTED / AWAITING_REBOOT / HYPERVISOR_
+                         //       OBSERVED. Inviolables: dry-run default, never
+                         //       disable Secure Boot (shim+MOK per ch57), no
+                         //       background network, idempotent (install resumes
+                         //       from install-state.json), Windows partition
+                         //       untouched. 14 unit tests.
 pub mod uefi_boot_selector; // ch58: UEFI Boot Selector — 5-second countdown menu
                          //       ([A]ndroid / [W]indows / [S]ettings) on GOP framebuffer.
                          //       Default stored in AetherDefaultTarget UEFI variable (NV+BS+RT).
