@@ -92,3 +92,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja mid-compile
 **Outcome**: 7:38 — kapt step on ManagedProvisioningLib hit `java.util.zip.ZipException: invalid zip archive`. The 82 zero-length files swept in run 13 were the obvious casualties; the `wsl --shutdown` forced post-hang also left several hundred non-zero-length but partially-written jars across the JAVA_LIBRARIES tree.
 **Fix for run 15**: `wsl-scripts/sweep_corrupt_jars.sh` scans every `.jar/.apk/.zip` under `out/` via `unzip -t`, deletes the corrupt ones, lets ninja rebuild. 513 archives deleted including `metalava.jar`, `turbine.jar`, `r8.jar`, `signapk.jar`.
+
+## Run 15
+
+**Phase**: ninja early
+**Outcome**: second outage; sweep deleted another 411 corrupt jars.
+**Fix for run 16**: hardware-watchdog protections installed — `sync_loop.sh` (every 30s `sync` of WSL ext4 page cache) and a Windows Ctrl+Alt+S hotkey running `emergency_shutdown.ps1` which pauses build procs (SIGSTOP) + sync x3 + `wsl --shutdown` for a clean unmount. Caps outage damage from ~5 min of in-flight writes to ~30 s.
