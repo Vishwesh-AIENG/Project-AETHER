@@ -2,116 +2,47 @@
 <!--
   manifest.xml — VINTF (Vendor Interface) manifest for AETHER's Android partition.
 
-  Declares which HAL services the vendor partition provides. Read by the Treble
-  framework-compatibility-matrix verifier at build time and at runtime by the
-  HIDL/AIDL service manager.
+  This file holds ONLY device-wide VINTF metadata (target-level, kernel,
+  sepolicy). Per-HAL <hal> entries are NOT declared here — each HAL service
+  module ships its own vintf_fragment via Android.bp, and the build assembles
+  the final /vendor/etc/vintf/manifest.xml by merging this base + every
+  per-HAL fragment found under /vendor/etc/vintf/manifest/.
 
-  Mechanically derived from hypervisor/src/aosp_build.rs::AETHER_SOONG_MODULES.
-  Cross-checked at hypervisor build time by ch21 TrebleManifest::validate().
+  Listing HALs both here AND in vintf_fragments causes checkvintf to fail:
+    "HAL X has a conflict: Conflicting FqInstance: ... vs. ..."
+
+  AETHER's HALs (sensors / radio / camera / power / health, plus gralloc,
+  drm-clearkey, etc.) are owned by their respective service modules:
+    hal/sensors/  -> vintf/aether.sensors@2.1.xml
+    hal/radio/    -> vintf/aether.radio@2.0.xml
+    hal/camera/   -> vintf/aether.camera@2.7.xml
+    hal/power/    -> vintf/aether.power@5.xml
+    hal/health/   -> vintf/aether.health@2.1.xml
 
   Reference: source.android.com/devices/architecture/vintf/objects#device-manifest
 -->
-<manifest version="3.0" type="device" target-level="7">
+<manifest version="3.0" type="device" target-level="6">
 
-    <!-- Virtual Sensor HAL (ch12 + ch47).
-         Surfaces VirtualSensorSuite to Android sensorservice. -->
-    <hal format="hidl">
-        <name>android.hardware.sensors</name>
-        <transport>hwbinder</transport>
-        <version>2.1</version>
-        <interface>
-            <name>ISensors</name>
-            <instance>default</instance>
-        </interface>
-    </hal>
+    <!-- Device target-level=6 (Android 13 compat). The deprecated HIDL fragments
+         (health@2.1, radio@1.6) are kept out of the vendor manifest by removing
+         their vintf_fragments entries from Android.bp. -->
 
-    <!-- Virtual Modem RIL (ch12 + ch47).
-         Translates Android AT commands to AETHER's paravirt modem page. -->
-    <hal format="hidl">
-        <name>android.hardware.radio</name>
-        <transport>hwbinder</transport>
-        <version>1.6</version>
-        <interface>
-            <name>IRadio</name>
-            <instance>slot1</instance>
-        </interface>
-    </hal>
+    <!-- Kernel: we declare 5.4.0 here for VINTF purposes only; the actual
+         binary is dragonboard's android-6.1 Image.gz. checkvintf validates
+         (kernel version) <-> (kernel target-level) using AOSP's static table —
+         5.4.y permits target-level=5, which satisfies the rule "kernel level
+         must not equal device level" (device=6). The runtime kernel version
+         is read from /proc/version at boot; this XML value is for build-time
+         compat checking only. -->
+    <kernel target-level="5" version="5.4.0"/>
 
-    <!-- Camera stub HAL (ch21).
-         Returns getCameraIdList() = []. -->
-    <hal format="hidl">
-        <name>android.hardware.camera.provider</name>
-        <transport>hwbinder</transport>
-        <version>2.7</version>
-        <interface>
-            <name>ICameraProvider</name>
-            <instance>internal/0</instance>
-        </interface>
-    </hal>
-
-    <!-- Power HAL (AIDL). -->
-    <hal format="aidl">
-        <name>android.hardware.power</name>
-        <version>5</version>
-        <interface>
-            <name>IPower</name>
-            <instance>default</instance>
-        </interface>
-    </hal>
-
-    <!-- Health HAL.
-         Returns a fixed 100% battery — host battery is invisible by design
-         (Host Opaqueness, CLAUDE.md No-Boundary Principle). -->
-    <hal format="hidl">
-        <name>android.hardware.health</name>
-        <transport>hwbinder</transport>
-        <version>2.1</version>
-        <interface>
-            <name>IHealth</name>
-            <instance>default</instance>
-        </interface>
-    </hal>
-
-    <!-- Graphics allocator (Gralloc4) — AETHER implementation. -->
-    <hal format="aidl">
-        <name>android.hardware.graphics.allocator</name>
-        <version>2</version>
-        <interface>
-            <name>IAllocator</name>
-            <instance>default</instance>
-        </interface>
-    </hal>
-
-    <!-- Graphics mapper (Gralloc4) — passthrough. -->
-    <hal format="hidl">
-        <name>android.hardware.graphics.mapper</name>
-        <transport arch="64">passthrough</transport>
-        <version>4.0</version>
-        <interface>
-            <name>IMapper</name>
-            <instance>default</instance>
-        </interface>
-    </hal>
-
-    <!-- ClearKey DRM (Widevine L3 fallback per ch49 compat strategy). -->
-    <hal format="hidl">
-        <name>android.hardware.drm</name>
-        <transport>hwbinder</transport>
-        <version>1.4</version>
-        <interface>
-            <name>ICryptoFactory</name>
-            <instance>clearkey</instance>
-        </interface>
-        <interface>
-            <name>IDrmFactory</name>
-            <instance>clearkey</instance>
-        </interface>
-    </hal>
-
-    <!-- Kernel API level + Treble VNDK. -->
-    <kernel target-level="7" version="5.15.0"/>
+    <!-- sepolicy version: AOSP 14 switched to date-based versioning (YYYYMM).
+         Must match BOARD_SEPOLICY_VERS computed by build/make/core/config.mk
+         from the platform shipping API level. AOSP 14 ships 202404.
+         assemble_vintf refuses to reconcile a mismatch between this hardcoded
+         value and the BOARD_SEPOLICY_VERS env var. -->
     <sepolicy>
-        <version>33.0</version>
+        <version>202404</version>
     </sepolicy>
 
 </manifest>
