@@ -14,3 +14,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: process spawn
 **Outcome**: died at 3 s on SIGHUP — bash terminated when WSL invocation closed
 **Fix for run 2**: wrap launcher with `setsid nohup ... </dev/null >/dev/null 2>&1 & disown`. No repo change; pattern adopted in `wsl-scripts/phase5_build.sh` later.
+
+## Run 2
+
+**Phase**: Kati legacy parse
+**Outcome**: 31 s — `TARGET_CPU_VARIANT := cortex-a510` rejected
+**Fix for run 3**: `BoardConfig.mk` TARGET_CPU_VARIANT switched to `cortex-a76` (modern but supported).
