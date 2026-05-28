@@ -164,3 +164,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja very late
 **Outcome**: "The following HALs in device manifest are not declared in FCM <= level 6: android.hardware.cas.IMediaCasService/default (@1)." Comes from inherited cas APEX in the vendor partition. Plus kernel 5.4.0 < required min LTS 5.4.61 for FCM 5.
 **Fix for run 27**: stopped trying to compute through the VINTF compat matrix and started removing deprecated HAL fragments from being installed. `Android.bp` dropped `vintf_fragments:` from `aether.health@2.1-service` and `aether.radio@2.0-service` so their XMLs never reach `/vendor/etc/vintf/manifest/`. Service binaries still install.
+
+## Run 27
+
+**Phase**: ninja very late
+**Outcome**: dropping the fragments cleared the deprecation messages, but the kernel-version mismatch and cas declaration mismatch persisted. The check_vintf rule fired regardless of `PRODUCT_ENFORCE_VINTF_MANIFEST := false` (set in device.mk).
+**Fix for run 28**: discovered that AOSP `build/make/core/config.mk:777` overrides `PRODUCT_ENFORCE_VINTF_MANIFEST` from `PRODUCT_FULL_TREBLE` unless `PRODUCT_ENFORCE_VINTF_MANIFEST_OVERRIDE` is set.
