@@ -121,6 +121,30 @@ cd ~/AETHER && cargo +nightly clean
 **Output:** `target/aarch64-unknown-uefi/release/hypervisor.efi`
 **Verify:** `file hypervisor.efi` → "PE32+ executable (EFI application) Aarch64"
 
+### Windows installer binaries (ch56 + ch59 GUI front-end)
+
+```powershell
+# Build both the CLI engine and the GUI wrapper in one go (stable toolchain,
+# host target — do NOT pass +nightly or -Z build-std here).
+cargo build --release -p aether-install -p aether-setup
+
+# Assemble the redistributable folder. aether-setup.exe finds aether-install.exe
+# by sibling lookup, so they must sit next to each other.
+$dist = "dist\AETHER-Setup"
+Remove-Item -Recurse -Force $dist -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $dist | Out-Null
+Copy-Item target\release\aether-setup.exe,target\release\aether-install.exe $dist\
+```
+
+**Outputs:**
+- `target/release/aether-install.exe` — CLI engine (~0.42 MB). Subcommands: `check / install / uninstall / update / status`.
+- `target/release/aether-setup.exe` — Windows GUI installer (~3.1 MB; eframe/egui). The downloadable end-user artefact.
+- `dist/AETHER-Setup/` — the folder to ship.
+
+**Verify:** `dist\AETHER-Setup\aether-install.exe --version` prints `aether-install 0.1.0`. Double-click `aether-setup.exe` to launch (UAC elevates via the manifest embedded by `tools/aether-setup/build.rs`).
+
+**Important:** don't run a bare `cargo build` at the workspace root — that pulls in `aether-translator`, which currently fails `cargo check` under `-Z build-std` (pre-existing `duplicate lang item` issue). Always pass `-p <crate>` when building tools.
+
 **QEMU boot scripts:**
 - `qemu/run.sh` — smoke test (boots hypervisor to "Hypervisor ready." banner)
 - `qemu/run-ch34.sh` — ch34 gate test (loads ARM64 GKI Image + initrd, boots to `/bin/sh`)
@@ -525,7 +549,9 @@ hypervisor/src/
 │                              init_svm_foundation() — 8-step pipeline.
 │                              Gate: first VMEXIT exit_code=0x58 (HLT); VMRUN returns
 │                              to hypervisor. SVM exit code HLT = 0x58, NOT 0x78.
-├── fex_integration.rs  ← ch52: FEX-Emu Integration in Hypervisor. Embeds FEX-Emu
+├── dbt_integration.rs  ← ch52: FEX-Emu Integration in Hypervisor (formerly fex_integration.rs;
+│                              renamed to match the DBT host-bindings naming scheme
+│                              shared with dbt_dispatch.rs). Embeds FEX-Emu
 │                              (ARM64 → x86_64 dynamic binary translator) as no_std
 │                              static library; host OS deps (malloc/pthread/file I/O)
 │                              replaced by FexHostBindings (bump arena + FexSpinLock)
@@ -665,8 +691,170 @@ hypervisor/src/
 │                              vkGetPhysicalDeviceProperties returns matching vendor's
 │                              PCI ID; no software-rendering fallback;
 │                              ro.build.type=user.
+├── x86_hw_validation.rs ← ch54: x86 Tier Hardware Validation — capstone of the x86 tier.
+│                              Intel (Core Ultra 7 165H, Meteor Lake-H) AND AMD (Ryzen 9 7950X,
+│                              Raphael) must both independently boot Android through FEX before
+│                              the gate passes. CpuVendor::from_cpuid_string() (CPUID_VENDOR_INTEL
+│                              "GenuineIntel" / CPUID_VENDOR_AMD "AuthenticAMD"), X86HwTarget,
+│                              X86_INTEL_HW_TARGETS / X86_AMD_HW_TARGETS. X86HwValidationPair
+│                              (per-vendor: foundation_gate_passed + android_booted +
+│                              mapping_changes==invalidations_acked + fex_confirmed + no_workaround;
+│                              record_mapping_change()/mark_invalidation_acked() enforce EPT/NPT
+│                              invariant at runtime). X86HwValidationGate (intel_passed +
+│                              amd_passed + fex_in_hypervisor + no_workaround_accepted +
+│                              build_type_user; passes()/hypervisor_side_ready()).
+│                              X86HwValidationConfig (8 fields; aether_defaults all true except
+│                              workaround_accepted=false; validate emits one error per failing
+│                              check). X86HwValidationError (13 variants).
+│                              X86HwValidationPhase (9 phases, strictly ordered: NotStarted→
+│                              IntelVtxVerified→AmdSvmVerified→BothVendorsVerified→FexModeConfirmed→
+│                              EptNptInvalidationsVerified→IntelAndroidBooted→AmdAndroidBooted→
+│                              GatePassed). 12 UART signature constants.
+│                              X86_HW_VALIDATION_DEFCONFIG (10 entries), X86_HW_VALIDATION_BUILD_VARS
+│                              (5). init_x86_hw_validation() — 8-step pipeline.
+│                              Gate: Intel AND AMD independently boot Android via FEX; EPT/NPT
+│                              invalidation enforced on every mapping change; no workarounds.
+│
+│   — x86 Android Pipeline & Phase-3+ helpers (cross-cutting) —
+├── boot_x86.rs         ← x86_64 boot pipeline: ExitBootServices → EPT/NPT build →
+│                              init_vtx/svm_foundation → VMLAUNCH/VMRUN → first VMEXIT.
+│                              Companion to boot.rs (ARM64) — only compiled on x86_64.
+├── boot_x86_esp.rs     ← UEFI File-Protocol shim — reads files from the ESP at boot time.
+│                              Chains LoadedImage → SimpleFileSystem → root → Open → Read.
+│                              Used by boot_x86 to load \EFI\AETHER\boot.img before
+│                              ExitBootServices; feeds boot_x86_avb::load_boot_img.
+├── boot_x86_avb.rs     ← x86-tier Android boot.img loader (mirrors ARM64 avb_boot.rs).
+│                              Parses v3/v4 header, AVB-verifies (structural), copies kernel +
+│                              ramdisk into guest RAM, returns X86BootImgLayout for the DBT
+│                              dispatcher to consume on the first VMRUN/VMRESUME.
+├── android_boot.rs     ← boot.img discovery & layout (target-arch-agnostic). Scans a memory
+│                              region for "ANDROID!" magic and returns AndroidBootLayout
+│                              (header_pa/kernel_pa/kernel_size/ramdisk_pa/ramdisk_size/
+│                              header_version). Used by both the ARM64 ERET path and the
+│                              x86 FEX path to locate the kernel payload.
+├── android_handoff.rs  ← Phase 4: x86-tier Android handoff — boot.img scan + DTB build +
+│                              FEX initial GPR file. The x86-side analogue of ARM64's
+│                              GuestLaunch / prepare_linux_boot pair.
+├── android_runtime.rs  ← Phase 6: live Android lifecycle orchestrator. UART line buffer +
+│                              per-subsystem scanners + aggregate gate that combines
+│                              userspace_boot / adreno_render / phone_bridge / app_compat
+│                              signals into a single "Android is live" readiness signal.
+├── smp.rs              ← ch35: Multi-Core SMP — secondary core bring-up, spin table,
+│                              PSCI CPU_ON dispatch. Each secondary core enters at the spin
+│                              table address, picks up its MPIDR slot, and installs the EL2
+│                              vector table before EL1 release.
+├── virtio.rs           ← Phase 3: virtio-mmio transport common — register layout,
+│                              virtqueue (avail/used rings, descriptor table), chain walker.
+│                              Reused by virtio_blk and any future virtio device.
+├── virtio_blk.rs       ← Phase 3: read-only virtio-blk device — memory-backed paravirt
+│                              block device used during early Android bring-up (boot.img /
+│                              vbmeta / initrd staging) before NVMe passthrough is wired.
+├── mmio_emu.rs         ← Phase 5: MMIO emulation table — PL011 UART, GIC stubs, virtio_blk
+│                              routing. Single dispatch point for guest MMIO accesses that
+│                              the hypervisor handles in software (vs. passthrough).
+├── dbt_dispatch.rs     ← Phase 5: VMEXIT → FEX translate/dispatch loop + MMIO routing.
+│                              The x86-tier inner loop: on every VMEXIT, classify
+│                              (HLT/CPUID/EPT/NPF/IO/MMIO), translate the next ARM64 block
+│                              via dbt_integration, dispatch through the JIT cache, route
+│                              MMIO via mmio_emu, VMRESUME/VMRUN back into the guest.
 │
 │   — Part XI: Installer & Management (Chapters 55–64) —
+├── aether_installer.rs ← ch56: AETHER Installer CLI — spec module mirroring the userland
+│                              binary at tools/aether-install/. Subcommand (Check/Install/
+│                              Uninstall/Update/Status; is_destructive()), InstallerSafetyMode
+│                              (DryRun|Apply), InstallStep (8 ordered steps: CompatReport→
+│                              GpuPlan→NvmeNamespaceCreated→EspBinaryWritten→BootEntryRegistered→
+│                              InstallStatePersisted→MokEnrolled→HypervisorObserved),
+│                              InstallerConfig (min_disk_bytes=32 GiB / default_safety=DryRun /
+│                              forbid_network_for_non_update=true), InstallerGate (6 booleans),
+│                              InstallerError (14 variants — DisableSecureBootForbidden is the
+│                              tripwire: the installer NEVER instructs the user to disable
+│                              Secure Boot), InstallerPhase (11 phases, strictly monotonic),
+│                              check_safety() (refuses destructive without --apply AND refuses
+│                              --apply on read-only subcommands). 8 UART signature constants.
+│                              Inviolables: dry-run default, never disable Secure Boot (shim+MOK
+│                              per ch57), no background network, idempotent (resumes from
+│                              install-state.json), Windows partition untouched.
+├── setup_wizard.rs     ← ch59: Setup Wizard GUI Frontend — first-boot configuration UI
+│                              rendered by the hypervisor on the GOP framebuffer BEFORE the
+│                              Android partition launches. Six forward-pass steps: Language /
+│                              Keyboard layout / Time zone / Bridge Mode default / Sensor
+│                              profile / Confirmation. Outcome persisted via six UEFI variables
+│                              (AETHER_VARIABLE_GUID): AetherSetupComplete/AetherLanguage/
+│                              AetherKbLayout/AetherTimeZone/AetherBridgeMode/AetherSensorProfile.
+│                              Wizard skipped on subsequent boots when AetherSetupComplete==1.
+│                              Pre-population fast-path: WizardState::try_apply_preconfig
+│                              (PreconfigInput) consumes setup-config.json written to the ESP
+│                              by the Windows-side aether-setup GUI installer and
+│                              short-circuits the five choice steps; steps 6–7 (image manifest
+│                              verify + UEFI variable persistence) still execute.
+│                              WizardSelections (fixed-size ASCII buffers + enums, no heap),
+│                              BridgeModeDefault (Off/On), SensorProfile (Stationary/InHand/
+│                              Driving), LANGUAGE_OPTIONS (10), KEYBOARD_LAYOUT_OPTIONS (5),
+│                              REGION_OPTIONS (7 IANA tz). WizardConfig (per_step_timeout_secs=
+│                              600 / enforce_no_network=true — false rejected per No-Boundary).
+│                              WizardGate (framebuffer_painted + all_steps_acknowledged +
+│                              selections_persisted + no_network_round_trip). WizardError
+│                              (12 variants). WizardPhase (9 phases, strictly monotonic).
+│                              8 UART signature constants. init_setup_wizard() — 8-step pipeline.
+│                              Inviolables: no remote font/asset fetch, no network round-trip,
+│                              no Google/Apple/MS account credential capture.
+├── configuration_app.rs ← ch60: Configuration App — post-install runtime config surface.
+│                              Persists Bridge Mode toggle, sensor profile, fingerprint
+│                              elimination strictness, OTA channel, etc. via the same UEFI
+│                              variable namespace as the Setup Wizard. ConfigKey + ConfigValue
+│                              (typed: U8/U32/AsciiStr) + ConfigChange record. ConfigApp
+│                              Config/Gate/Error/Phase. Read paths lock-free (Android-side
+│                              queries are hot); write paths take a global spinlock. Recovery
+│                              mode (ch62) can reset all values to aether_defaults().
+├── ota_update.rs       ← ch61: OTA Update System — A/B slot update flow with rollback.
+│                              SlotA/SlotB targets, OtaImage (boot.img + system.img +
+│                              vendor.img + vbmeta.img + product.img), AVB chain verification
+│                              on the inactive slot BEFORE slot switch. Rollback uses ch58's
+│                              boot-attempt counter (≥3 failed boots → revert). OtaPhase:
+│                              Idle→Downloaded→Verified→SlotSwitched→BootedNewSlot→Confirmed
+│                              (Confirmed only after one successful boot of the new slot).
+│                              End-to-end executor: run_ota_pipeline() drives Idle→Downloaded→
+│                              Verified→SlotSwitched with real NVMe writes to the target slot,
+│                              vbmeta structural verification, and UEFI variable updates
+│                              (AetherActiveSlot/AetherOtaPhase/AetherRollbackIndex).
+│                              confirm_new_slot_after_boot() closes the gate post-reboot by
+│                              clearing AetherBootAttempt. Integration via OtaRuntime trait;
+│                              tests use the in-module MockRuntime. OtaError covers download
+│                              failure / signature mismatch / disk full / partial write.
+├── recovery_mode.rs    ← ch62: Recovery Mode — boot-loop trap + factory reset + sideload
+│                              entry. Triggered by ch58's rollback guard OR by holding
+│                              Ctrl+Alt+Tab at the boot selector. Renders on GOP framebuffer
+│                              (same painter as ch58/ch59). RecoveryAction: NoOp /
+│                              ReturnToSelector / FactoryReset (wipes userdata partition) /
+│                              Sideload (accept a signed boot.img from USB ESP) / SlotRollback
+│                              (revert to previous A/B slot). Every destructive action requires
+│                              a typed confirmation phrase.
+│                              End-to-end executor: execute_recovery_action() — FactoryReset
+│                              (zeros userdata sectors + deletes AetherSetupComplete);
+│                              Sideload (verifies signature via SideloadSource::verify_signature,
+│                              writes to inactive slot, flips AetherActiveSlot); SlotRollback
+│                              (reads + flips active-slot variable); ReturnToSelector (warm
+│                              reset). Destructive paths refuse to run without
+│                              gate.confirmation_passed. Integration via RecoveryRuntime trait.
+├── aether_manager.rs   ← ch63: AETHER Manager Android App — Android-side companion app.
+│                              Lives in /system/priv-app; surfaces VirtualSensorSuite tuning,
+│                              Bridge Mode toggle, identity feed (IMEI/MAC), and OTA controls
+│                              to the user. Talks to the hypervisor via the HVC vendor range
+│                              (ch64). PackageMetadata (package=com.aether.manager, minSdk=33,
+│                              targetSdk=34, signature=AETHER_PLATFORM_KEY), required
+│                              permissions, SELinux contexts. ch63's hypervisor-side
+│                              declaration is the spec; the actual app source lives under
+│                              packages/apps/AetherManager/ in AOSP.
+├── hvc_paravirt_abi.rs ← ch64: HVC Paravirt ABI — formalises the AETHER HVC vendor range
+│                              0x8600_0001–0x8600_0006 as a typed ABI. AetherHvcFn enum
+│                              (GetVersion / BridgeModeGet / BridgeModeSet / SensorRead /
+│                              UpdateStage / DiagLogRead), HvcArg / HvcRet typed registers,
+│                              version compatibility check (caller passes the AETHER ABI
+│                              version it was built against → hypervisor refuses cross-version
+│                              calls). Mirrors x86 path (vendor range 0x8600_xxxx via
+│                              VMMCALL/VMCALL) and ARM64 path (HVC immediate via SMCCC
+│                              vendor range).
 ├── uefi_boot_selector.rs ← ch58: UEFI Boot Selector — 5-second countdown menu on GOP
 │                              framebuffer. [A]ndroid / [W]indows / [S]ettings. Default
 │                              stored in AetherDefaultTarget UEFI variable (NV+BS+RT).
@@ -719,6 +907,45 @@ qemu/
 ├── run.sh              ← smoke test (boots to "Hypervisor ready." banner)
 └── run-ch34.sh         ← ch34 gate test — loads GKI Image at KERNEL1_PA,
                            boots to /bin/sh on QEMU serial console
+
+tools/
+├── compat-check/       ← aether-compat — host-side compatibility checker;
+│                         emits JSON for aether-install
+├── aether-install/     ← ch56 binary — std Rust CLI installer
+│   └── src/            ← check / install / uninstall / update / status
+│                         subcommands; NVMe namespace creation, ESP writes,
+│                         UEFI BootEntry registration, MOK enrolment
+└── aether-setup/       ← ch56 + ch59 Windows GUI front-end (eframe/egui).
+    │                     The downloadable end-user .exe. Wraps aether-
+    │                     install as a subprocess; pre-populates ch59
+    │                     selections via setup-config.json on the ESP.
+    ├── build.rs        ← embeds UAC manifest (requireAdministrator)
+    ├── Cargo.toml
+    └── src/
+        ├── main.rs         ← eframe::run_native entry; windows_subsystem
+        │                     hides the console on release
+        ├── app.rs          ← SetupApp — top-level Step state machine
+        ├── theme.rs        ← AETHER amber accent on dark slate
+        ├── installer.rs    ← Subprocess wrapper around aether-install;
+        │                     spawn_install() + InstallProgress shared
+        │                     buffer for the live log pane
+        ├── hwlist.rs       ← Disk enumeration via `wmic diskdrive`
+        ├── setup_config.rs ← SetupConfig + JSON contract for the
+        │                     hypervisor's ch59 preconfig fast-path
+        └── steps/
+            ├── mod.rs      ← Step enum (Welcome → Eula → Compat → Disk
+            │                 → Wizard → Confirm → Progress → Done)
+            ├── welcome.rs  ← branding + ground rules
+            ├── eula.rs     ← license acceptance checkbox
+            ├── compat.rs   ← spawns `aether-install --json check`
+            ├── disk.rs     ← target disk picker
+            ├── wizard.rs   ← ch59 selections: language / keyboard /
+            │                 timezone / bridge mode / sensor profile
+            ├── confirm.rs  ← review + Dry Run / Apply toggle; writes
+            │                 setup-config.json to %TEMP%\aether-setup\
+            ├── progress.rs ← sticky-bottom live log of aether-install
+            │                 stdout+stderr
+            └── done.rs     ← reboot + MOK enrolment instructions
 ```
 
 ---
@@ -979,7 +1206,19 @@ components = ["rust-src"]
 3. Read the listed primary sources (ARM ARM, GIC spec, SMMU spec, Linux KVM source)
 4. Review the Common AI Mistakes and Verification Protocol sections
 
-**Next chapters to implement:** 57 (Secure Boot Integration), 58 (UEFI Boot Selector), 59 (Setup Wizard GUI).
+**Next chapters to implement:** 65 (Security Hardening), 66 (Performance Optimization), 67 (Fingerprint Elimination Audit), 68 (CI/CD Pipeline), 69 (Documentation), 70 (Public Release).
+
+---
+
+## End-to-end executors (ch61 / ch62 / ch59 preconfig)
+
+Several chapters originally landed as state-machine + UART scanner only (mirroring ch58's split between the hypervisor-side gate and a companion EFI app). The following modules now also expose a **real executor** that performs the side effects, parallel to `avb_boot::run_avb_boot_pipeline`:
+
+- **`ota_update::run_ota_pipeline`** (ch61) — drives `Idle → Downloaded → Verified → SlotSwitched` with real NVMe writes to the target slot, vbmeta structural verification, and UEFI variable updates (`AetherActiveSlot`, `AetherOtaPhase`, `AetherRollbackIndex`). `confirm_new_slot_after_boot` closes the gate post-reboot by clearing `AetherBootAttempt`. Integration via the `OtaRuntime` trait — EFI host plugs in; tests use the in-module `MockRuntime`.
+- **`recovery_mode::execute_recovery_action`** (ch62) — real implementations of `FactoryReset` (zeros userdata sectors + deletes `AetherSetupComplete`), `Sideload` (verifies signature via `SideloadSource::verify_signature`, writes to inactive slot, flips `AetherActiveSlot`), `SlotRollback` (reads + flips the active-slot variable), and `ReturnToSelector` (warm reset). Destructive paths refuse to run without `gate.confirmation_passed`. Integration via `RecoveryRuntime` trait.
+- **`setup_wizard::WizardState::try_apply_preconfig`** (ch59) — fast-forwards the five interactive choice phases (`LanguageChosen … SensorProfileChosen`) when the ch56 GUI installer (`tools/aether-setup/`) has pre-populated user preferences in `setup-config.json` on the ESP. Steps 6–7 (image manifest verify, UEFI variable persistence) still execute. Takes a `PreconfigInput<'a>` so the EFI host parses the JSON and hands typed bytes.
+
+Both `OtaRuntime` and `RecoveryRuntime` follow the same pattern as `avb_boot`'s pipeline: trait-based integration boundary so the destructive code stays unit-testable, with all UART signature emissions wired through `emit_uart_line` so the existing `process_line()` gate engages without needing a separate UART tap on hardware.
 
 ---
 
