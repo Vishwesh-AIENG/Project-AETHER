@@ -62,3 +62,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: Soong bootstrap
 **Outcome**: 6:20 — kernel OOM killer fired; `soong_build` total-vm 37 GB, anon-rss 15 GB inside a 15 GiB WSL allocation
 **Fix for run 10**: `C:\Users\<user>\.wslconfig` with `memory=26GB swap=24GB processors=8`; `wsl --shutdown`. No repo change. Free RAM went from 0 → ~24 GiB.
+
+## Run 10
+
+**Phase**: Kati 100%
+**Outcome**: 4:50 — `vendor/microg/GmsCore/Android.mk:29: error: writing to readonly directory "vendor/microg/GmsCore/play-services-core/build/.../release-unsigned.apk"`. Upstream microG uses Gradle which targets paths under the source tree; AOSP `--werror_writable` forbids that.
+**Fix for run 11**: commented out `GmsCore/FakeStore/GsfProxy/UnifiedNlp` from `device.mk` `PRODUCT_PACKAGES` AND renamed `vendor/microg/GmsCore/Android.mk` -> `.disabled` so Kati's recursive walk doesn't even parse it. microG defers until proper `Android.bp` shims exist.
