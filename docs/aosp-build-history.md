@@ -98,3 +98,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja early
 **Outcome**: second outage; sweep deleted another 411 corrupt jars.
 **Fix for run 16**: hardware-watchdog protections installed — `sync_loop.sh` (every 30s `sync` of WSL ext4 page cache) and a Windows Ctrl+Alt+S hotkey running `emergency_shutdown.ps1` which pauses build procs (SIGSTOP) + sync x3 + `wsl --shutdown` for a clean unmount. Caps outage damage from ~5 min of in-flight writes to ~30 s.
+
+## Run 16
+
+**Phase**: re-spawn check
+**Outcome**: sanity-restart confirmed sync_loop + hotkey wiring before further iteration.
+**Fix for run 17**: none.
