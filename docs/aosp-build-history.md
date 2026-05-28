@@ -80,3 +80,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja (real compile)
 **Outcome**: ran clean for the first time. Compile phase begun.
 **Fix for run 13**: none; this run was healthy.
+
+## Run 13
+
+**Phase**: ninja mid-compile
+**Outcome**: cut at ~1.5 hours, 36% absolute. Recovery sweep deleted 82 zero-length intermediates from in-flight writes.
+**Fix for run 14**: `wsl-scripts/repair_and_resume.sh` (zero-length + lock sweep) + restart. `.ninja_log` (22 MB) survived.
