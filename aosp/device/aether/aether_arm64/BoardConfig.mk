@@ -41,11 +41,12 @@ TARGET_NO_KERNEL            := false
 TARGET_NO_RADIOIMAGE        := true
 
 # ── Bootloader / kernel ───────────────────────────────────────────────────────
-# AETHER supplies its own kernel under kernel/aether-gki/. The build system
-# expects the kernel binary at TARGET_PREBUILT_KERNEL when not building from
-# source. Leave unset to let the build pick up a prebuilt Image from the kernel
-# directory once that drop is wired in.
-# TARGET_PREBUILT_KERNEL    := kernel/aether-gki/Image
+# AETHER's own GKI defconfig (ch44 kernel_defconfig.rs) is not yet built as a
+# binary. Per the project briefing — "Don't try to build the AETHER GKI kernel
+# until a generic GKI Image gets you to the dispatch loop. Premature
+# optimization." The kernel binary is installed via PRODUCT_COPY_FILES in
+# device.mk (AOSP 14 dropped TARGET_PREBUILT_KERNEL; the build system now
+# requires the kernel to land at $(PRODUCT_OUT)/kernel via PRODUCT_COPY_FILES).
 
 BOARD_KERNEL_CMDLINE        := \
     androidboot.hardware=aether \
@@ -58,6 +59,14 @@ BOARD_KERNEL_BASE           := 0x40000000
 BOARD_KERNEL_PAGESIZE       := 4096
 BOARD_RAMDISK_OFFSET        := 0x01000000
 BOARD_KERNEL_TAGS_OFFSET    := 0x00000100
+
+# vendor_boot.img header version. AOSP boot.img picks this up automatically
+# from BOARD_BOOT_HEADER_VERSION via INTERNAL_MKBOOTIMG_VERSION_ARGS, but the
+# vendor_boot.img rule (build/make/core/Makefile:1672) only consumes
+# BOARD_MKBOOTIMG_ARGS — so we must pass --header_version here explicitly,
+# otherwise mkbootimg fails with:
+#   ValueError: --vendor_boot not compatible with given header version
+BOARD_MKBOOTIMG_ARGS        := --header_version $(BOARD_BOOT_HEADER_VERSION)
 
 # ── Partition sizes (bytes) ───────────────────────────────────────────────────
 # Mirrors BoardPartitionSizes::AETHER_DEFAULT exactly. Hypervisor-side validator
@@ -108,19 +117,32 @@ BOARD_AVB_ALGORITHM                     := SHA256_RSA4096
 BOARD_AVB_KEY_PATH                      := external/avb/test/data/testkey_rsa4096.pem
 BOARD_AVB_ROLLBACK_INDEX                := 0
 BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS        += --flags 0
-BOARD_AVB_VBMETA_SYSTEM                 := system product
-BOARD_AVB_VBMETA_SYSTEM_KEY_PATH        := external/avb/test/data/testkey_rsa4096.pem
-BOARD_AVB_VBMETA_SYSTEM_ALGORITHM       := SHA256_RSA4096
-BOARD_AVB_VBMETA_SYSTEM_ROLLBACK_INDEX  := 0
-BOARD_AVB_VBMETA_VENDOR                 := vendor
-BOARD_AVB_VBMETA_VENDOR_KEY_PATH        := external/avb/test/data/testkey_rsa4096.pem
-BOARD_AVB_VBMETA_VENDOR_ALGORITHM       := SHA256_RSA4096
-BOARD_AVB_VBMETA_VENDOR_ROLLBACK_INDEX  := 0
+BOARD_AVB_VBMETA_SYSTEM                          := system product
+BOARD_AVB_VBMETA_SYSTEM_KEY_PATH                 := external/avb/test/data/testkey_rsa4096.pem
+BOARD_AVB_VBMETA_SYSTEM_ALGORITHM                := SHA256_RSA4096
+BOARD_AVB_VBMETA_SYSTEM_ROLLBACK_INDEX           := 0
+# Chained-partition slot index. AVB descriptors are stored in vbmeta_system
+# at this slot to verify the system+product chain; index 0 is the main
+# vbmeta, so chained slots start at 1.
+BOARD_AVB_VBMETA_SYSTEM_ROLLBACK_INDEX_LOCATION  := 1
+
+BOARD_AVB_VBMETA_VENDOR                          := vendor
+BOARD_AVB_VBMETA_VENDOR_KEY_PATH                 := external/avb/test/data/testkey_rsa4096.pem
+BOARD_AVB_VBMETA_VENDOR_ALGORITHM                := SHA256_RSA4096
+BOARD_AVB_VBMETA_VENDOR_ROLLBACK_INDEX           := 0
+BOARD_AVB_VBMETA_VENDOR_ROLLBACK_INDEX_LOCATION  := 2
 
 # ── SELinux ───────────────────────────────────────────────────────────────────
 # Required: BoardConfigMk::AETHER_DEFAULT.selinux_policy = Enforcing.
 # Hardware Authenticity (CLAUDE.md): SELinux always enforcing in production.
 BOARD_SEPOLICY_DIRS += device/aether/aether_arm64/sepolicy
+
+# ── VINTF device manifest ─────────────────────────────────────────────────────
+# AOSP 14 requires the vendor VINTF manifest to be declared here, NOT copied
+# via PRODUCT_COPY_FILES (which now errors out at Kati time:
+#   "VINTF metadata found in PRODUCT_COPY_FILES … use DEVICE_MANIFEST_FILE")
+# The build system handles the install to vendor/etc/vintf/manifest.xml.
+DEVICE_MANIFEST_FILE := device/aether/aether_arm64/manifest.xml
 
 # ── Treble VNDK ───────────────────────────────────────────────────────────────
 # AETHER's vendor partition is separate from system (ch21 PartitionLayout).
