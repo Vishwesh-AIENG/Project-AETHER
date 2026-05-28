@@ -128,3 +128,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja late
 **Outcome**: `assemble_vintf` rejected `<kernel target-level="7" version="5.15.0"/>` because device manifest declared `target-level="7"` too — "Device manifest with level 7 must not set kernel level 7."
 **Fix for run 21**: removed the `target-level` attribute from the `<kernel>` tag. When omitted, the kernel inherits the device target-level.
+
+## Run 21
+
+**Phase**: ninja late
+**Outcome**: `checkfc` rejected `u:object_r:hal_telephony_default_exec:s0` on the radio service file. AOSP 14 renamed the HIDL radio HAL's exec type to `hal_radio_default_exec`.
+**Fix for run 22**: `sepolicy/file_contexts` updated for the radio binary; the other four HALs (`sensors/camera/power/health`) were validated to still use their original `hal_*_default_exec` names.
