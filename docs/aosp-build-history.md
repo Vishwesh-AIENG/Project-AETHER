@@ -104,3 +104,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: re-spawn check
 **Outcome**: sanity-restart confirmed sync_loop + hotkey wiring before further iteration.
 **Fix for run 17**: none.
+
+## Run 17
+
+**Phase**: ninja early (kapt fail again)
+**Outcome**: extended sweep across `.srcjar/.aar/.ziplist` (originally only `.jar/.apk/.zip`) found 526 corrupt host-side tool jars under `out/host/linux-x86/framework/`. These came from the forced `wsl --shutdown` during an earlier VM hang — Hyper-V abandoned mid-write to the vhdx.
+**Fix for run 18**: `wsl-scripts/sweep_corrupt_jars.sh` widened to cover those archive extensions.
