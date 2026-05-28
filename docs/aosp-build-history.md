@@ -50,3 +50,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: Kati late
 **Outcome**: 1:30 — `vbmeta_system` + `vbmeta_vendor` chain partitions need explicit rollback index locations
 **Fix for run 8**: `BoardConfig.mk` set `BOARD_AVB_VBMETA_SYSTEM_ROLLBACK_INDEX_LOCATION := 1` and `BOARD_AVB_VBMETA_VENDOR_ROLLBACK_INDEX_LOCATION := 2`.
+
+## Run 8
+
+**Phase**: Kati 100% / writing module rules
+**Outcome**: 1:45 — `build/make/core/base_rules.mk:497: error: overriding commands for target out/.../vendor/etc/vintf/manifest.xml`. Soong's `prebuilt_etc { name: "aether_vendor_manifest" }` collided with Make's `DEVICE_MANIFEST_FILE`.
+**Fix for run 9**: removed the `aether_vendor_manifest` `prebuilt_etc` block from `Android.bp`; `DEVICE_MANIFEST_FILE` is the canonical Treble path because it triggers `assemble_vintf` to merge with per-HAL fragments.
