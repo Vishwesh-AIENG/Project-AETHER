@@ -85,10 +85,13 @@ unsafe fn fb_fill(rgb: u32) {
 //
 //   FB_RED  paints red  on this hardware (was 0xFF0000 → showed as blue)
 //   FB_BLUE paints blue on this hardware (was 0x0000FF → showed as red)
-const FB_GREEN: u32 = 0x00_00FF00;
-const FB_RED:   u32 = 0x00_0000FF;   // hardware-corrected (was 0xFF0000)
-const FB_AMBER: u32 = 0x00_FFAA00;
-const FB_BLUE:  u32 = 0x00_FF0000;   // hardware-corrected (was 0x0000FF)
+// FB_RED is the only color still actively used (halt()). The others are
+// kept in the file as documented constants for future diagnostic helpers
+// that don't wipe the screen — fb_fill() is destructive to dual_puts text.
+#[allow(dead_code)] const FB_GREEN:  u32 = 0x00_00FF00;
+                    const FB_RED:    u32 = 0x00_0000FF; // hardware-corrected (was 0xFF0000)
+#[allow(dead_code)] const FB_AMBER:  u32 = 0x00_FFAA00;
+#[allow(dead_code)] const FB_BLUE:   u32 = 0x00_FF0000; // hardware-corrected (was 0x0000FF)
 #[allow(dead_code)] const FB_PURPLE: u32 = 0x00_8000FF;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -169,6 +172,7 @@ unsafe fn checkpoint(color: u32, beeps: u32, freq_hz: u32) {
 ///   step 8  -> 1200 Hz                 past init_svm_foundation
 ///   step 9  -> 1500 Hz  (highest)      past translator_dbt_init
 ///   then BLUE + 2 beeps @ 1100 Hz = entering VMRUN loop.
+#[allow(dead_code)]
 unsafe fn bisect(step: u32) {
     let freq = match step {
         2 => 500,
@@ -1461,7 +1465,6 @@ unsafe fn boot_amd(
         dual_puts(b"[x86] translator runtime initialised (JIT = ");
         dual_puthex64(JIT_CACHE_BASE_PA_AMD);
         dual_puts(b")\n");
-        bisect(9);
 
         // Phase 5b: AMD VMRUN is round-trip — control returns here on every
         // VMEXIT with host state restored from HSAVE. Loop: classify exit,
@@ -1470,10 +1473,9 @@ unsafe fn boot_amd(
         // The loop body deliberately re-reads VMCB fields after every VMRUN
         // because emulation may have updated them (e.g. EXITINFO2 for NPF).
         dual_puts(b"[x86] VMRUN dispatch loop start\n");
-        // BLUE flash + 2 beeps before the first VMRUN. If user sees blue
-        // and hears 2 beeps, every host-side setup step (EBS, NPT identity
-        // map, VMCB build, HSAVE, MSR setup, translator init) succeeded.
-        checkpoint(FB_BLUE, 2, 1100);
+        // BLUE flash + 2 beeps removed — fb_fill(FB_BLUE) wipes every line
+        // printed above. The "VMRUN dispatch loop start" banner now serves
+        // the same role visibly on the framebuffer.
         const MAX_VMRUN_ITERATIONS: u64 = 1_000_000;
         let mut iter: u64 = 0;
         loop {
