@@ -9,7 +9,10 @@
 
 # AETHER virtual HAL services — install path /vendor/bin/hw/
 /vendor/bin/hw/aether\.sensors@2\.1-service     u:object_r:hal_sensors_default_exec:s0
-/vendor/bin/hw/aether\.radio@2\.0-service       u:object_r:hal_telephony_default_exec:s0
+# AOSP 14 renamed hal_telephony_default_exec -> hal_radio_default_exec for the
+# android.hardware.radio HIDL HAL. checkfc rejects unknown types at build time
+# ("type hal_telephony_default_exec is not defined").
+/vendor/bin/hw/aether\.radio@2\.0-service       u:object_r:hal_radio_default_exec:s0
 /vendor/bin/hw/aether\.camera@2\.7-service      u:object_r:hal_camera_default_exec:s0
 /vendor/bin/hw/aether\.power@5-service          u:object_r:hal_power_default_exec:s0
 /vendor/bin/hw/aether\.health@2\.1-service      u:object_r:hal_health_default_exec:s0
