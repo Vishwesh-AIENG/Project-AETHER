@@ -74,3 +74,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja early
 **Outcome**: 3:33 — `ninja: 'out/target/product/aether_arm64/kernel', needed by 'boot.img', missing and no known rule`. Tried `TARGET_PREBUILT_KERNEL` in BoardConfig.mk first but grep showed AOSP 14 build/make/core/Makefile no longer consumes that variable.
 **Fix for run 12**: switched to `PRODUCT_COPY_FILES += device/linaro/dragonboard-kernel/android-6.1/Image.gz:kernel` in `device.mk`. AOSP 14's mechanism is to require the kernel to already exist at `$(PRODUCT_OUT)/kernel`, populated by the device tree via `PRODUCT_COPY_FILES`.
+
+## Run 12
+
+**Phase**: ninja (real compile)
+**Outcome**: ran clean for the first time. Compile phase begun.
+**Fix for run 13**: none; this run was healthy.
