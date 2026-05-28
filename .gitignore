@@ -32,3 +32,7 @@ aether-translator/fuzz/Cargo.lock
 # ESP-staging produced by wsl-scripts/phase6_partial.sh — contains rebuildable
 # PE32+ EFI binaries that are outputs of `cargo build`, not source.
 esp-staging/
+
+# Built installer artifacts (ch56 GUI). Reproducible from source via:
+#   cargo build --release -p aether-install -p aether-setup
+/dist/
