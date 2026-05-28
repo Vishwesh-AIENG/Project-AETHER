@@ -667,6 +667,68 @@ impl WizardState {
         self.gate.images_present = true;
         self.advance_phase(WizardPhase::ImagesVerified)
     }
+
+    /// Apply a pre-populated selection set captured by the Windows-side
+    /// `aether-setup` GUI installer (ch56 sibling) and short-circuit the
+    /// EL2 wizard. The boot-time runtime parses setup-config.json from the
+    /// ESP root and hands the typed result here. After this returns Ok
+    /// the wizard skips straight past LanguageChosen … SensorProfileChosen
+    /// to SetupComplete on the next process_line() that observes
+    /// `WIZ_UART_SIG_IMAGES_OK` + `WIZ_UART_SIG_SETUP_COMPLETE`.
+    ///
+    /// The hypervisor still owns image verification (Step 6) and the
+    /// AetherSetupComplete persistence (Step 7) — pre-config short-circuits
+    /// only the interactive choice steps, not the post-install gates.
+    pub fn try_apply_preconfig(
+        &mut self,
+        preconfig: &PreconfigInput,
+    ) -> Result<(), WizardError> {
+        self.selections.set_language(preconfig.language)?;
+        self.selections.set_kb_layout(preconfig.keyboard_layout)?;
+        self.selections.set_timezone(preconfig.timezone)?;
+        self.selections.bridge_default = preconfig.bridge_mode;
+        self.selections.sensor_profile = preconfig.sensor_profile;
+        // Phase machine fast-forward: framebuffer is still required (Step
+        // 6 paints a "Welcome back — using your preferences" splash); the
+        // five choice phases get acknowledged in one shot here.
+        self.advance_phase(WizardPhase::LanguageChosen)?;
+        self.advance_phase(WizardPhase::KbLayoutChosen)?;
+        self.advance_phase(WizardPhase::TimezoneChosen)?;
+        self.advance_phase(WizardPhase::BridgeModeChosen)?;
+        self.advance_phase(WizardPhase::SensorProfileChosen)?;
+        self.gate.all_steps_acknowledged = true;
+        Ok(())
+    }
+}
+
+/// Wire-format-independent input to `try_apply_preconfig`. The EFI host
+/// parses setup-config.json (or a future binary form) and constructs one
+/// of these. Lifetimes are tied to the parsed source so the hypervisor
+/// does not need a heap.
+pub struct PreconfigInput<'a> {
+    pub language:        &'a [u8],
+    pub keyboard_layout: &'a [u8],
+    pub timezone:        &'a [u8],
+    pub bridge_mode:     BridgeModeDefault,
+    pub sensor_profile:  SensorProfile,
+}
+
+impl<'a> PreconfigInput<'a> {
+    /// Sanity-check that fields are non-empty and within the per-field
+    /// ASCII length budget. Stronger validation (option-table membership)
+    /// happens inside `try_apply_preconfig` via WizardSelections::set_*().
+    pub fn validate(&self) -> Result<(), WizardError> {
+        if self.language.is_empty() || self.language.len() > WIZARD_LANGUAGE_MAX {
+            return Err(WizardError::UnknownLanguage);
+        }
+        if self.keyboard_layout.is_empty() || self.keyboard_layout.len() > WIZARD_KB_LAYOUT_MAX {
+            return Err(WizardError::UnknownKeyboardLayout);
+        }
+        if self.timezone.is_empty() || self.timezone.len() > WIZARD_TIMEZONE_MAX {
+            return Err(WizardError::InvalidTimezone);
+        }
+        Ok(())
+    }
 }
 
 // ── FramebufferPainter — actual GOP framebuffer drawing ──────────────────────
@@ -1047,6 +1109,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    extern crate alloc;
     fn make_buf(w: u32, h: u32) -> alloc::vec::Vec<u32> {
         alloc::vec![0u32; (w * h) as usize]
     }

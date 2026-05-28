@@ -248,6 +248,177 @@ pub fn init_recovery_mode(
     Ok(RecoveryState::new(*cfg, reason))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// End-to-end execution
+//
+// Everything above models recovery as a state machine + UART gate. The items
+// below DRIVE the destructive operations: NVMe writes that zero userdata,
+// NVMe writes that flash a sideloaded boot.img, UEFI variable writes that
+// flip AetherActiveSlot, and the warm reset that exits recovery.
+//
+// All side effects go through RecoveryRuntime; the EFI host implements it
+// against EFI_RT->SetVariable and the NVMe Submission Queue. Tests use the
+// in-memory mock at the bottom of this file.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// LBA range descriptor — local copy so this module compiles on x86_64
+/// host tests too (avb_boot is `#[cfg(target_arch = "aarch64")]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartitionSlotLba {
+    pub start_lba: u64,
+    pub lba_count: u64,
+}
+
+pub const UEFI_VAR_AETHER_ACTIVE_SLOT:        &[u8] = b"AetherActiveSlot";
+pub const UEFI_VAR_AETHER_BOOT_ATTEMPT:       &[u8] = b"AetherBootAttempt";
+pub const UEFI_VAR_AETHER_SETUP_COMPLETE:     &[u8] = b"AetherSetupComplete";
+
+/// LBA ranges this module touches. userdata is wiped on factory reset,
+/// boot_a/boot_b for sideload.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoveryPartitionMap {
+    pub userdata: PartitionSlotLba,
+    pub boot_a:   PartitionSlotLba,
+    pub boot_b:   PartitionSlotLba,
+    pub nsid:     u32,
+}
+
+impl RecoveryPartitionMap {
+    pub fn boot_for_byte(&self, slot_byte: u8) -> PartitionSlotLba {
+        if slot_byte == 0 { self.boot_a } else { self.boot_b }
+    }
+}
+
+/// A buffered sideload image presented to recovery from the EFI System
+/// Partition. The EFI host reads it from \EFI\AETHER\sideload\boot.img and
+/// hands the runtime an accessor.
+pub trait SideloadSource {
+    /// Total sector count (4 KiB each).
+    fn sectors(&self) -> u64;
+    /// Read one 4 KiB sector of the boot image into `dst`.
+    fn read_sector(&mut self, lba: u64, dst: &mut [u8; 4096]) -> Result<(), RecoveryError>;
+    /// Verify the trailing AVB signature on the boot image against the
+    /// platform MOK (set up in ch57). Implementation pulls the boot.img
+    /// trailing vbmeta footer and runs the same RSA path as ch43.
+    fn verify_signature(&self) -> Result<(), RecoveryError>;
+}
+
+/// Abstract integration boundary the EFI host fills in.
+pub trait RecoveryRuntime {
+    fn nvme_write_sector(
+        &mut self, nsid: u32, lba: u64, src: &[u8; 4096],
+    ) -> Result<(), RecoveryError>;
+    fn get_uefi_variable(&self, name: &[u8]) -> Option<[u8; 8]>;
+    fn set_uefi_variable(&mut self, name: &[u8], value: &[u8]) -> Result<(), RecoveryError>;
+    fn delete_uefi_variable(&mut self, name: &[u8]) -> Result<(), RecoveryError>;
+    fn emit_uart_line(&mut self, line: &[u8]);
+    fn reset_system_warm(&mut self) -> !;
+}
+
+/// Run the recovery action selected on the menu. Requires that the gate is
+/// past ConfirmationReceived for destructive actions; non-destructive ones
+/// only need ActionSelected.
+///
+/// Sequence per action:
+///   FactoryReset     → zero every sector in userdata; delete
+///                      AetherSetupComplete; emit DONE; reset_system_warm()
+///   Sideload         → verify signature; write inactive slot's boot
+///                      partition sector-by-sector; flip AetherActiveSlot;
+///                      reset boot-attempt counter; emit DONE; warm reset
+///   SlotRollback     → read AetherActiveSlot; flip; reset boot-attempt
+///                      counter; emit DONE; warm reset
+///   ReturnToSelector → emit EXITED; warm reset
+///   NoOp             → no-op return Ok
+pub fn execute_recovery_action<R: RecoveryRuntime>(
+    state: &mut RecoveryState,
+    runtime: &mut R,
+    map: &RecoveryPartitionMap,
+    sideload: Option<&mut dyn SideloadSource>,
+) -> Result<(), RecoveryError> {
+    // Refuse to execute a destructive action without confirmation.
+    if state.selected.is_destructive() && !state.gate.confirmation_passed {
+        return Err(RecoveryError::ConfirmationMismatch);
+    }
+    if state.phase < RecoveryPhase::ActionSelected {
+        return Err(RecoveryError::PhaseRegression);
+    }
+
+    match state.selected {
+        RecoveryAction::NoOp => Ok(()),
+
+        RecoveryAction::ReturnToSelector => {
+            runtime.emit_uart_line(REC_UART_SIG_EXITED);
+            runtime.reset_system_warm();
+        }
+
+        RecoveryAction::FactoryReset => {
+            let zero = [0u8; 4096];
+            for s in 0..map.userdata.lba_count {
+                runtime
+                    .nvme_write_sector(map.nsid, map.userdata.start_lba + s, &zero)
+                    .map_err(|_| RecoveryError::UserdataWipeFailed)?;
+            }
+            // Setup wizard re-runs on next boot.
+            runtime
+                .delete_uefi_variable(UEFI_VAR_AETHER_SETUP_COMPLETE)
+                .map_err(|_| RecoveryError::VariableWriteError)?;
+            state.mark_action_executed()?;
+            runtime.emit_uart_line(REC_UART_SIG_FACTORY_RESET_DONE);
+            runtime.reset_system_warm();
+        }
+
+        RecoveryAction::Sideload => {
+            let src = sideload.ok_or(RecoveryError::SideloadSignatureInvalid)?;
+            src.verify_signature()?;
+            // Determine inactive slot — write to the one we're NOT booting now.
+            let active_byte = runtime
+                .get_uefi_variable(UEFI_VAR_AETHER_ACTIVE_SLOT)
+                .map(|v| v[0])
+                .unwrap_or(0);
+            let inactive_byte = if active_byte == 0 { 1 } else { 0 };
+            let dst = map.boot_for_byte(inactive_byte);
+
+            let total = src.sectors();
+            if total > dst.lba_count {
+                return Err(RecoveryError::SideloadSignatureInvalid);
+            }
+            let mut buf = [0u8; 4096];
+            for s in 0..total {
+                src.read_sector(s, &mut buf)?;
+                runtime
+                    .nvme_write_sector(map.nsid, dst.start_lba + s, &buf)
+                    .map_err(|_| RecoveryError::UserdataWipeFailed)?;
+            }
+            runtime
+                .set_uefi_variable(UEFI_VAR_AETHER_ACTIVE_SLOT, &[inactive_byte])
+                .map_err(|_| RecoveryError::VariableWriteError)?;
+            runtime
+                .set_uefi_variable(UEFI_VAR_AETHER_BOOT_ATTEMPT, &[0u8])
+                .map_err(|_| RecoveryError::VariableWriteError)?;
+            state.mark_action_executed()?;
+            runtime.emit_uart_line(REC_UART_SIG_SIDELOAD_DONE);
+            runtime.reset_system_warm();
+        }
+
+        RecoveryAction::SlotRollback => {
+            let active_byte = runtime
+                .get_uefi_variable(UEFI_VAR_AETHER_ACTIVE_SLOT)
+                .map(|v| v[0])
+                .ok_or(RecoveryError::NoPreviousSlot)?;
+            let other_byte = if active_byte == 0 { 1 } else { 0 };
+            runtime
+                .set_uefi_variable(UEFI_VAR_AETHER_ACTIVE_SLOT, &[other_byte])
+                .map_err(|_| RecoveryError::VariableWriteError)?;
+            runtime
+                .set_uefi_variable(UEFI_VAR_AETHER_BOOT_ATTEMPT, &[0u8])
+                .map_err(|_| RecoveryError::VariableWriteError)?;
+            state.mark_action_executed()?;
+            runtime.emit_uart_line(REC_UART_SIG_ROLLBACK_DONE);
+            runtime.reset_system_warm();
+        }
+    }
+}
+
 #[inline]
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || haystack.len() < needle.len() {
