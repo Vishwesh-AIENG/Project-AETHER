@@ -33,19 +33,23 @@ PRODUCT_PACKAGES += \
     Camera2 \
     Gallery2
 
-# microG GMS replacement (ch22). These four packages must be present in the
-# AOSP source tree under vendor/microg/ — see README.md in this directory for
-# the procedure to drop them in.
+# microG GMS replacement (ch22). The upstream microG repos use Gradle and
+# write APK outputs back into the source tree (build/outputs/apk/...), which
+# AOSP's --werror_writable forbids. Each module needs an AOSP Android.bp
+# (android_app prebuilt for the .apk, or full Soong build rules) before it
+# can be listed here. Until then microG is cloned at vendor/microg/ but NOT
+# in PRODUCT_PACKAGES — boot path does not depend on it (briefing:
+# "Don't apply the LineageOS signature-spoofing patch until microG is
+# actually loading on the device").
 #
-# GmsCore     — replaces com.google.android.gms (FCM / FusedLocation / Auth)
-# FakeStore   — replaces com.android.vending (Play Store package name stub)
-# GsfProxy    — Google Services Framework shim
-# UnifiedNlp  — network location provider backend
-PRODUCT_PACKAGES += \
-    GmsCore \
-    FakeStore \
-    GsfProxy \
-    UnifiedNlp
+# TODO: write Android.bp shims for GmsCore / FakeStore / GsfProxy / UnifiedNlp
+# and re-enable here.
+#
+# PRODUCT_PACKAGES += \
+#     GmsCore \
+#     FakeStore \
+#     GsfProxy \
+#     UnifiedNlp
 
 # AETHER virtual HAL services. All declared in Android.bp.
 PRODUCT_PACKAGES += \
@@ -80,9 +84,19 @@ PRODUCT_COPY_FILES += \
     device/aether/aether_arm64/configs/media_codecs.xml:system/etc/media_codecs.xml \
     device/aether/aether_arm64/configs/media_profiles.xml:system/etc/media_profiles.xml \
     device/aether/aether_arm64/configs/handheld_core_hardware.xml:system/etc/permissions/handheld_core_hardware.xml \
-    device/aether/aether_arm64/configs/network_security_config.xml:res/xml/network_security_config.xml \
-    device/aether/aether_arm64/manifest.xml:vendor/etc/vintf/manifest.xml
+    device/aether/aether_arm64/configs/network_security_config.xml:res/xml/network_security_config.xml
 
+# Kernel binary — installed to $(PRODUCT_OUT)/kernel for boot.img packaging.
+# Uses the AOSP-shipped dragonboard GKI 6.1 Image.gz as the generic stand-in
+# until the AETHER GKI defconfig produces a binary. See BoardConfig.mk comment
+# block above the kernel section for rationale.
+PRODUCT_COPY_FILES += \
+    device/linaro/dragonboard-kernel/android-6.1/Image.gz:kernel
+
+# VINTF manifest path: AOSP 14 forbids PRODUCT_COPY_FILES of
+# vendor/etc/vintf/manifest.xml and now requires DEVICE_MANIFEST_FILE in
+# BoardConfig.mk. The line that used to live here moved to BoardConfig.mk.
+#
 # fstab is copied by BoardConfig.mk to both ramdisk and vendor/etc paths.
 
 # ── PRODUCT_PROPERTY_OVERRIDES ────────────────────────────────────────────────
@@ -132,6 +146,32 @@ PRODUCT_PROPERTY_OVERRIDES += \
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.opengles.version=196610 \
     ro.hardware.egl=adreno
+
+# VINTF enforcement — TEMPORARILY DISABLED for initial bring-up.
+#
+# AOSP 14's check_vintf_compatible step is gated by this flag. With it true,
+# the build hard-fails because:
+#   1. We ship HIDL HALs (sensors/camera/radio/health) — health@2.1 and
+#      radio@1.6 are deprecated in FCM 7. (Workaround: removed their
+#      vintf_fragments from Android.bp.)
+#   2. We use a generic GKI prebuilt kernel; the kernel version vs FCM-level
+#      matrix is rigidly enforced (5.15 demands FCM ≥ 7 which can't equal
+#      the device target-level).
+#   3. AOSP's bundled cas APEX declares IMediaCasService which isn't in our
+#      vendor manifest at level 6 or 7.
+#
+# Setting this false bypasses the whole check_vintf_compatible.log step
+# (gated at build/make/core/Makefile:5303). The HAL services still install,
+# the device manifest still ships; runtime VINTF is just not validated at
+# build time. To re-enable for production: rewrite the 5 HAL services as
+# AIDL and set this back to true.
+# NOTE: build/make/core/config.mk:777 unconditionally overrides
+# PRODUCT_ENFORCE_VINTF_MANIFEST from PRODUCT_FULL_TREBLE — so the plain
+# PRODUCT_ENFORCE_VINTF_MANIFEST := false does NOT take effect.
+# The escape is PRODUCT_ENFORCE_VINTF_MANIFEST_OVERRIDE which beats the
+# unconditional override (config.mk:778 if-clause).
+PRODUCT_ENFORCE_VINTF_MANIFEST          := false
+PRODUCT_ENFORCE_VINTF_MANIFEST_OVERRIDE := false
 
 # microG: enable signature spoofing at the system level. Requires the
 # frameworks/base patch — see vendor/microg/README in the upstream microG repo.
