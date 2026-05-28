@@ -68,3 +68,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: Kati 100%
 **Outcome**: 4:50 — `vendor/microg/GmsCore/Android.mk:29: error: writing to readonly directory "vendor/microg/GmsCore/play-services-core/build/.../release-unsigned.apk"`. Upstream microG uses Gradle which targets paths under the source tree; AOSP `--werror_writable` forbids that.
 **Fix for run 11**: commented out `GmsCore/FakeStore/GsfProxy/UnifiedNlp` from `device.mk` `PRODUCT_PACKAGES` AND renamed `vendor/microg/GmsCore/Android.mk` -> `.disabled` so Kati's recursive walk doesn't even parse it. microG defers until proper `Android.bp` shims exist.
+
+## Run 11
+
+**Phase**: ninja early
+**Outcome**: 3:33 — `ninja: 'out/target/product/aether_arm64/kernel', needed by 'boot.img', missing and no known rule`. Tried `TARGET_PREBUILT_KERNEL` in BoardConfig.mk first but grep showed AOSP 14 build/make/core/Makefile no longer consumes that variable.
+**Fix for run 12**: switched to `PRODUCT_COPY_FILES += device/linaro/dragonboard-kernel/android-6.1/Image.gz:kernel` in `device.mk`. AOSP 14's mechanism is to require the kernel to already exist at `$(PRODUCT_OUT)/kernel`, populated by the device tree via `PRODUCT_COPY_FILES`.
