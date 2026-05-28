@@ -20,3 +20,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: Kati legacy parse
 **Outcome**: 31 s — `TARGET_CPU_VARIANT := cortex-a510` rejected
 **Fix for run 3**: `BoardConfig.mk` TARGET_CPU_VARIANT switched to `cortex-a76` (modern but supported).
+
+## Run 3
+
+**Phase**: Soong analysis
+**Outcome**: 18 s — `Android.bp:44` declared a non-existent module shape
+**Fix for run 4**: rewrote HAL service modules with `cc_defaults` (aether_hal_defaults_hidl / aether_hal_defaults_aidl) and `cc_binary` consumers.
