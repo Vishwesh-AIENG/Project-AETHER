@@ -116,3 +116,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: pre-flight
 **Outcome**: round-4 sweep scanned 8,521 archives, found 0 corrupt. Tree confirmed clean before run 19.
 **Fix for run 19**: none.
+
+## Run 19
+
+**Phase**: ninja late (90% absolute)
+**Outcome**: 4 hours into the build, vendor_manifest assembly hit `assemble_vintf`: "Cannot override existing value 33.0 with BOARD_SEPOLICY_VERS (which is 202404)." Our `manifest.xml` hardcoded `<sepolicy><version>33.0</version></sepolicy>` (an Android U dev value) while AOSP 14 ships 202404 (date-based versioning).
+**Fix for run 20**: `manifest.xml` `<version>33.0</version>` -> `<version>202404</version>`.
