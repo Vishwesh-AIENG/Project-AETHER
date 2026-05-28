@@ -122,3 +122,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja late (90% absolute)
 **Outcome**: 4 hours into the build, vendor_manifest assembly hit `assemble_vintf`: "Cannot override existing value 33.0 with BOARD_SEPOLICY_VERS (which is 202404)." Our `manifest.xml` hardcoded `<sepolicy><version>33.0</version></sepolicy>` (an Android U dev value) while AOSP 14 ships 202404 (date-based versioning).
 **Fix for run 20**: `manifest.xml` `<version>33.0</version>` -> `<version>202404</version>`.
+
+## Run 20
+
+**Phase**: ninja late
+**Outcome**: `assemble_vintf` rejected `<kernel target-level="7" version="5.15.0"/>` because device manifest declared `target-level="7"` too — "Device manifest with level 7 must not set kernel level 7."
+**Fix for run 21**: removed the `target-level` attribute from the `<kernel>` tag. When omitted, the kernel inherits the device target-level.
