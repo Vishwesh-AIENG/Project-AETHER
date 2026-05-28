@@ -56,9 +56,22 @@ pub const GUEST_DTB_PA: u64 = STAGED_BOOT_IMG_PA + STAGED_BOOT_IMG_SIZE;
 /// Table 28-2 / AMD APM Vol 2 §15.25.7).
 pub const GUEST_DTB_SIZE: u64 = 2 * 1024 * 1024;
 
+/// Kernel working RAM extending past boot.img + DTB. Linux init, page
+/// allocations, ramdisk extraction, and early userspace all live here.
+/// The total mapped guest RAM (HANDOFF_REGION_SIZE) is what the DTB
+/// `/memory` node advertises to the kernel. 1 GiB is the minimum that
+/// reaches Android home screen without OOM (Zygote + system_server alone
+/// reserve ~600 MiB).
+pub const KERNEL_WORKING_RAM_SIZE: u64 = 1024 * 1024 * 1024
+    - STAGED_BOOT_IMG_SIZE
+    - GUEST_DTB_SIZE;
+
 /// Total contiguous host PA span the EPT/NPT identity map must cover for
-/// the Android handoff: boot.img window + DTB region.
-pub const HANDOFF_REGION_SIZE: u64 = STAGED_BOOT_IMG_SIZE + GUEST_DTB_SIZE;
+/// the Android handoff: boot.img window + DTB region + kernel working RAM.
+/// Fits in a single 1-GiB PDPT entry (512 × 2-MiB PDE leaves = 1 GiB),
+/// which is also the upper bound for `build_ept_2mib_range` (one PD table).
+pub const HANDOFF_REGION_SIZE: u64 =
+    STAGED_BOOT_IMG_SIZE + GUEST_DTB_SIZE + KERNEL_WORKING_RAM_SIZE;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DbtInitialRegs — ARM64 GPR file at kernel entry
@@ -164,8 +177,13 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
     let mut cfg = AndroidDtbConfig {
         cpu_count: 1,
         cpu_mpidr: [0u64; MAX_ANDROID_CPUS],
-        memory_base: 0x4000_0000,
-        memory_size: 0x8000_0000, // 2 GiB
+        // memory_base MUST match STAGED_BOOT_IMG_PA — that is where the EPT/NPT
+        // identity-map starts. Old QEMU-virt default (0x4000_0000) would leave
+        // the kernel accessing unmapped guest physical addresses on every load.
+        memory_base: STAGED_BOOT_IMG_PA,
+        // memory_size MUST equal what the EPT/NPT actually covers. Anything
+        // the kernel tries beyond this range produces an EPT/NPT violation.
+        memory_size: HANDOFF_REGION_SIZE,
         gicd_base: 0x0800_0000,
         gicd_size: 0x10000,
         gicr_base: 0x080A_0000,
@@ -254,8 +272,27 @@ mod tests {
 
     #[test]
     fn handoff_region_is_contiguous() {
+        // DTB sits immediately above the boot.img window.
         assert_eq!(GUEST_DTB_PA, STAGED_BOOT_IMG_PA + STAGED_BOOT_IMG_SIZE);
-        assert_eq!(HANDOFF_REGION_SIZE, STAGED_BOOT_IMG_SIZE + GUEST_DTB_SIZE);
+        // HANDOFF_REGION_SIZE = boot.img + DTB + kernel working RAM.
+        assert_eq!(
+            HANDOFF_REGION_SIZE,
+            STAGED_BOOT_IMG_SIZE + GUEST_DTB_SIZE + KERNEL_WORKING_RAM_SIZE
+        );
+        // Must fit in a single 1 GiB PDPT entry (the EPT/NPT 2-MiB-leaf
+        // helper assumes one PD table covering ≤ 1 GiB).
+        assert!(HANDOFF_REGION_SIZE <= 1024 * 1024 * 1024);
+        // 2-MiB aligned for PDE leaves.
+        assert_eq!(HANDOFF_REGION_SIZE & 0x1F_FFFF, 0);
+    }
+
+    #[test]
+    fn dtb_memory_matches_mapped_region() {
+        // The DTB MUST advertise exactly the region we EPT/NPT-identity-map,
+        // otherwise the kernel hits unmapped GPAs on early allocations.
+        let cfg = default_dtb_config();
+        assert_eq!(cfg.memory_base, STAGED_BOOT_IMG_PA);
+        assert_eq!(cfg.memory_size, HANDOFF_REGION_SIZE);
     }
 
     #[test]
