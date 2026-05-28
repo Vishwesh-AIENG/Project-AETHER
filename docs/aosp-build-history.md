@@ -146,3 +146,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja very late
 **Outcome**: `ValueError: --vendor_boot not compatible with given header version`. The `boot.img` rule auto-injects `--header_version` via `INTERNAL_MKBOOTIMG_VERSION_ARGS`, but the `vendor_boot.img` rule only consumes `BOARD_MKBOOTIMG_ARGS` (defaults to empty).
 **Fix for run 24**: `BoardConfig.mk` `BOARD_MKBOOTIMG_ARGS := --header_version $(BOARD_BOOT_HEADER_VERSION)` (resolves to 4 — boot.img v4 + vendor_boot.img v4 matched).
+
+## Run 24
+
+**Phase**: ninja very late (checkvintf step)
+**Outcome**: checkvintf hard-fail: "HAL android.hardware.health has a conflict: Conflicting FqInstance @2.1::IHealth/default (from vendor/etc/vintf/manifest.xml) vs. (from vendor/etc/vintf/manifest/aether.health@2.1.xml)." The HALs were declared twice: once in the top-level manifest, once in per-HAL vintf_fragments shipped by each cc_binary.
+**Fix for run 25**: stripped the 8 `<hal>` blocks from `manifest.xml`. The fragments alone (`vintf/aether.<svc>.xml` consumed by Android.bp `vintf_fragments:`) are the canonical declarations.
