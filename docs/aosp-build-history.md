@@ -26,3 +26,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: Soong analysis
 **Outcome**: 18 s — `Android.bp:44` declared a non-existent module shape
 **Fix for run 4**: rewrote HAL service modules with `cc_defaults` (aether_hal_defaults_hidl / aether_hal_defaults_aidl) and `cc_binary` consumers.
+
+## Run 4
+
+**Phase**: Kati legacy parse
+**Outcome**: 6 min — `external/mesa3d/Android.mk:13: error: must be in PRODUCT_SOONG_NAMESPACES`
+**Fix for run 5**: added `PRODUCT_SOONG_NAMESPACES += external/mesa3d` to `device.mk` (required by `BOARD_GPU_DRIVERS := freedreno`).
