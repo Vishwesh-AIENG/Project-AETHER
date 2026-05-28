@@ -140,3 +140,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja very late (3 images already produced)
 **Outcome**: Go-side `fileslist` tool unconditionally walks `out/target/product/<dev>/vendor_ramdisk` even when we ship no vendor_ramdisk content. `panic: lstat ... vendor_ramdisk: no such file or directory`.
 **Fix for run 23**: one-shot `mkdir -p` of the three expected ramdisk dirs (vendor_ramdisk, vendor_debug_ramdisk, debug_ramdisk). The tool then walks empty dirs and emits empty JSON, build proceeds. No repo change (operational workaround).
+
+## Run 23
+
+**Phase**: ninja very late
+**Outcome**: `ValueError: --vendor_boot not compatible with given header version`. The `boot.img` rule auto-injects `--header_version` via `INTERNAL_MKBOOTIMG_VERSION_ARGS`, but the `vendor_boot.img` rule only consumes `BOARD_MKBOOTIMG_ARGS` (defaults to empty).
+**Fix for run 24**: `BoardConfig.mk` `BOARD_MKBOOTIMG_ARGS := --header_version $(BOARD_BOOT_HEADER_VERSION)` (resolves to 4 — boot.img v4 + vendor_boot.img v4 matched).
