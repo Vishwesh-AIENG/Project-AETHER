@@ -152,3 +152,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja very late (checkvintf step)
 **Outcome**: checkvintf hard-fail: "HAL android.hardware.health has a conflict: Conflicting FqInstance @2.1::IHealth/default (from vendor/etc/vintf/manifest.xml) vs. (from vendor/etc/vintf/manifest/aether.health@2.1.xml)." The HALs were declared twice: once in the top-level manifest, once in per-HAL vintf_fragments shipped by each cc_binary.
 **Fix for run 25**: stripped the 8 `<hal>` blocks from `manifest.xml`. The fragments alone (`vintf/aether.<svc>.xml` consumed by Android.bp `vintf_fragments:`) are the canonical declarations.
+
+## Run 25
+
+**Phase**: ninja very late (check_vintf_compatible)
+**Outcome**: "android.hardware.health@2.1::IHealth/default is deprecated in compatibility matrix at FCM Version 7; it should not be served." Same for `radio@1.6`. Plus a kernel FCM/version mismatch.
+**Fix for run 26**: `manifest.xml` set `<manifest ... target-level="6">` (Android 13 compat, where HIDL health 2.1 + radio 1.6 are still allowed) with `<kernel target-level="5" version="5.4.0"/>` (lying about version for VINTF — actual kernel binary is dragonboard 6.1; runtime kernel version is read from /proc/version separately).
