@@ -158,3 +158,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja very late (check_vintf_compatible)
 **Outcome**: "android.hardware.health@2.1::IHealth/default is deprecated in compatibility matrix at FCM Version 7; it should not be served." Same for `radio@1.6`. Plus a kernel FCM/version mismatch.
 **Fix for run 26**: `manifest.xml` set `<manifest ... target-level="6">` (Android 13 compat, where HIDL health 2.1 + radio 1.6 are still allowed) with `<kernel target-level="5" version="5.4.0"/>` (lying about version for VINTF — actual kernel binary is dragonboard 6.1; runtime kernel version is read from /proc/version separately).
+
+## Run 26
+
+**Phase**: ninja very late
+**Outcome**: "The following HALs in device manifest are not declared in FCM <= level 6: android.hardware.cas.IMediaCasService/default (@1)." Comes from inherited cas APEX in the vendor partition. Plus kernel 5.4.0 < required min LTS 5.4.61 for FCM 5.
+**Fix for run 27**: stopped trying to compute through the VINTF compat matrix and started removing deprecated HAL fragments from being installed. `Android.bp` dropped `vintf_fragments:` from `aether.health@2.1-service` and `aether.radio@2.0-service` so their XMLs never reach `/vendor/etc/vintf/manifest/`. Service binaries still install.
