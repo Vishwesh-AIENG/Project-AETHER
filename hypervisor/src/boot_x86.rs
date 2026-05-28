@@ -1332,10 +1332,9 @@ unsafe fn boot_intel(
         dual_puts(b")\n");
 
         dual_puts(b"[x86] VMLAUNCH...\n");
-        // BLUE flash + 2 beeps = entire host-side setup is good; we are
-        // about to enter the guest. If user sees blue + hears 2 beeps,
-        // EPT + VMCS + EBS + handoff all worked.
-        checkpoint(FB_BLUE, 2, 1100);
+        // BLUE flash + 2 beeps removed — fb_fill(FB_BLUE) wipes every line
+        // printed above (the JIT map, the EPT root, the translator init).
+        // The dual_puts banner directly above now serves the same purpose.
         // VMLAUNCH transfers control: on entry the guest runs (HLT -> VMEXIT);
         // host_rip catches the VMEXIT.  If VMLAUNCH itself fails (e.g. invalid
         // VMCS), CF/ZF are set and execution continues past it — we halt.
@@ -1372,7 +1371,11 @@ unsafe fn boot_amd(
     unsafe {
         dual_puts(b"[x86] AMD path: building NPT identity map...\n");
         build_npt_identity_map(guest_ram_pa);
-        bisect(5);
+        // bisect(5/6/7/8/9) removed throughout this function — the
+        // dual_puts banners between each step now serve the same purpose
+        // as the ascending-pitch tones, with the advantage that the
+        // operator can see which stage failed without holding a
+        // stopwatch to a wave file.
         if let Some((base, size)) = extra_region {
             dual_puts(b"[x86] NPT 2-MiB map for Android handoff: base=");
             dual_puthex64(base);
@@ -1381,9 +1384,7 @@ unsafe fn boot_amd(
             dual_puts(b"\n");
             build_npt_2mib_range(base, size);
         }
-        bisect(6);
         let guest_cr3 = build_guest_page_table(guest_ram_pa);
-        bisect(7);
         dual_puts(b"[x86] Guest CR3 (PML4)= "); dual_puthex64(guest_cr3); dual_puts(b"\n");
         dual_puts(b"[x86] kernel_entry_pa = "); dual_puthex64(kernel_entry_pa); dual_puts(b"\n");
 
@@ -1417,7 +1418,6 @@ unsafe fn boot_amd(
                 halt();
             }
         }
-        bisect(8);
 
         vmcb.write_u64(VMCB_SAVE_CR3, guest_cr3);
 
