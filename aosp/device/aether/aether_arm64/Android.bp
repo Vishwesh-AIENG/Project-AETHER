@@ -80,7 +80,10 @@ cc_binary {
     name: "aether.radio@2.0-service",
     defaults: ["aether_hal_defaults_hidl"],
     init_rc: ["init/aether.radio@2.0-service.rc"],
-    vintf_fragments: ["vintf/aether.radio@2.0.xml"],
+    // vintf_fragments DELIBERATELY omitted — radio@1.6 HIDL is deprecated in
+    // FCM 7 (AOSP 14) so we cannot declare it in vintf without checkvintf
+    // failing. The service binary still installs and runs; it is just not
+    // advertised in the device manifest. AIDL radio HAL replacement is TODO.
     srcs: ["hal/radio/service.cpp"],
 }
 
@@ -112,7 +115,10 @@ cc_binary {
     name: "aether.health@2.1-service",
     defaults: ["aether_hal_defaults_hidl"],
     init_rc: ["init/aether.health@2.1-service.rc"],
-    vintf_fragments: ["vintf/aether.health@2.1.xml"],
+    // vintf_fragments DELIBERATELY omitted — health@2.1 HIDL is deprecated in
+    // FCM 7 (AOSP 14) so we cannot declare it in vintf without checkvintf
+    // failing. The service binary still installs and runs; it is just not
+    // advertised in the device manifest. AIDL health HAL replacement is TODO.
     srcs: ["hal/health/service.cpp"],
 }
 
@@ -137,14 +143,3 @@ cc_library_shared {
     ],
 }
 
-// ── Vendor VINTF manifest prebuilt ────────────────────────────────────────────
-// Copied to vendor/etc/vintf/manifest.xml at install time. The dedicated
-// per-HAL VINTF fragments above are also merged in.
-prebuilt_etc {
-    name: "aether_vendor_manifest",
-    src: "manifest.xml",
-    vendor: true,
-    sub_dir: "vintf",
-    filename_from_src: false,
-    filename: "manifest.xml",
-}
