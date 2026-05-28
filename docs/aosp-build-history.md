@@ -38,3 +38,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja early
 **Outcome**: 12 min — wall power cut, host PC lost. Build state intact on vhdx but no in-flight syncs.
 **Fix for run 6**: none required; restarted via `phase5_build.sh`.
+
+## Run 6
+
+**Phase**: Kati late
+**Outcome**: 1:30 — AOSP 14 rejects `PRODUCT_COPY_FILES += .../vintf/manifest.xml:vendor/etc/vintf/manifest.xml`
+**Fix for run 7**: moved manifest declaration to `BoardConfig.mk` `DEVICE_MANIFEST_FILE := device/aether/aether_arm64/manifest.xml`.
