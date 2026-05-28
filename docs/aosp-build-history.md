@@ -44,3 +44,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: Kati late
 **Outcome**: 1:30 — AOSP 14 rejects `PRODUCT_COPY_FILES += .../vintf/manifest.xml:vendor/etc/vintf/manifest.xml`
 **Fix for run 7**: moved manifest declaration to `BoardConfig.mk` `DEVICE_MANIFEST_FILE := device/aether/aether_arm64/manifest.xml`.
+
+## Run 7
+
+**Phase**: Kati late
+**Outcome**: 1:30 — `vbmeta_system` + `vbmeta_vendor` chain partitions need explicit rollback index locations
+**Fix for run 8**: `BoardConfig.mk` set `BOARD_AVB_VBMETA_SYSTEM_ROLLBACK_INDEX_LOCATION := 1` and `BOARD_AVB_VBMETA_VENDOR_ROLLBACK_INDEX_LOCATION := 2`.
