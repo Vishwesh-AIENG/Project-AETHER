@@ -86,3 +86,9 @@ AOSP `android-14.0.0_r74`, target `aether_arm64-ap2a-user`.
 **Phase**: ninja mid-compile
 **Outcome**: cut at ~1.5 hours, 36% absolute. Recovery sweep deleted 82 zero-length intermediates from in-flight writes.
 **Fix for run 14**: `wsl-scripts/repair_and_resume.sh` (zero-length + lock sweep) + restart. `.ninja_log` (22 MB) survived.
+
+## Run 14
+
+**Phase**: ninja mid-compile
+**Outcome**: 7:38 — kapt step on ManagedProvisioningLib hit `java.util.zip.ZipException: invalid zip archive`. The 82 zero-length files swept in run 13 were the obvious casualties; the `wsl --shutdown` forced post-hang also left several hundred non-zero-length but partially-written jars across the JAVA_LIBRARIES tree.
+**Fix for run 15**: `wsl-scripts/sweep_corrupt_jars.sh` scans every `.jar/.apk/.zip` under `out/` via `unzip -t`, deletes the corrupt ones, lets ninja rebuild. 513 archives deleted including `metalava.jar`, `turbine.jar`, `r8.jar`, `signapk.jar`.
