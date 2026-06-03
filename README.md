@@ -7,7 +7,7 @@
 [![Rust nightly](https://img.shields.io/badge/rust-nightly-orange?logo=rust)](https://rust-lang.org)
 [![Target](https://img.shields.io/badge/target-aarch64--unknown--uefi-blue)](https://doc.rust-lang.org/nightly/rustc/platform-support.html)
 [![Tests](https://img.shields.io/badge/tests-1300%20passing-brightgreen)](#build)
-[![Chapters](https://img.shields.io/badge/chapters-47%20%2F%2070-yellow)](#chapter-progress)
+[![Chapters](https://img.shields.io/badge/chapters-53%20%2F%2070-purple)](#chapter-progress)
 [![License](https://img.shields.io/badge/license-GPLv2-red)](LICENSE)
 
 *Boots at EL2 before any OS. Gives Android exclusive hardware. Leaves no fingerprint.*
