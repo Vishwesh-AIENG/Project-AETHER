@@ -206,8 +206,14 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
         cmdline_len: 0,
     };
     // Default kernel cmdline — same string AETHER's BoardConfig.mk emits.
-    let cmd = b"earlyprintk console=ttyAMA0,115200 androidboot.hardware=aether \
-                androidboot.selinux=enforcing androidboot.verifiedbootstate=green";
+    // `earlycon=pl011,mmio32,0x9000000` enables Linux's earlycon PL011 driver
+    // BEFORE the regular console init — without it, kernel printk accumulates
+    // in a buffer until the late console driver loads (after IRQ/timer init),
+    // so any pre-IRQ panic prints nothing to PL011/COM1 and looks silent.
+    // Pairs with mmio_emu::PL011_UART_BASE = 0x0900_0000 → pl011_emit → dual_puts.
+    let cmd = b"earlycon=pl011,mmio32,0x9000000 console=ttyAMA0,115200 \
+                androidboot.hardware=aether androidboot.selinux=enforcing \
+                androidboot.verifiedbootstate=green";
     let n = if cmd.len() < MAX_KERNEL_CMDLINE_LEN { cmd.len() } else { MAX_KERNEL_CMDLINE_LEN };
     cfg.cmdline[..n].copy_from_slice(&cmd[..n]);
     cfg.cmdline_len = n;
