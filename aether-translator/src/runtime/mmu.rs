@@ -465,6 +465,19 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
     Ok(pa)
 }
 
+// Diagnostic: how many translation faults we've recorded since boot. A silent
+// boot with a non-zero count tells us the kernel is taking data aborts that
+// the dispatcher injects with no UART surfacing.
+pub static mut MMU_FAULT_COUNT: u32 = 0;
+pub static mut MMU_LAST_FAR: u64 = 0;
+pub static mut MMU_LAST_ESR: u64 = 0;
+// One-shot capture of the FIRST fault — locating where the kernel first
+// tripped is far more useful than the latest. PC isn't directly available
+// inside the walker (the lowered block holds it implicitly), so we capture
+// the FAR/ESR/is_write tuple, and the dispatcher infers PC from the iter.
+pub static mut MMU_FIRST_FAR: u64 = 0;
+pub static mut MMU_FIRST_ESR: u64 = 0;
+
 /// Record a pending Data Abort (FAR = the faulting access's base VA, ESR per
 /// `kind`/`level`) in the free pending-fault sysreg slots and return the fault
 /// sentinel [`XLATE_FAULT`]. The dispatcher reads `SLOT_PEND_PENDING` after each
@@ -479,6 +492,18 @@ fn record_pending_fault(ctx: *mut u64, far: u64, kind: FaultKind, level: u8, is_
         *ctx.add(SYSREG_SLOT0 + SLOT_PEND_PENDING) = 1;
         *ctx.add(SYSREG_SLOT0 + SLOT_PEND_FAR) = far;
         *ctx.add(SYSREG_SLOT0 + SLOT_PEND_ESR) = esr;
+    }
+    // SAFETY: EL2-private single-vCPU; diagnostic counters via addr_of.
+    unsafe {
+        let p = core::ptr::addr_of_mut!(MMU_FAULT_COUNT);
+        let prev = *p;
+        *p = prev.saturating_add(1);
+        if prev == 0 {
+            *core::ptr::addr_of_mut!(MMU_FIRST_FAR) = far;
+            *core::ptr::addr_of_mut!(MMU_FIRST_ESR) = esr;
+        }
+        *core::ptr::addr_of_mut!(MMU_LAST_FAR) = far;
+        *core::ptr::addr_of_mut!(MMU_LAST_ESR) = esr;
     }
     XLATE_FAULT
 }

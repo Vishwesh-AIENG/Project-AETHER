@@ -380,7 +380,42 @@ fn emulate_gicr(access: &MmioAccess) -> MmioResult {
 /// # Safety
 /// `extern "C"` ABI matching `AetherMmioHandler`; no preconditions beyond a
 /// valid call from the single-vCPU EL2 dispatch path.
+// One-shot diagnostic counters so we can see whether the kernel reaches MMIO
+// at all + how many of each kind of access happen before the dispatch loop
+// ends. The kernel emits no PL011 output during early boot until earlycon is
+// activated (parse_early_param) — these counters tell us whether the kernel
+// even reached that point. Logged from the dispatch loop at HARTBEAT cadence.
+#[cfg(target_arch = "x86_64")]
+pub static mut MMIO_PL011_W: u32 = 0;
+#[cfg(target_arch = "x86_64")]
+pub static mut MMIO_GICD_W: u32 = 0;
+#[cfg(target_arch = "x86_64")]
+pub static mut MMIO_GICR_W: u32 = 0;
+#[cfg(target_arch = "x86_64")]
+pub static mut MMIO_OTHER_W: u32 = 0;
+#[cfg(target_arch = "x86_64")]
+pub static mut MMIO_LAST_ADDR: u64 = 0;
+
 pub unsafe extern "C" fn aether_mmio_bridge(addr: u64, size: u32, is_write: u32, value: u64) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if is_write != 0 {
+            *core::ptr::addr_of_mut!(MMIO_LAST_ADDR) = addr;
+            if addr >= PL011_UART_BASE && addr < PL011_UART_BASE + PL011_UART_SIZE {
+                *core::ptr::addr_of_mut!(MMIO_PL011_W) =
+                    (*core::ptr::addr_of!(MMIO_PL011_W)).saturating_add(1);
+            } else if addr >= GICD_BASE && addr < GICD_BASE + GICD_SIZE {
+                *core::ptr::addr_of_mut!(MMIO_GICD_W) =
+                    (*core::ptr::addr_of!(MMIO_GICD_W)).saturating_add(1);
+            } else if addr >= GICR_BASE && addr < GICR_BASE + GICR_SIZE {
+                *core::ptr::addr_of_mut!(MMIO_GICR_W) =
+                    (*core::ptr::addr_of!(MMIO_GICR_W)).saturating_add(1);
+            } else {
+                *core::ptr::addr_of_mut!(MMIO_OTHER_W) =
+                    (*core::ptr::addr_of!(MMIO_OTHER_W)).saturating_add(1);
+            }
+        }
+    }
     let acc = MmioAccess {
         addr,
         size: size as u8,

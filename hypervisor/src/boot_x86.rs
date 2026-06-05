@@ -1310,6 +1310,26 @@ pub unsafe fn boot_x86_hypervisor(
                 dual_puts(b" FEX x0=");
                 dual_puthex64(h.dbt_regs.x[0]);
                 dual_puts(b"\n");
+                // Dump first 32 bytes of the DTB so we can verify the FDT
+                // header (magic 0xd00dfeed BE at off 0, totalsize BE at off 4,
+                // version BE at off 20). The kernel panics with "invalid
+                // device tree blob" if any of these are wrong.
+                {
+                    let dtb = h.dtb_pa as *const u8;
+                    dual_puts(b"[android] DTB hdr:");
+                    let mut i = 0usize;
+                    while i < 32 {
+                        let b = *dtb.add(i);
+                        dual_puts(b" ");
+                        let hi = (b >> 4) & 0xF;
+                        let lo = b & 0xF;
+                        let h_ch = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                        let l_ch = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                        dual_puts(&[h_ch, l_ch]);
+                        i += 1;
+                    }
+                    dual_puts(b"\n");
+                }
                 if h.kernel_decompressed {
                     dual_puts(b"[android] kernel gunzip'd -> entry_pa=");
                     dual_puthex64(h.layout.kernel_pa);
@@ -3024,6 +3044,11 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         let mut prev_traced_pc: u64 = u64::MAX;
         let mut loop_reps: u64 = 0;
         let mut distinct_blocks: u64 = 0;
+        // Baseline fault count BEFORE the live dispatch starts (the M3/M4b-2
+        // proofs intentionally trigger walker faults — those don't count).
+        let live_flt_baseline: u32 =
+            *ptr::addr_of!(aether_translator::runtime::mmu::MMU_FAULT_COUNT);
+        let mut first_live_flt_logged = false;
 
         // ── Final-summary capture ────────────────────────────────────────────
         // The inline [dbt]/[exc] trace above streams to BOTH the framebuffer and
@@ -3149,6 +3174,24 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puthex64(g[19]);
                         dual_puts(b" x20=");
                         dual_puthex64(g[20]);
+                        // MMIO traffic counters: tells us whether the kernel
+                        // has even reached the GIC / PL011 yet.
+                        dual_puts(b" mmio[pl011=");
+                        dual_puthex64(*ptr::addr_of!(crate::mmio_emu::MMIO_PL011_W) as u64);
+                        dual_puts(b" gicd=");
+                        dual_puthex64(*ptr::addr_of!(crate::mmio_emu::MMIO_GICD_W) as u64);
+                        dual_puts(b" gicr=");
+                        dual_puthex64(*ptr::addr_of!(crate::mmio_emu::MMIO_GICR_W) as u64);
+                        dual_puts(b" other=");
+                        dual_puthex64(*ptr::addr_of!(crate::mmio_emu::MMIO_OTHER_W) as u64);
+                        dual_puts(b" last=");
+                        dual_puthex64(*ptr::addr_of!(crate::mmio_emu::MMIO_LAST_ADDR));
+                        dual_puts(b"] flt=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_FAULT_COUNT) as u64);
+                        dual_puts(b" far=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_FAR));
+                        dual_puts(b" esr=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_ESR));
                     }
                     dual_puts(b"\n");
                 }
@@ -3228,9 +3271,28 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                 break;
             }
 
+            // First-fault tracker: log block PC + far/esr the first time the
+            // live dispatch fault count climbs above the M3/M4 proof baseline.
+            let pre_flt = *ptr::addr_of!(aether_translator::runtime::mmu::MMU_FAULT_COUNT);
+
             // 5. Host-mode enter; PC + pending abort/IRQ/PSCI advance inside.
             match enter_translated_block_from_npf(pc) {
                 Some(_next) => {
+                    let post_flt = *ptr::addr_of!(aether_translator::runtime::mmu::MMU_FAULT_COUNT);
+                    if !first_live_flt_logged && post_flt > pre_flt && pre_flt >= live_flt_baseline {
+                        first_live_flt_logged = true;
+                        dual_puts(b"[mmu] FIRST LIVE FAULT block_pc=");
+                        dual_puthex64(pc);
+                        dual_puts(b" first_insn=");
+                        dual_puthex64(insn0 as u64);
+                        dual_puts(b" far=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_FAR));
+                        dual_puts(b" esr=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_ESR));
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n");
+                    }
                     // NO-PROGRESS watchdog: next-PC == the PC just run, repeated
                     // NO_PROGRESS_LIMIT times (with no abort/IRQ/PSCI), is a stuck
                     // self-loop — report pc+insn and halt instead of spinning
