@@ -1244,6 +1244,17 @@ impl IntLower {
             }
 
             // ── Sign / zero extension ─────────────────────────────────────
+            // ARM SBFX/UBFX produce arbitrary widths (1..63), and the dest
+            // can be either W (32-bit) or X (64-bit). The Linux printk
+            // `struct printf_spec` packs field_width as a SIGNED 24-bit at
+            // byte offset 1, extracted by `sbfx x?, x?, #8, #0x18` (sf=1)
+            // and also `sbfx w?, w?, #0, #0x18` (sf=0). With Sext a no-op
+            // for arbitrary widths the negative widths stayed as huge
+            // positive ints (~16M) — every printk hit the slow pad loop.
+            // General fix: shl by (64-w) then arith-shr by (64-w) to sign-
+            // extend any from_bits within the 64-bit reg; if to_bits==32
+            // follow with mov_rr32 so the high 32 are zeroed per ARM W-reg
+            // semantics (x86 32-bit moves zero-extend).
             Sext { dst, a, from_bits, to_bits } => {
                 let rd = Self::gpr(alloc, *dst);
                 let ra = Self::gpr(alloc, *a);
@@ -1251,6 +1262,16 @@ impl IntLower {
                     (8, 64)  => enc.emit_movsx_r64_r8(rd, ra),
                     (16, 64) => enc.emit_movsx_r64_r16(rd, ra),
                     (32, 64) => enc.emit_movsxd_r64_r32(rd, ra),
+                    (w, _) if w > 0 && w < 64 => {
+                        if rd != ra { enc.emit_mov_rr64(rd, ra); }
+                        let shift = 64 - w;
+                        enc.emit_shl_r64_imm8(rd, shift);
+                        enc.emit_sar_r64_imm8(rd, shift);
+                        if *to_bits == 32 {
+                            // ARM W-reg semantics: high 32 bits are zero.
+                            enc.emit_mov_rr32(rd, rd);
+                        }
+                    }
                     _        => { if rd != ra { enc.emit_mov_rr64(rd, ra); } }
                 }
             }
@@ -1261,6 +1282,12 @@ impl IntLower {
                     (8, 64)  => enc.emit_movzx_r64_r8(rd, ra),
                     (16, 64) => enc.emit_movzx_r64_r16(rd, ra),
                     (32, 64) => enc.emit_mov_rr32(rd, ra), // zero-extend implicit
+                    (w, _) if w > 0 && w < 64 => {
+                        if rd != ra { enc.emit_mov_rr64(rd, ra); }
+                        let shift = 64 - w;
+                        enc.emit_shl_r64_imm8(rd, shift);
+                        enc.emit_shr_r64_imm8(rd, shift);
+                    }
                     _        => { if rd != ra { enc.emit_mov_rr64(rd, ra); } }
                 }
             }
