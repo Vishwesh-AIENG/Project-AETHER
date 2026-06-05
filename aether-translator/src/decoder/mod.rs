@@ -210,6 +210,16 @@ pub enum DecodedInsn {
         amount: u8,
         set_flags: bool,
     },
+    /// ADCS / SBCS — add/subtract (with carry), flag-setting. The plain
+    /// ADC/SBC (no-S) forms are intentionally not decoded here (rare; they
+    /// would need a non-flag-setting carry IR op). `sub` selects SBCS.
+    AdcSub {
+        sf: bool,
+        rd: Reg,
+        rn: Reg,
+        rm: Reg,
+        sub: bool,
+    },
     SubReg {
         sf: bool,
         rd: Reg,
@@ -346,6 +356,11 @@ pub enum DecodedInsn {
     Ret {
         rn: Reg,
     },
+    /// `ERET` — exception return. PC <- ELR_EL1, PSTATE <- SPSR_EL1. For the
+    /// DBT this is a block terminator: it loads the next guest PC from ELR_EL1
+    /// and restores the NZCV flags from SPSR_EL1[31:28]. No operands (the plain
+    /// non-PAC encoding; ERETAA/ERETAB are not decoded here).
+    Eret,
     Cbz {
         sf: bool,
         rt: Reg,
@@ -501,6 +516,19 @@ pub enum DecodedInsn {
     },
 
     // ----- AT-3: NEON / FP / SIMD / Crypto (huge family; placeholders for now) -----
+    /// M4b-6: typed NEON 3-same (integer + FP). Fields per ARM ARM C4.1.6:
+    /// `q`=bit30, `u`=bit29, `size`=bits[23:22], `opcode`=bits[15:11]. Lift
+    /// classifies `(u, opcode[, size])` into the VecBin/VecCmp/VecPair/VecFp IR
+    /// ops; unrecognized sub-forms fall back to a Hint (fail-loud at lower).
+    SimdThreeSame {
+        q: bool,
+        u: bool,
+        size: u8,
+        opcode: u8,
+        rm: VReg,
+        rn: VReg,
+        rd: VReg,
+    },
     /// Catch-all for advanced-SIMD encodings until per-family decoding lands.
     AdvSimd {
         raw: u32,

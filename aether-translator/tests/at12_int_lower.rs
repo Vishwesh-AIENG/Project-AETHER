@@ -198,6 +198,28 @@ fn at12_xor_rax_rax() {
     assert_eq!(bytes, [0x48, 0x31, 0xC0]);
 }
 
+// M4b-2b: Load/Store now route the guest address through aether_mmu_xlate
+// (a Win64 CALL) before the access, so the access base is the returned host PA
+// in RAX ([RAX+0]) and the whole sequence is prefixed by the MMU-call
+// scaffolding (push the live save set → marshal args → sub rsp,0x28 → MOV RAX,
+// imm64 → CALL RAX → ADD rsp,0x28 → TEST RAX,RAX → JNZ ok → fault-RET → ok:).
+// These structural tests assert (a) the scaffolding is present, (b) a fault
+// early-RET (0xC3) and a final RET-less access against RAX exist, and (c) the
+// trailing access opcode matches the load/store width. Byte-exact pinning of
+// the MOV RAX,imm64 is impossible (the imm is the runtime helper address), so
+// we check structure, not the full byte vector.
+
+/// True if `bytes` contains the MMU-xlate call scaffolding: a `CALL RAX`
+/// (FF D0), a `TEST RAX,RAX` (48 85 C0), and the shadow-space `SUB RSP,0x28`
+/// (48 83 EC 28) + `ADD RSP,0x28` (48 83 C4 28).
+fn has_mmu_xlate_scaffold(bytes: &[u8]) -> bool {
+    let win = |pat: &[u8]| bytes.windows(pat.len()).any(|w| w == pat);
+    win(&[0x48, 0x83, 0xEC, 0x28]) // sub rsp, 0x28
+        && win(&[0x48, 0x83, 0xC4, 0x28]) // add rsp, 0x28
+        && win(&[0xFF, 0xD0]) // call rax
+        && win(&[0x48, 0x85, 0xC0]) // test rax, rax
+}
+
 #[test]
 fn at12_load_u64() {
     use aether_translator::ir::memory::{LoadTy, MemOrder};
@@ -207,13 +229,18 @@ fn at12_load_u64() {
     blk.push_op(IrOp::Load { dst, addr, ty: LoadTy::U64, order: MemOrder::Relaxed });
 
     let mut assignments = BTreeMap::new();
-    assignments.insert(addr.0, Assignment::Gpr(0)); // RAX = address
-    assignments.insert(dst.0,  Assignment::Gpr(1)); // RCX = loaded value
+    assignments.insert(addr.0, Assignment::Gpr(2)); // RDX = address (real GPR)
+    assignments.insert(dst.0,  Assignment::Gpr(3)); // RBX = loaded value
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
 
     let bytes = lower(&blk, &alloc);
-    // MOV RCX, [RAX] = 48 8B 08
-    assert_eq!(bytes, [0x48, 0x8B, 0x08]);
+    assert!(has_mmu_xlate_scaffold(&bytes), "Load must call aether_mmu_xlate");
+    assert!(
+        !bytes.windows(2).any(|w| w == [0x0F, 0x0B]),
+        "in-register Load must not emit UD2"
+    );
+    // The final access is MOV RBX, [RAX] = 48 8B 18 (reg=RBX(3), rm=RAX(0)).
+    assert_eq!(&bytes[bytes.len() - 3..], &[0x48, 0x8B, 0x18], "tail = MOV RBX,[RAX]");
 }
 
 #[test]
@@ -225,13 +252,27 @@ fn at12_store_u64() {
     blk.push_op(IrOp::Store { val, addr, ty: StoreTy::U64, order: MemOrder::Relaxed });
 
     let mut assignments = BTreeMap::new();
-    assignments.insert(addr.0, Assignment::Gpr(0)); // RAX
-    assignments.insert(val.0,  Assignment::Gpr(1)); // RCX
+    assignments.insert(addr.0, Assignment::Gpr(2)); // RDX = address
+    assignments.insert(val.0,  Assignment::Gpr(3)); // RBX = value
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
 
     let bytes = lower(&blk, &alloc);
-    // MOV [RAX], RCX = 48 89 08
-    assert_eq!(bytes, [0x48, 0x89, 0x08]);
+    // M4b-5: a single STR now routes through aether_mmu_store (a Win64 CALL that
+    // performs the store itself — RAM write OR MMIO emulation) rather than the
+    // old xlate-then-`mov [rax],rs` deref. The call scaffold is identical, but
+    // there is NO trailing memory-write deref: the sequence ends with the
+    // save-set restore (the success path pops the 12-reg set in reverse, so the
+    // last byte is `pop rdx` = 0x5A, RDX being first in MMU_SAVE_REGS).
+    assert!(has_mmu_xlate_scaffold(&bytes), "Store must CALL the MMU runtime");
+    assert!(
+        !bytes.windows(2).any(|w| w == [0x0F, 0x0B]),
+        "in-register Store must not emit UD2"
+    );
+    assert!(
+        !bytes.windows(3).any(|w| w == [0x48, 0x89, 0x18]),
+        "M4b-5 Store must NOT emit a `mov [rax],rbx` deref — the runtime stores"
+    );
+    assert_eq!(*bytes.last().unwrap(), 0x5A, "tail = pop rdx (save-set restore)");
 }
 
 #[test]
@@ -243,13 +284,38 @@ fn at12_load_u8_zero_extend() {
     blk.push_op(IrOp::Load { dst, addr, ty: LoadTy::U8, order: MemOrder::Relaxed });
 
     let mut assignments = BTreeMap::new();
-    assignments.insert(addr.0, Assignment::Gpr(0));
-    assignments.insert(dst.0,  Assignment::Gpr(1));
+    assignments.insert(addr.0, Assignment::Gpr(2)); // RDX = address
+    assignments.insert(dst.0,  Assignment::Gpr(3)); // RBX = loaded byte
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
 
     let bytes = lower(&blk, &alloc);
-    // MOVZX RCX, byte [RAX] = 48 0F B6 08
-    assert_eq!(bytes, [0x48, 0x0F, 0xB6, 0x08]);
+    assert!(has_mmu_xlate_scaffold(&bytes), "Load.U8 must call aether_mmu_xlate");
+    // The final access is MOVZX RBX, byte [RAX] = 48 0F B6 18.
+    assert_eq!(
+        &bytes[bytes.len() - 4..],
+        &[0x48, 0x0F, 0xB6, 0x18],
+        "tail = MOVZX RBX,byte[RAX]"
+    );
+}
+
+/// M4b-2b: a SPILLED address must fail loud (UD2), not marshal a stale-scratch
+/// register into the MMU call. Mirrors the spilled-operand fail-loud rule the
+/// Csel arm already enforces.
+#[test]
+fn at12_load_spilled_addr_fails_loud() {
+    use aether_translator::ir::memory::{LoadTy, MemOrder};
+    let mut blk = IrBlock::new(BlockId(0));
+    let addr = blk.new_value(IrValueKind::Ptr);
+    let dst  = blk.new_value(IrValueKind::I64);
+    blk.push_op(IrOp::Load { dst, addr, ty: LoadTy::U64, order: MemOrder::Relaxed });
+
+    let mut assignments = BTreeMap::new();
+    assignments.insert(addr.0, Assignment::Spill(0)); // spilled address
+    assignments.insert(dst.0,  Assignment::Gpr(3));
+    let alloc = AllocResult { assignments, n_spill_slots: 1, n_intervals: 2, n_spilled: 1 };
+
+    let bytes = lower(&blk, &alloc);
+    assert_eq!(bytes, [0x0F, 0x0B], "spilled-addr Load must be UD2");
 }
 
 #[test]
@@ -269,8 +335,10 @@ fn at12_cpuid_passthrough() {
 
     let alloc = AllocResult::default();
     let bytes = lower(&blk, &alloc);
-    // XOR EAX,EAX + CPUID = 31 C0 0F A2
-    assert_eq!(bytes, [0x31, 0xC0, 0x0F, 0xA2]);
+    // push rbx + push rdx + XOR EAX,EAX + CPUID + pop rdx + pop rbx.
+    // CPUID clobbers EBX/EDX (allocatable), so it is bracketed by a
+    // save/restore (M4b-5 clobber fix); X86Cpuid lowers via emit_isb_sequence.
+    assert_eq!(bytes, [0x53, 0x52, 0x31, 0xC0, 0x0F, 0xA2, 0x5A, 0x5B]);
 }
 
 #[test]
@@ -280,7 +348,7 @@ fn at12_cmp_flags() {
     let a = blk.new_value(IrValueKind::I64);
     let b = blk.new_value(IrValueKind::I64);
     let f = blk.new_flags();
-    blk.push_op(IrOp::Cmp { flags: f, a, b });
+    blk.push_op(IrOp::Cmp { flags: f, a, b, sf: true });
 
     let mut assignments = BTreeMap::new();
     assignments.insert(a.0, Assignment::Gpr(0));
@@ -288,8 +356,13 @@ fn at12_cmp_flags() {
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
 
     let bytes = lower(&blk, &alloc);
-    // CMP RAX, RCX = 48 39 C8
-    assert_eq!(bytes, [0x48, 0x39, 0xC8]);
+    // M4a: Cmp now lowers to x86 `CMP RAX, RCX` (48 39 C8) FOLLOWED BY NZCV
+    // materialization into [R15+0x108] (build_nzcv: push rbx/rdx, SETcc capture,
+    // pack, store, pop). Assert the CMP prefix and that the flag-build follows.
+    assert_eq!(&bytes[0..3], &[0x48, 0x39, 0xC8], "must start with CMP RAX,RCX");
+    assert!(bytes.len() > 3, "Cmp must also materialize NZCV to [R15+0x108]");
+    // build_nzcv opens with `push rbx` (0x53) then `push rdx` (0x52).
+    assert_eq!(&bytes[3..5], &[0x53, 0x52], "NZCV build must follow the CMP");
 }
 
 #[test]

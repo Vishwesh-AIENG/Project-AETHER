@@ -308,8 +308,17 @@ impl X86Encoder {
 
     /// MOV [base + disp], r8.
     pub fn emit_mov_mem8_r64(&mut self, base: u8, disp: i32, src: u8) {
-        // Use REX so we can reach SIL/DIL etc; for the 8-bit store, no REX.W
-        self.rex_opt(false, src, 0, base);
+        // An 8-bit store from SPL/BPL/SIL/DIL (src 4..=7) REQUIRES a REX prefix
+        // to select the LOW byte. Without REX, ModRM reg 4..7 encodes the legacy
+        // high bytes AH/CH/DH/BH — silently storing the wrong byte of the WRONG
+        // register (e.g. STRB of RSI would write DH). `rex_opt` omits REX when no
+        // W/R/X/B bit is set, so force one for src >= 4 (src >= 8 already gets a
+        // REX from the R bit, so this also covers R8B..R15B).
+        if src >= 4 {
+            self.rex_always(false, src, 0, base);
+        } else {
+            self.rex_opt(false, src, 0, base);
+        }
         self.buf.push(0x88); // MOV r/m8, r8
         self.modrm_mem(src, base, disp);
     }
@@ -361,10 +370,63 @@ impl X86Encoder {
     pub fn emit_cmp_rr64(&mut self, a: u8, b: u8) {
         self.emit_alu64_rr(0x39, a, b); // CMP r/m64, r64
     }
+    /// ADC r64, r64 — dst = dst + src + CF (M4b: ARM ADCS with carry-in).
+    pub fn emit_adc_rr64(&mut self, dst: u8, src: u8) {
+        self.emit_alu64_rr(0x11, dst, src); // ADC r/m64, r64
+    }
+    /// SBB r64, r64 — dst = dst - src - CF, where CF is the x86 BORROW.
+    /// M4b: ARM SBCS subtracts the ARM borrow `!C`, so the caller must seed
+    /// CF = !ARM_C (BT then CMC) before this; see emit_cmc.
+    pub fn emit_sbb_rr64(&mut self, dst: u8, src: u8) {
+        self.emit_alu64_rr(0x19, dst, src); // SBB r/m64, r64
+    }
+    /// BT [base+disp], imm8 — copy bit `bit` of the memory operand into CF.
+    /// M4b: seed x86 CF from the stored ARM NZCV C bit (bit 29) before ADC/SBB.
+    /// Encoding: REX.W 0F BA /4 ib.
+    pub fn emit_bt_mem(&mut self, base: u8, disp: i32, bit: u8) {
+        self.rex_opt(true, 0, 0, base);
+        self.buf.push(0x0F);
+        self.buf.push(0xBA);
+        self.modrm_mem(4, base, disp); // /4 = BT
+        self.buf.push(bit);
+    }
+    /// CMC — complement carry flag (CF = !CF). Single byte 0xF5; touches ONLY
+    /// CF (preserves OF/SF/ZF). M4b SBCS: after BT seeds CF = ARM C, CMC turns
+    /// it into the x86 borrow (!C) that SBB consumes.
+    pub fn emit_cmc(&mut self) {
+        self.buf.push(0xF5);
+    }
     /// TEST r64, r64.
     pub fn emit_test_rr64(&mut self, a: u8, b: u8) {
         self.emit_alu64_rr(0x85, a, b); // TEST r/m64, r64
     }
+
+    // ── 32-bit ALU (register–register) — W-form flag ops ──────────────────────
+    // No REX.W: x86 computes ZF/SF/CF/OF over the LOW 32 bits and zero-extends
+    // the r/m32 result into the 64-bit destination. Used for ARM W-form
+    // flag-setting ops so NZCV (N = bit 31, Z/C/V over 32 bits) is derived from
+    // the 32-bit result — a 64-bit op would take N from bit 63 (silent miscompile
+    // of every W-form compare; the M4b adversarial-review must-fix).
+
+    fn emit_alu32_rr(&mut self, op: u8, dst: u8, src: u8) {
+        self.rex_opt(false, src, 0, dst);
+        self.buf.push(op);
+        self.modrm_rr(src, dst);
+    }
+    /// ADD r/m32, r32.
+    pub fn emit_add_rr32(&mut self, dst: u8, src: u8) { self.emit_alu32_rr(0x01, dst, src); }
+    /// SUB r/m32, r32.
+    pub fn emit_sub_rr32(&mut self, dst: u8, src: u8) { self.emit_alu32_rr(0x29, dst, src); }
+    /// AND r/m32, r32.
+    pub fn emit_and_rr32(&mut self, dst: u8, src: u8) { self.emit_alu32_rr(0x21, dst, src); }
+    /// CMP r/m32, r32 (sets flags, no dst written).
+    pub fn emit_cmp_rr32(&mut self, a: u8, b: u8) { self.emit_alu32_rr(0x39, a, b); }
+    /// TEST r/m32, r32.
+    pub fn emit_test_rr32(&mut self, a: u8, b: u8) { self.emit_alu32_rr(0x85, a, b); }
+    /// ADC r/m32, r32 (carry-in from CF).
+    pub fn emit_adc_rr32(&mut self, dst: u8, src: u8) { self.emit_alu32_rr(0x11, dst, src); }
+    /// SBB r/m32, r32 (CF = borrow).
+    pub fn emit_sbb_rr32(&mut self, dst: u8, src: u8) { self.emit_alu32_rr(0x19, dst, src); }
 
     // ── Integer ALU (register–immediate, 64-bit) ──────────────────────────────
 
@@ -670,7 +732,16 @@ impl X86Encoder {
 
     /// SETcc r8.  `cc` same as for Jcc (low nibble of 0x9X opcode).
     pub fn emit_setcc_r8(&mut self, cc: u8, dst: u8) {
-        self.rex_opt(false, 0, 0, dst);
+        // SETcc into SPL/BPL/SIL/DIL (dst 4..=7) needs a REX prefix to select the
+        // low byte (else ModRM reg 4..7 = AH/CH/DH/BH — the same high-byte hazard
+        // as the 8-bit store). build_nzcv only uses dst 0..3 today, but
+        // lower_atomic assigns a SETcc target from the allocatable set (which
+        // includes RBP/RSI/RDI), so force REX for dst >= 4 (sibling of the STRB fix).
+        if dst >= 4 {
+            self.rex_always(false, 0, 0, dst);
+        } else {
+            self.rex_opt(false, 0, 0, dst);
+        }
         self.buf.push(0x0F);
         self.buf.push(0x90 | (cc & 0xF));
         self.modrm_rr(0, dst);
@@ -728,10 +799,27 @@ impl X86Encoder {
         self.buf.push(0xA2);
     }
 
-    /// Full ISB sequence: XOR EAX,EAX + CPUID.
+    /// Full ISB sequence: XOR EAX,EAX + CPUID, bracketed by a save/restore of
+    /// the allocatable GPRs CPUID clobbers.
+    ///
+    /// CPUID writes EAX/EBX/ECX/EDX (zero-extending into the full 64-bit RBX/
+    /// RDX). RAX/RCX are reserved scratch (safe to clobber), but RDX(2) and
+    /// RBX(3) are ALLOCATABLE value registers — in fact the first two the
+    /// linear-scan allocator hands out — so any guest value live across an ISB/
+    /// SB would be silently corrupted without this guard. Every FFI-call helper
+    /// already preserves the volatile set for the same reason; the barrier path
+    /// must too. push/pop are in-block and balanced (no CALL between them), so
+    /// they impose no cross-call stack-alignment requirement and leave RSP
+    /// unchanged. (Latent under the current per-instruction lift — no IR value
+    /// spans a barrier today — but a real ABI-correctness fix, made now so a
+    /// future SSA-promotion / opt change can't turn it into silent corruption.)
     pub fn emit_isb_sequence(&mut self) {
+        self.emit_push_r64(3);     // push rbx
+        self.emit_push_r64(2);     // push rdx
         self.emit_xor_zero_r32(0); // XOR EAX, EAX
         self.emit_cpuid();
+        self.emit_pop_r64(2);      // pop rdx
+        self.emit_pop_r64(3);      // pop rbx
     }
 
     // ── Atomics ───────────────────────────────────────────────────────────────
@@ -1272,5 +1360,262 @@ impl X86Encoder {
         self.rex_opt(true, dst, idx, base);
         self.buf.push(0x8D);
         self.modrm_sib(dst, base, idx, scale, disp);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // M4b-6: SIMD/FP/crypto encoder additions (BUILDSPEC §3).
+    // Pure-additive; every helper mirrors an existing former. Grouped by the
+    // mandatory-prefix / escape map it lives in.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// `66 0F 3A <op> /r ib` — SSE4.1 three-byte-escape immediate form
+    /// (reg = dst, r/m = src). Used by round*, insertps. (cvtps2ph reverses the
+    /// operands and is written out longhand.)
+    fn emit_sse4a_imm(&mut self, op: u8, dst: u8, src: u8, imm: u8) {
+        self.buf.push(0x66);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x3A);
+        self.buf.push(op);
+        self.modrm_rr(dst, src);
+        self.buf.push(imm);
+    }
+
+    /// `<prefix> 0F <op> /r [base+disp]` — scalar xmm load/store. `xmm` is the
+    /// reg field; load uses op 0x10, store uses op 0x11.
+    fn emit_sse_mem(&mut self, prefix: u8, op: u8, xmm: u8, base: u8, disp: i32) {
+        self.buf.push(prefix);
+        self.rex_opt(false, xmm, 0, base);
+        self.buf.push(0x0F);
+        self.buf.push(op);
+        self.modrm_mem(xmm, base, disp);
+    }
+
+    // ── §3.1 saturating + extra integer (66 0F xx) ───────────────────────────
+    pub fn emit_paddsb(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xEC, d, s); }
+    pub fn emit_paddsw(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xED, d, s); }
+    pub fn emit_paddusb(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xDC, d, s); }
+    pub fn emit_paddusw(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xDD, d, s); }
+    pub fn emit_psubsb(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xE8, d, s); }
+    pub fn emit_psubsw(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xE9, d, s); }
+    pub fn emit_psubusb(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xD8, d, s); }
+    pub fn emit_psubusw(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xD9, d, s); }
+    pub fn emit_packsswb(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0x63, d, s); }
+    pub fn emit_packuswb(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0x67, d, s); }
+    pub fn emit_packssdw(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0x6B, d, s); }
+    pub fn emit_punpckhqdq(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0x6D, d, s); }
+    pub fn emit_psadbw(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xF6, d, s); }
+    pub fn emit_pmaddwd(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xF5, d, s); }
+    pub fn emit_pavgb(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xE0, d, s); }
+    pub fn emit_pavgw(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xE3, d, s); }
+    pub fn emit_pmulhw(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xE5, d, s); }
+    pub fn emit_pmulhuw(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0xE4, d, s); }
+
+    // ── §3.2 SSSE3 / SSE4.1 / SSE4.2 (66 0F 38 xx) ───────────────────────────
+    pub fn emit_pabsb(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x1C, d, s); }
+    pub fn emit_pabsw(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x1D, d, s); }
+    pub fn emit_pabsd(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x1E, d, s); }
+    pub fn emit_phaddw(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x01, d, s); }
+    pub fn emit_phaddd(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x02, d, s); }
+    pub fn emit_pmaddubsw(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x04, d, s); }
+    pub fn emit_pcmpeqq(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x29, d, s); }
+    pub fn emit_pcmpgtq(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x37, d, s); }
+    pub fn emit_pblendvb(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x10, d, s); }
+    pub fn emit_packusdw(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x2B, d, s); }
+    pub fn emit_pmovsxbw(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x20, d, s); }
+    pub fn emit_pmovsxwd(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x23, d, s); }
+    pub fn emit_pmovsxdq(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x25, d, s); }
+    pub fn emit_pmovzxbw(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x30, d, s); }
+    pub fn emit_pmovzxwd(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x33, d, s); }
+    pub fn emit_pmovzxdq(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x35, d, s); }
+    pub fn emit_cvtph2ps(&mut self, d: u8, s: u8) { self.emit_sse4_op(0x38, 0x13, d, s); }
+
+    // ── §3.3 imm-bearing SSE4.1 / F16C ───────────────────────────────────────
+    pub fn emit_roundss(&mut self, d: u8, s: u8, imm: u8) { self.emit_sse4a_imm(0x0A, d, s, imm); }
+    pub fn emit_roundsd(&mut self, d: u8, s: u8, imm: u8) { self.emit_sse4a_imm(0x0B, d, s, imm); }
+    pub fn emit_roundps(&mut self, d: u8, s: u8, imm: u8) { self.emit_sse4a_imm(0x08, d, s, imm); }
+    pub fn emit_roundpd(&mut self, d: u8, s: u8, imm: u8) { self.emit_sse4a_imm(0x09, d, s, imm); }
+    pub fn emit_insertps(&mut self, d: u8, s: u8, imm: u8) { self.emit_sse4a_imm(0x21, d, s, imm); }
+
+    /// VCVTPS2PH xmm/m, xmm, imm8 — reg field is the SOURCE (operands reversed
+    /// vs the other 0F 3A ops), so this is longhand: reg=src, r/m=dst.
+    pub fn emit_cvtps2ph(&mut self, dst: u8, src: u8, imm: u8) {
+        self.buf.push(0x66);
+        self.rex_opt(false, src, 0, dst);
+        self.buf.push(0x0F);
+        self.buf.push(0x3A);
+        self.buf.push(0x1D);
+        self.modrm_rr(src, dst);
+        self.buf.push(imm);
+    }
+
+    /// SHUFPS xmm, xmm, imm8 (`0F C6 /r ib` — no mandatory prefix).
+    pub fn emit_shufps(&mut self, dst: u8, src: u8, imm: u8) {
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0xC6);
+        self.modrm_rr(dst, src);
+        self.buf.push(imm);
+    }
+    /// PSHUFLW xmm, xmm, imm8 (`F2 0F 70 /r ib`).
+    pub fn emit_pshuflw(&mut self, dst: u8, src: u8, imm: u8) {
+        self.buf.push(0xF2);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x70);
+        self.modrm_rr(dst, src);
+        self.buf.push(imm);
+    }
+    /// PSHUFHW xmm, xmm, imm8 (`F3 0F 70 /r ib`).
+    pub fn emit_pshufhw(&mut self, dst: u8, src: u8, imm: u8) {
+        self.buf.push(0xF3);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x70);
+        self.modrm_rr(dst, src);
+        self.buf.push(imm);
+    }
+
+    // ── §3.4 packed FP min/max + sqrt + int<->fp convert ─────────────────────
+    pub fn emit_minps(&mut self, d: u8, s: u8) { self.emit_sse_nopfx_op(0x5D, d, s); }
+    pub fn emit_maxps(&mut self, d: u8, s: u8) { self.emit_sse_nopfx_op(0x5F, d, s); }
+    pub fn emit_minpd(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0x5D, d, s); }
+    pub fn emit_maxpd(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0x5F, d, s); }
+    pub fn emit_minss(&mut self, d: u8, s: u8) { self.emit_sse_f3_op(0x5D, d, s); }
+    pub fn emit_maxss(&mut self, d: u8, s: u8) { self.emit_sse_f3_op(0x5F, d, s); }
+    pub fn emit_minsd(&mut self, d: u8, s: u8) { self.emit_sse_f2_op(0x5D, d, s); }
+    pub fn emit_maxsd(&mut self, d: u8, s: u8) { self.emit_sse_f2_op(0x5F, d, s); }
+    pub fn emit_andpd(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0x54, d, s); }
+    pub fn emit_orps(&mut self, d: u8, s: u8) { self.emit_sse_nopfx_op(0x56, d, s); }
+    pub fn emit_orpd(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0x56, d, s); }
+    pub fn emit_sqrtpd(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0x51, d, s); }
+    pub fn emit_cvtps2dq(&mut self, d: u8, s: u8) { self.emit_sse2_op(0x66, 0x5B, d, s); }
+    pub fn emit_cvttps2dq(&mut self, d: u8, s: u8) { self.emit_sse_f3_op(0x5B, d, s); }
+    pub fn emit_cvtdq2ps(&mut self, d: u8, s: u8) { self.emit_sse_nopfx_op(0x5B, d, s); }
+
+    // ── §3.5 GP<->XMM 32-bit, scalar mem moves, 32-bit + non-trunc cvt ───────
+    /// MOVD xmm, r/m32 (`66 0F 6E /r`, no REX.W). Zeroes xmm[127:32].
+    pub fn emit_movd_xmm_r32(&mut self, dst: u8, src: u8) {
+        self.buf.push(0x66);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x6E);
+        self.modrm_rr(dst, src);
+    }
+    /// MOVD r/m32, xmm (`66 0F 7E /r`, no REX.W). reg = xmm src.
+    pub fn emit_movd_r32_xmm(&mut self, dst: u8, src: u8) {
+        self.buf.push(0x66);
+        self.rex_opt(false, src, 0, dst);
+        self.buf.push(0x0F);
+        self.buf.push(0x7E);
+        self.modrm_rr(src, dst);
+    }
+    /// MOVQ xmm, xmm (`F3 0F 7E /r`). Copies low 64, zeroes [127:64] — the
+    /// one-instruction D-form upper-zero idiom (BUILDSPEC §1.4).
+    pub fn emit_movq_xmm_xmm(&mut self, dst: u8, src: u8) {
+        self.buf.push(0xF3);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x7E);
+        self.modrm_rr(dst, src);
+    }
+    /// MOVSS xmm, [base+disp] (`F3 0F 10`). Zeroes xmm[127:32].
+    pub fn emit_movss_load(&mut self, dst: u8, base: u8, disp: i32) { self.emit_sse_mem(0xF3, 0x10, dst, base, disp); }
+    /// MOVSS [base+disp], xmm (`F3 0F 11`).
+    pub fn emit_movss_store(&mut self, base: u8, disp: i32, src: u8) { self.emit_sse_mem(0xF3, 0x11, src, base, disp); }
+    /// MOVSD xmm, [base+disp] (`F2 0F 10`). Zeroes xmm[127:64].
+    pub fn emit_movsd_load(&mut self, dst: u8, base: u8, disp: i32) { self.emit_sse_mem(0xF2, 0x10, dst, base, disp); }
+    /// MOVSD [base+disp], xmm (`F2 0F 11`).
+    pub fn emit_movsd_store(&mut self, base: u8, disp: i32, src: u8) { self.emit_sse_mem(0xF2, 0x11, src, base, disp); }
+    /// CVTSI2SS xmm, r/m32 (`F3 0F 2A`, no REX.W).
+    pub fn emit_cvtsi2ss_r32(&mut self, dst: u8, src: u8) {
+        self.buf.push(0xF3);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x2A);
+        self.modrm_rr(dst, src);
+    }
+    /// CVTSI2SD xmm, r/m32 (`F2 0F 2A`, no REX.W).
+    pub fn emit_cvtsi2sd_r32(&mut self, dst: u8, src: u8) {
+        self.buf.push(0xF2);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x2A);
+        self.modrm_rr(dst, src);
+    }
+    /// CVTTSS2SI r32, xmm (`F3 0F 2C`, no REX.W, truncating).
+    pub fn emit_cvttss2si_r32(&mut self, dst: u8, src: u8) {
+        self.buf.push(0xF3);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x2C);
+        self.modrm_rr(dst, src);
+    }
+    /// CVTTSD2SI r32, xmm (`F2 0F 2C`, no REX.W, truncating).
+    pub fn emit_cvttsd2si_r32(&mut self, dst: u8, src: u8) {
+        self.buf.push(0xF2);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x2C);
+        self.modrm_rr(dst, src);
+    }
+    /// CVTSS2SI r64, xmm (`F3 0F 2D`, REX.W, MXCSR-rounded).
+    pub fn emit_cvtss2si_r64(&mut self, dst: u8, src: u8) {
+        self.buf.push(0xF3);
+        self.rex_opt(true, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x2D);
+        self.modrm_rr(dst, src);
+    }
+    /// CVTSD2SI r64, xmm (`F2 0F 2D`, REX.W, MXCSR-rounded).
+    pub fn emit_cvtsd2si_r64(&mut self, dst: u8, src: u8) {
+        self.buf.push(0xF2);
+        self.rex_opt(true, dst, 0, src);
+        self.buf.push(0x0F);
+        self.buf.push(0x2D);
+        self.modrm_rr(dst, src);
+    }
+
+    // §3.6 integer fixup helpers (emit_test_rr64 / emit_cmp_rr64 / emit_and_rr64
+    // / emit_or_rr64 / emit_xor_rr64 / emit_mov_r64_imm64 / emit_setcc_r8 /
+    // emit_jcc_rel32 / emit_shr_r64_imm8) all already exist on X86Encoder.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression (M4b adversarial-review CRITICAL fix): an 8-bit store from
+    /// SPL/BPL/SIL/DIL (regs 4..=7) MUST carry a REX prefix. Without it, ModRM
+    /// reg 4..7 encodes the legacy high bytes AH/CH/DH/BH — silently storing the
+    /// wrong byte of the WRONG register (a STRB of RSI would write DH). Assert a
+    /// REX prefix (0x40..=0x4F) leads the encoding for those source registers.
+    #[test]
+    fn strb_high_reg_forces_rex() {
+        for src in [5u8, 6, 7] {
+            // base = RAX, as in the STR-via-walker path ([RAX] = the host PA).
+            let mut e = X86Encoder::new();
+            e.emit_mov_mem8_r64(0, 0, src);
+            let bytes = e.finish();
+            assert!(
+                (0x40..=0x4F).contains(&bytes[0]),
+                "8-bit store from reg {src} must lead with a REX prefix, got {:#x}",
+                bytes[0]
+            );
+            // ...and the opcode (0x88) follows the REX, not leads.
+            assert_eq!(bytes[1], 0x88, "REX precedes the 0x88 MOV r/m8,r8 opcode");
+        }
+        // Sibling: SETcc into a high register has the identical hazard.
+        for dst in [5u8, 6, 7] {
+            let mut e = X86Encoder::new();
+            e.emit_setcc_r8(0x5 /* NZ */, dst);
+            let bytes = e.finish();
+            assert!(
+                (0x40..=0x4F).contains(&bytes[0]),
+                "SETcc into reg {dst} must lead with a REX prefix, got {:#x}",
+                bytes[0]
+            );
+            assert_eq!(bytes[1], 0x0F, "REX precedes the 0F 9x SETcc opcode");
+        }
     }
 }

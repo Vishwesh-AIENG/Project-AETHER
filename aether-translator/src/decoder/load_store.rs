@@ -86,6 +86,14 @@ fn decode_unsigned_offset(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if v != 0 {
         return decode_fp_simd_unsigned(word, size, opc, imm12, rn, rt);
     }
+    // PRFM (prefetch memory), unsigned offset: size=11, opc=10, V=0. A prefetch
+    // is a pure micro-architectural performance hint with no architectural
+    // state effect, so decode it as a no-op (ubiquitous in optimised kernel /
+    // bionic code; otherwise check_ls_opc rejects size=11/opc=10 as an invalid
+    // 64-bit sign-extending load).
+    if size == 0b11 && opc == 0b10 {
+        return Ok(DecodedInsn::Nop);
+    }
     check_ls_opc(size, opc)?;
     let access = size_from_2bits(size, false);
     let imm = (imm12 << scale_of(access)) as i32;
@@ -108,6 +116,11 @@ fn decode_immediate_pre_post_unscaled(word: u32) -> Result<DecodedInsn, DecodeEr
     let rt = Reg((word & 0x1F) as u8);
     if v != 0 {
         return decode_fp_simd_imm(word, size, opc, imm9, op2, rn, rt);
+    }
+    // PRFUM (prefetch memory, unscaled): size=11, opc=10, op2=00, V=0 — a
+    // no-op performance hint (sibling of PRFM; see decode_unsigned_offset).
+    if size == 0b11 && opc == 0b10 && op2 == 0b00 {
+        return Ok(DecodedInsn::Nop);
     }
     check_ls_opc(size, opc)?;
     let access = size_from_2bits(size, false);

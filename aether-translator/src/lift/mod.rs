@@ -257,7 +257,7 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             if set_flags {
                 let f = cx.flags();
-                cx.push(IrOp::AddS { dst: v_res, flags: f, a: v_rn, b: v_imm });
+                cx.push(IrOp::AddS { dst: v_res, flags: f, a: v_rn, b: v_imm, sf });
                 cx.push(IrOp::WriteFlags { src: f });
             } else {
                 cx.push(IrOp::Add { dst: v_res, a: v_rn, b: v_imm });
@@ -271,7 +271,7 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             if set_flags {
                 let f = cx.flags();
-                cx.push(IrOp::SubS { dst: v_res, flags: f, a: v_rn, b: v_imm });
+                cx.push(IrOp::SubS { dst: v_res, flags: f, a: v_rn, b: v_imm, sf });
                 cx.push(IrOp::WriteFlags { src: f });
             } else {
                 cx.push(IrOp::Sub { dst: v_res, a: v_rn, b: v_imm });
@@ -284,7 +284,7 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             if set_flags {
                 let f = cx.flags();
-                cx.push(IrOp::AndS { dst: v_res, flags: f, a: v_rn, b: v_imm });
+                cx.push(IrOp::AndS { dst: v_res, flags: f, a: v_rn, b: v_imm, sf });
                 cx.push(IrOp::WriteFlags { src: f });
             } else {
                 cx.push(IrOp::And { dst: v_res, a: v_rn, b: v_imm });
@@ -333,32 +333,68 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // pattern computation. For Phase A we lift to a generic shift+mask
             // sequence — semantically equivalent for common immr/imms forms
             // (SXTW, UXTW, LSL/LSR aliases). Phase B refines.
+            // Correct ARMv8 bitfield semantics (DDI0487 §C6 BFM/SBFM/UBFM),
+            // split into the two architectural cases:
+            //   imms >= immr : EXTRACT a (imms-immr+1)-bit field from
+            //                  src[imms:immr], right-aligned at bit 0
+            //                  (UBFX / SBFX / LSR / UXTW / SXTW forms).
+            //   imms <  immr : INSERT src[imms:0] at bit (regsize-immr)
+            //                  (UBFIZ / SBFIZ / LSL forms).
+            // The previous unified `ROR(src,immr) & ((1<<(imms+1))-1)` form
+            // over-masked for imms>=immr with immr>0: the rotate wrapped the
+            // source's low (address) bits into the too-wide mask. e.g.
+            // `ubfx x11,x6,#30,#9` (immr=30,imms=38) returned 0x7c00000001
+            // instead of 1, corrupting __create_page_tables' loop bound and
+            // hanging the kernel boot. (caught running the real GKI kernel.)
+            let regsize: u8 = if sf { 64 } else { 32 };
+            let kind = if sf { IrValueKind::I64 } else { IrValueKind::I32 };
             let v_rn = cx.read_reg(rn, sf);
-            let v_immr = cx.const_i64(immr as i64);
-            let v_shifted = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
-            // Rotate-right by immr, then take bottom imms+1 bits.
-            cx.push(IrOp::Ror { dst: v_shifted, a: v_rn, b: v_immr });
-            let mask: i64 = if imms >= 63 {
-                !0
-            } else {
-                // imms ≤ 62 → shift by at most 63, safe in u64 then cast
-                ((1u64 << (imms as u32 + 1)).wrapping_sub(1)) as i64
+            let mask_for = |w: u8| -> i64 {
+                if w >= 64 { !0i64 } else { ((1u64 << w) - 1) as i64 }
             };
-            let v_mask = cx.const_i64(mask);
-            let v_masked = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
-            cx.push(IrOp::And { dst: v_masked, a: v_shifted, b: v_mask });
-            // SBFM (opc=00) does sign-extension; UBFM (opc=10) zero-extends (no-op since mask).
-            // BFM (opc=01) merges with existing rd bits; that's a more involved op.
+            // (field value right-aligned-or-placed, its bit width, its lsb position)
+            let (v_field, field_width, field_lsb) = if imms >= immr {
+                let width = imms - immr + 1;
+                let v_immr = cx.const_i64(immr as i64);
+                let v_sh = cx.val(kind);
+                cx.push(IrOp::LShr { dst: v_sh, a: v_rn, b: v_immr });
+                let v_mask = cx.const_i64(mask_for(width));
+                let v_f = cx.val(kind);
+                cx.push(IrOp::And { dst: v_f, a: v_sh, b: v_mask });
+                (v_f, width, 0u8)
+            } else {
+                let width = imms + 1;
+                let v_mask = cx.const_i64(mask_for(width));
+                let v_low = cx.val(kind);
+                cx.push(IrOp::And { dst: v_low, a: v_rn, b: v_mask });
+                let shift = regsize - immr;
+                let v_shc = cx.const_i64(shift as i64);
+                let v_f = cx.val(kind);
+                cx.push(IrOp::Shl { dst: v_f, a: v_low, b: v_shc });
+                (v_f, width, shift)
+            };
+            // opc: 0b00 = SBFM (sign-extend), 0b01 = BFM (merge), 0b10 = UBFM.
             let v_res = match opc {
                 0b00 => {
-                    let v_sext = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
+                    let v_sext = cx.val(kind);
                     cx.push(IrOp::Sext {
-                        dst: v_sext, a: v_masked,
-                        from_bits: imms + 1, to_bits: if sf { 64 } else { 32 },
+                        dst: v_sext, a: v_field,
+                        from_bits: field_lsb + field_width, to_bits: regsize,
                     });
                     v_sext
                 }
-                _ => v_masked,
+                0b01 => {
+                    // BFM: keep rd bits outside the field, OR in the new field.
+                    let placed_mask = (mask_for(field_width) as u64) << field_lsb;
+                    let v_dst = cx.read_reg(rd, sf);
+                    let v_keep = cx.const_i64(!(placed_mask as i64));
+                    let v_kept = cx.val(kind);
+                    cx.push(IrOp::And { dst: v_kept, a: v_dst, b: v_keep });
+                    let v_m = cx.val(kind);
+                    cx.push(IrOp::Or { dst: v_m, a: v_kept, b: v_field });
+                    v_m
+                }
+                _ => v_field,
             };
             cx.write_reg(rd, v_res, sf);
         }
@@ -387,7 +423,7 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             if set_flags {
                 let f = cx.flags();
-                cx.push(IrOp::AddS { dst: v_res, flags: f, a: v_rn, b: v_rm });
+                cx.push(IrOp::AddS { dst: v_res, flags: f, a: v_rn, b: v_rm, sf });
                 cx.push(IrOp::WriteFlags { src: f });
             } else {
                 cx.push(IrOp::Add { dst: v_res, a: v_rn, b: v_rm });
@@ -401,11 +437,31 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             if set_flags {
                 let f = cx.flags();
-                cx.push(IrOp::SubS { dst: v_res, flags: f, a: v_rn, b: v_rm });
+                cx.push(IrOp::SubS { dst: v_res, flags: f, a: v_rn, b: v_rm, sf });
                 cx.push(IrOp::WriteFlags { src: f });
             } else {
                 cx.push(IrOp::Sub { dst: v_res, a: v_rn, b: v_rm });
             }
+            cx.write_reg(rd, v_res, sf);
+        }
+        AdcSub { sf, rd, rn, rm, sub } => {
+            // ADCS / SBCS: result = a ± b ± carry-in, then set NZCV. The
+            // carry-in is the live ARM C bit; the lowering reads it straight
+            // from the in-memory NZCV (BT [R15+NZCV],29), so `c_in` only needs
+            // to be a defined flags id — ReadFlags supplies that. WriteFlags is
+            // a no-op in lowering (flags live in memory via build_nzcv).
+            let v_rn = cx.read_reg(rn, sf);
+            let v_rm = cx.read_reg(rm, sf);
+            let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
+            let c_in = cx.flags();
+            cx.push(IrOp::ReadFlags { dst: c_in });
+            let f = cx.flags();
+            if sub {
+                cx.push(IrOp::Sbcs { dst: v_res, flags: f, a: v_rn, b: v_rm, c_in, sf });
+            } else {
+                cx.push(IrOp::Adcs { dst: v_res, flags: f, a: v_rn, b: v_rm, c_in, sf });
+            }
+            cx.push(IrOp::WriteFlags { src: f });
             cx.write_reg(rd, v_res, sf);
         }
         LogicalReg { sf, opc, rd, rn, rm, shift, amount, invert } => {
@@ -425,7 +481,7 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 0b00 | 0b11 => {
                     if set_flags {
                         let f = cx.flags();
-                        cx.push(IrOp::AndS { dst: v_res, flags: f, a: v_rn, b: v_rm });
+                        cx.push(IrOp::AndS { dst: v_res, flags: f, a: v_rn, b: v_rm, sf });
                         cx.push(IrOp::WriteFlags { src: f });
                     } else {
                         cx.push(IrOp::And { dst: v_res, a: v_rn, b: v_rm });
@@ -446,14 +502,14 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             if sub {
                 if set_flags {
                     let f = cx.flags();
-                    cx.push(IrOp::SubS { dst: v_res, flags: f, a: v_rn, b: v_rm });
+                    cx.push(IrOp::SubS { dst: v_res, flags: f, a: v_rn, b: v_rm, sf });
                     cx.push(IrOp::WriteFlags { src: f });
                 } else {
                     cx.push(IrOp::Sub { dst: v_res, a: v_rn, b: v_rm });
                 }
             } else if set_flags {
                 let f = cx.flags();
-                cx.push(IrOp::AddS { dst: v_res, flags: f, a: v_rn, b: v_rm });
+                cx.push(IrOp::AddS { dst: v_res, flags: f, a: v_rn, b: v_rm, sf });
                 cx.push(IrOp::WriteFlags { src: f });
             } else {
                 cx.push(IrOp::Add { dst: v_res, a: v_rn, b: v_rm });
@@ -461,35 +517,18 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.write_reg_or_sp(rd, v_res, sf, !set_flags);
         }
         Csel { sf, rd, rn, rm, cond, op2 } => {
+            // M4a closeout: pass rm RAW with variant=op2 and let the LOWERING
+            // apply the CSINC(+1)/CSINV(~)/CSNEG(-) transform exactly once. The
+            // old code pre-transformed rm in the lift AND passed the variant, so
+            // the lowering re-applied it (CSINC->+2, CSINV->identity, CSNEG->+0).
+            // Flags come from the materialized NZCV at [R15+0x108], read by the
+            // lowering — no ReadFlags needed (it is a no-op now).
             let v_rn = cx.read_reg(rn, sf);
             let v_rm = cx.read_reg(rm, sf);
-            // Pre-process rm per variant: CSEL=v_rm, CSINC=v_rm+1, CSINV=~v_rm, CSNEG=-v_rm
-            let v_rm_mod = match op2 {
-                0 => v_rm,
-                1 => {
-                    let one = cx.const_i64(1);
-                    let v = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
-                    cx.push(IrOp::Add { dst: v, a: v_rm, b: one });
-                    v
-                }
-                2 => {
-                    let v = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
-                    cx.push(IrOp::Not { dst: v, a: v_rm });
-                    v
-                }
-                3 => {
-                    let v = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
-                    cx.push(IrOp::Neg { dst: v, a: v_rm });
-                    v
-                }
-                _ => return Err(LiftErr::Unimplemented(0)),
-            };
-            // Need current flags
             let f = cx.flags();
-            cx.push(IrOp::ReadFlags { dst: f });
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             cx.push(IrOp::Csel {
-                dst: v_res, a: v_rn, b: v_rm_mod, cond, flags: f, variant: op2,
+                dst: v_res, a: v_rn, b: v_rm, cond, flags: f, variant: op2,
             });
             cx.write_reg(rd, v_res, sf);
         }
@@ -547,13 +586,12 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let flags_in = cx.flags();
             cx.push(IrOp::ReadFlags { dst: flags_in });
             let flags_out = cx.flags();
-            // CCMN if is_neg else CCMP
+            // is_neg=true -> CCMN (flags from a+b); false -> CCMP (a-b).
             cx.push(IrOp::CCmp {
                 flags_out, a: v_rn, b: v_rm, cond,
-                nzcv_if_false: nzcv, flags_in,
+                nzcv_if_false: nzcv, flags_in, is_neg, sf,
             });
             cx.push(IrOp::WriteFlags { src: flags_out });
-            let _ = is_neg; // CCMN vs CCMP encoded into nzcv handling; refined in Phase B
         }
         DecodedInsn::Crc32 { sf: _, rd, rn, rm, sz, castagnoli } => {
             let v_rn = cx.read_reg(rn, false);
@@ -725,81 +763,158 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // CFG-level Branch op gets attached in the block-builder pass; here
             // we leave the WritePc as the side effect.
         }
+        // M3: host-dispatch model — every terminator computes its absolute next
+        // guest PC and emits WritePc (lowered to [R15+PC_DISP] by M1). The old
+        // placeholder CFG ops (CondBranch/Cbz/.. with BlockId(0)) were dead in
+        // the single-block path. The dispatcher reads regfile.pc after each RET.
+        //
+        // FLAG HAZARD: Cmp/Csel ignore their IR `flags` operand and consume live
+        // x86 EFLAGS; ConstI64(0) lowers to XOR (clobbers flags). So in the
+        // conditional arms ALL constants are emitted BEFORE the Cmp — the only op
+        // between Cmp and Csel is the Csel. Csel variant 0: cond TRUE => a, FALSE
+        // => b, so a=taken, b=fallthru (proven from lower_int.rs Csel lowering).
         Bl { offset } => {
-            // Link register x30 = pc + 4
+            // Link register x30 = pc + 4, then branch.
             let v_link = cx.const_i64(cx.pc as i64 + 4);
             cx.write_reg(Reg(30), v_link, true);
             let v_target = cx.const_i64(cx.pc as i64 + offset as i64);
-            cx.push(IrOp::Call { target: v_target, link_pc: cx.pc.wrapping_add(4) });
+            cx.push(IrOp::WritePc { src: v_target });
         }
         Bcond { cond, offset } => {
+            // BEST-EFFORT ONLY: relies on x86 EFLAGS left live by an in-block
+            // flag-setter, which intervening lifted ops clobber. NZCV is not yet
+            // materialised (ReadFlags lowers to UD2). NOT exercised by the M3
+            // proof; correct conditional branching needs flag materialisation.
+            let v_taken = cx.const_i64(cx.pc as i64 + offset as i64);
+            let v_fall = cx.const_i64(cx.pc as i64 + 4);
             let f = cx.flags();
-            cx.push(IrOp::ReadFlags { dst: f });
-            // Encode target as a writable PC update guarded by the flag.
-            // For Phase A we just push a CondBranch placeholder with both
-            // blocks = self; CFG pass rewrites.
-            let _ = offset;
-            cx.push(IrOp::CondBranch {
-                cond, flags: f,
-                taken: crate::ir::BlockId(0),
-                fallthru: crate::ir::BlockId(0),
-            });
+            let v_next = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Csel { dst: v_next, a: v_taken, b: v_fall, cond, flags: f, variant: 0 });
+            cx.push(IrOp::WritePc { src: v_next });
         }
         Br { rn } => {
             let v_target = cx.read_reg(rn, true);
-            cx.push(IrOp::IndirectBranch { target: v_target });
+            cx.push(IrOp::WritePc { src: v_target });
         }
         Blr { rn } => {
+            let v_target = cx.read_reg(rn, true); // read rn before x30 clobber
             let v_link = cx.const_i64(cx.pc as i64 + 4);
             cx.write_reg(Reg(30), v_link, true);
-            let v_target = cx.read_reg(rn, true);
-            cx.push(IrOp::Call { target: v_target, link_pc: cx.pc.wrapping_add(4) });
+            cx.push(IrOp::WritePc { src: v_target });
         }
         Ret { rn } => {
             let v_target = cx.read_reg(rn, true);
-            cx.push(IrOp::Return { target: v_target });
+            cx.push(IrOp::WritePc { src: v_target });
+        }
+        Eret => {
+            // ERET — block terminator. Two architectural effects matter to the
+            // DBT register-file model:
+            //   1. PC      <- ELR_EL1
+            //   2. PSTATE  <- SPSR_EL1   (only the NZCV condition flags are
+            //                             modeled in the GPR-file; bits [31:28])
+            //
+            // Composed entirely from already-proven ops (Mrs read of a modeled
+            // sysreg slot, And, Msr write that aliases the NZCV word):
+            //   v_elr   = Mrs ELR_EL1            ; read return address
+            //   v_spsr  = Mrs SPSR_EL1           ; read saved PSTATE
+            //   v_mask  = 0xF000_0000            ; NZCV bit mask
+            //   v_nzcv  = v_spsr & v_mask        ; isolate N/Z/C/V (already aligned
+            //                                      with the packed NZCV word format)
+            //   Msr NZCV_EL0, v_nzcv             ; aliases [R15+0x108] in lowering
+            //   WritePc v_elr                    ; next PC for the dispatcher
+            //
+            // ORDER: the ELR read happens first so the WritePc value is computed
+            // before the Msr; the Msr to NZCV_EL0 lowers to a plain store to
+            // [R15+0x108] and does not disturb PC. WritePc is emitted last so the
+            // block's final architectural side effect is the next-PC write, the
+            // same convention every other terminator (Ret/Br/Bcond) follows.
+            use crate::decoder::sysreg::SysReg;
+            let v_elr = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Mrs { dst: v_elr, reg: SysReg::ElrEl1 });
+            let v_spsr = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Mrs { dst: v_spsr, reg: SysReg::SpsrEl1 });
+            let v_mask = cx.const_i64(0xF000_0000);
+            let v_nzcv = cx.val(IrValueKind::I64);
+            cx.push(IrOp::And { dst: v_nzcv, a: v_spsr, b: v_mask });
+            cx.push(IrOp::Msr { reg: SysReg::NzcvEl0, val: v_nzcv });
+            cx.push(IrOp::WritePc { src: v_elr });
         }
         Cbz { sf, rt, offset } => {
+            // All constants first (ConstI64(0)=XOR clobbers flags); then Cmp;
+            // then Csel (the only op between Cmp and the PC write).
+            let v_zero = cx.const_i64(0);
+            let v_taken = cx.const_i64(cx.pc as i64 + offset as i64);
+            let v_fall = cx.const_i64(cx.pc as i64 + 4);
             let v_rt = cx.read_reg(rt, sf);
-            let _ = offset;
-            cx.push(IrOp::Cbz {
-                a: v_rt,
-                taken: crate::ir::BlockId(0),
-                fallthru: crate::ir::BlockId(0),
-            });
+            let f = cx.flags();
+            cx.push(IrOp::Cmp { flags: f, a: v_rt, b: v_zero, sf }); // ZF=1 iff rt==0
+            let v_next = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Csel { dst: v_next, a: v_taken, b: v_fall, cond: Cond::Eq, flags: f, variant: 0 });
+            cx.push(IrOp::WritePc { src: v_next });
         }
         Cbnz { sf, rt, offset } => {
+            let v_zero = cx.const_i64(0);
+            let v_taken = cx.const_i64(cx.pc as i64 + offset as i64);
+            let v_fall = cx.const_i64(cx.pc as i64 + 4);
             let v_rt = cx.read_reg(rt, sf);
-            let _ = offset;
-            cx.push(IrOp::Cbnz {
-                a: v_rt,
-                taken: crate::ir::BlockId(0),
-                fallthru: crate::ir::BlockId(0),
-            });
+            let f = cx.flags();
+            cx.push(IrOp::Cmp { flags: f, a: v_rt, b: v_zero, sf });
+            let v_next = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Csel { dst: v_next, a: v_taken, b: v_fall, cond: Cond::Ne, flags: f, variant: 0 });
+            cx.push(IrOp::WritePc { src: v_next });
         }
         Tbz { bit, rt, offset } => {
+            let v_taken = cx.const_i64(cx.pc as i64 + offset as i64);
+            let v_fall = cx.const_i64(cx.pc as i64 + 4);
+            let v_one = cx.const_i64(1);
+            let v_zero = cx.const_i64(0);
+            let v_sh = cx.const_i64(bit as i64);
             let v_rt = cx.read_reg(rt, true);
-            let _ = offset;
-            cx.push(IrOp::Tbz {
-                a: v_rt, bit,
-                taken: crate::ir::BlockId(0),
-                fallthru: crate::ir::BlockId(0),
-            });
+            let v_shr = cx.val(IrValueKind::I64);
+            cx.push(IrOp::LShr { dst: v_shr, a: v_rt, b: v_sh });
+            let v_bitval = cx.val(IrValueKind::I64);
+            cx.push(IrOp::And { dst: v_bitval, a: v_shr, b: v_one });
+            let f = cx.flags();
+            cx.push(IrOp::Cmp { flags: f, a: v_bitval, b: v_zero, sf: true }); // ZF=1 iff bit==0
+            let v_next = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Csel { dst: v_next, a: v_taken, b: v_fall, cond: Cond::Eq, flags: f, variant: 0 });
+            cx.push(IrOp::WritePc { src: v_next });
         }
         Tbnz { bit, rt, offset } => {
+            let v_taken = cx.const_i64(cx.pc as i64 + offset as i64);
+            let v_fall = cx.const_i64(cx.pc as i64 + 4);
+            let v_one = cx.const_i64(1);
+            let v_zero = cx.const_i64(0);
+            let v_sh = cx.const_i64(bit as i64);
             let v_rt = cx.read_reg(rt, true);
-            let _ = offset;
-            cx.push(IrOp::Tbnz {
-                a: v_rt, bit,
-                taken: crate::ir::BlockId(0),
-                fallthru: crate::ir::BlockId(0),
-            });
+            let v_shr = cx.val(IrValueKind::I64);
+            cx.push(IrOp::LShr { dst: v_shr, a: v_rt, b: v_sh });
+            let v_bitval = cx.val(IrValueKind::I64);
+            cx.push(IrOp::And { dst: v_bitval, a: v_shr, b: v_one });
+            let f = cx.flags();
+            cx.push(IrOp::Cmp { flags: f, a: v_bitval, b: v_zero, sf: true });
+            let v_next = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Csel { dst: v_next, a: v_taken, b: v_fall, cond: Cond::Ne, flags: f, variant: 0 });
+            cx.push(IrOp::WritePc { src: v_next });
         }
 
         // ===== Exception generation =====
         Svc { imm16 } => cx.push(IrOp::Svc { imm16 }),
-        Hvc { imm16 } => cx.push(IrOp::Hvc { imm16 }),
-        Smc { imm16 } => cx.push(IrOp::Smc { imm16 }),
+        // M4b-4: HVC/SMC are the PSCI conduit (the guest DT uses method="hvc").
+        // The lowering services PSCI synchronously (a runtime call that reads
+        // x0..x3, runs PSCI, writes x0) and returns to the NEXT instruction, so
+        // emit the resume PC — HVC/SMC are block terminators, and without a
+        // WritePc the dispatcher would not know where to continue.
+        Hvc { imm16 } => {
+            cx.push(IrOp::Hvc { imm16 });
+            let v_next = cx.const_i64(cx.pc as i64 + 4);
+            cx.push(IrOp::WritePc { src: v_next });
+        }
+        Smc { imm16 } => {
+            cx.push(IrOp::Smc { imm16 });
+            let v_next = cx.const_i64(cx.pc as i64 + 4);
+            cx.push(IrOp::WritePc { src: v_next });
+        }
         Brk { imm16 } => cx.push(IrOp::Brk { imm16 }),
         Hlt { imm16 } => cx.push(IrOp::Hlt { imm16 }),
 
@@ -835,18 +950,115 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.push(IrOp::Msr { reg, val: v_src });
         }
         MsrImm { op1, crm, op2 } => {
-            // PSTATE write — model as a Hint with a packed immediate. Phase B
-            // unfolds to specific flag/PSTATE bit writes.
-            let imm = (op1.wrapping_shl(6)) | (crm.wrapping_shl(2)) | (op2 & 0x3);
-            cx.push(IrOp::Hint { imm: imm.wrapping_add(64) });
+            // PSTATE immediate write (MSR <pstatefield>, #imm). The GKI kernel
+            // issues these from the very first block (`init_kernel_el` runs
+            // `MSR SPSel,#1`; every local_irq_{disable,enable} is
+            // `MSR DAIFSet/DAIFClr,#imm`), so they MUST be functional — the old
+            // `IrOp::Hint` lowered to UD2 and halted the dispatch loop on the
+            // first one. Model the two fields the bring-up register file tracks
+            // (SPSel @ slot 23, DAIF @ slot 22) as real read-modify-writes of
+            // their context slots, composed entirely from already-proven ops
+            // (Mrs/Or/And/Msr to plain sysreg slots — none trigger a TLB flush).
+            // Unmodeled fields (PAN/UAO/DIT/SSBS/TCO) SINK to a no-op; they must
+            // NOT UD2. DAIF feeds exceptions::irqs_unmasked(), so masking must be
+            // live before IRQ injection or the guest takes an IRQ inside a
+            // critical section it believes is masked.
+            use crate::decoder::sysreg::SysReg;
+            match (op1, op2) {
+                // MSR SPSel, #imm  (op1=0b000, op2=0b101): SPSel <- CRm[0].
+                (0b000, 0b101) => {
+                    let v = cx.const_i64((crm & 1) as i64);
+                    cx.push(IrOp::Msr { reg: SysReg::SpselEl1, val: v });
+                }
+                // MSR DAIFSet, #imm (op1=0b011, op2=0b110): DAIF |= CRm[3:0]<<6.
+                (0b011, 0b110) => {
+                    let cur = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Mrs { dst: cur, reg: SysReg::DaifEl0 });
+                    let mask = cx.const_i64(((crm & 0xF) as i64) << 6);
+                    let res = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Or { dst: res, a: cur, b: mask });
+                    cx.push(IrOp::Msr { reg: SysReg::DaifEl0, val: res });
+                }
+                // MSR DAIFClr, #imm (op1=0b011, op2=0b111): DAIF &= ~(CRm[3:0]<<6).
+                (0b011, 0b111) => {
+                    let cur = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Mrs { dst: cur, reg: SysReg::DaifEl0 });
+                    let mask = cx.const_i64(!(((crm & 0xF) as i64) << 6));
+                    let res = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::And { dst: res, a: cur, b: mask });
+                    cx.push(IrOp::Msr { reg: SysReg::DaifEl0, val: res });
+                }
+                // Unmodeled PSTATE field — sink to a no-op (never UD2).
+                _ => { let _ = (op1, crm, op2); }
+            }
         }
-        SysIc { rt, .. } | SysDc { rt, .. } | SysAt { rt, .. } | SysTlbi { rt, .. } => {
-            // Cache / TLB maintenance ops — model as Hint for now (require Rt read).
+        SysIc { rt, .. } | SysAt { rt, .. } => {
+            // IC / AT cache & address-translation maintenance — model as a Hint
+            // (require Rt read for liveness). These do not touch the software MMU
+            // TLB or the JIT block cache, so a no-op is correct.
             let _ = cx.read_reg(rt, true);
             cx.push(IrOp::Hint { imm: 128 });
         }
+        SysDc { op1, crm, op2, rt } => {
+            // DC ZVA (op1=011, CRn=0111, CRm=0100, op2=001) ZEROES the naturally-
+            // aligned DCZID_EL0-sized block containing Xt. Unlike the clean /
+            // invalidate DC ops (no-ops in this model), ZVA *writes memory* — the
+            // kernel's clear_page / __memset_aarch64 issue it in a tight loop, so
+            // a Hint no-op there would leave whole pages uninitialized.
+            //
+            // DCZID_EL0 is seeded to 0x4 => a 64-byte block (runtime::context).
+            // Emit 8 naturally-aligned 8-byte zero stores through the same MMU
+            // store path as a normal STR (RAM write + No-Boundary window clamp +
+            // MMIO routing), reusing lowering that is already proven.
+            if op1 == 0b011 && crm == 0b0100 && op2 == 0b001 {
+                let v_xt = cx.read_reg(rt, true);
+                let v_mask = cx.const_i64(!63i64); // align down to the 64-byte block
+                let v_base = cx.val(IrValueKind::I64);
+                cx.push(IrOp::And { dst: v_base, a: v_xt, b: v_mask });
+                let v_zero = cx.const_i64(0);
+                for i in 0..8i64 {
+                    let v_off = cx.const_i64(i * 8);
+                    let v_addr = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Add { dst: v_addr, a: v_base, b: v_off });
+                    cx.push(IrOp::Store {
+                        val: v_zero,
+                        addr: v_addr,
+                        ty: StoreTy::U64,
+                        order: MemOrder::Relaxed,
+                    });
+                }
+            } else {
+                // DC CVAC / CIVAC / IVAC / CSW / CISW / ... — cache maintenance
+                // no-ops against the software MMU model.
+                let _ = cx.read_reg(rt, true);
+                cx.push(IrOp::Hint { imm: 128 });
+            }
+        }
+        SysTlbi { op2, rt, .. } => {
+            // TLB invalidate. The address-taking EL1 forms (VAE1=op2 001,
+            // VAAE1=011, VALE1=101, VAALE1=111) carry the page VA in Rt; the
+            // broad forms (VMALLE1=000, ASIDE1=010) ignore the register. The
+            // odd-`op2` rule selects the VA-taking variants for the EL1 set.
+            // (Rt==0b11111 / XZR is the canonical encoding for the broad forms.)
+            let va_form = (op2 & 1) == 1 && rt.0 != 31;
+            if va_form {
+                let v_va = cx.read_reg(rt, true);
+                cx.push(IrOp::TlbInval { va: Some(v_va) });
+            } else {
+                // Read Rt for liveness even on the broad form (harmless; some
+                // encodings still name a register).
+                let _ = cx.read_reg(rt, true);
+                cx.push(IrOp::TlbInval { va: None });
+            }
+        }
 
-        // ===== SIMD/FP/Crypto (coarse lift — semantics in Phase B) =====
+        // ===== SIMD/FP/Crypto =====
+        // M4b-6: typed NEON 3-same -> V-register-numbered ctx-template IR ops.
+        SimdThreeSame { q, u, size, opcode, rm, rn, rd } => {
+            lift_simd_3same(cx, q, u, size, opcode, rd.0, rn.0, rm.0);
+        }
+
+        // Coarse fallback for SIMD/FP families not yet typed (semantics Phase B).
         AdvSimd { raw } => {
             let v = cx.val(IrValueKind::I32);
             cx.push(IrOp::ConstI32 { dst: v, val: raw as i32 });
@@ -882,6 +1094,83 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
         Unknown(w) => return Err(LiftErr::Sentinel(w)),
     }
     Ok(())
+}
+
+/// Classify a NEON 3-same encoding `(u, opcode[, size])` into a V-register-
+/// numbered ctx-template IR op (BUILDSPEC §5.1). Recognized integer forms map
+/// to VecBin/VecCmp/VecPair; FP 3-same and not-yet-typed forms fall back to a
+/// `Hint` (which lowers to UD2 — fail-loud, never a silent wrong answer).
+fn lift_simd_3same(
+    cx: &mut LiftCtx<'_>,
+    q: bool,
+    u: bool,
+    size: u8,
+    opcode: u8,
+    d: u8,
+    n: u8,
+    m: u8,
+) {
+    use crate::ir::ops::{VecBinOp as B, VecCmpOp as C, VecPairOp as P};
+    let vb = |op| IrOp::VecBin { op, size, q, d, n, m };
+    let vc = |op| IrOp::VecCmp { op, size, q, d, n, m };
+    let vp = |op| IrOp::VecPair { op, size, q, d, n, m };
+    let ir = match (u, opcode) {
+        // halving / saturating add-sub
+        (false, 0b00000) => Some(vb(B::SHadd)),
+        (true, 0b00000) => Some(vb(B::UHadd)),
+        (false, 0b00001) => Some(vb(B::SqAdd)),
+        (true, 0b00001) => Some(vb(B::UqAdd)),
+        (false, 0b00010) => Some(vb(B::SrHadd)),
+        (true, 0b00010) => Some(vb(B::UrHadd)),
+        (false, 0b00101) => Some(vb(B::SqSub)),
+        (true, 0b00101) => Some(vb(B::UqSub)),
+        // logical (opcode 00011) — selected by (u, size)
+        (false, 0b00011) => Some(vb(match size {
+            0 => B::And,
+            1 => B::Bic,
+            2 => B::Or,
+            _ => B::Orn,
+        })),
+        (true, 0b00011) => match size {
+            0 => Some(vb(B::Eor)),
+            _ => None, // BSL/BIT/BIF — Tier 1
+        },
+        // compares
+        (false, 0b00110) => Some(vc(C::SGt)),
+        (true, 0b00110) => Some(vc(C::UGt)),
+        (false, 0b00111) => Some(vc(C::SGe)),
+        (true, 0b00111) => Some(vc(C::UGe)),
+        (true, 0b10001) => Some(vc(C::Eq)), // CMEQ (u=0,10001 is CMTST — Tier 1)
+        // min / max
+        (false, 0b01100) => Some(vb(B::SMax)),
+        (true, 0b01100) => Some(vb(B::UMax)),
+        (false, 0b01101) => Some(vb(B::SMin)),
+        (true, 0b01101) => Some(vb(B::UMin)),
+        // abd / aba
+        (false, 0b01110) => Some(vb(B::SAbd)),
+        (true, 0b01110) => Some(vb(B::UAbd)),
+        (false, 0b01111) => Some(vb(B::SAba)),
+        (true, 0b01111) => Some(vb(B::UAba)),
+        // add / sub
+        (false, 0b10000) => Some(vb(B::Add)),
+        (true, 0b10000) => Some(vb(B::Sub)),
+        // mla / mls
+        (false, 0b10010) => Some(vb(B::Mla)),
+        (true, 0b10010) => Some(vb(B::Mls)),
+        // mul (u=0); pmul (u=1) deferred
+        (false, 0b10011) => Some(vb(B::Mul)),
+        // pairwise
+        (false, 0b10100) => Some(vp(P::SMax)),
+        (true, 0b10100) => Some(vp(P::UMax)),
+        (false, 0b10101) => Some(vp(P::SMin)),
+        (true, 0b10101) => Some(vp(P::UMin)),
+        (false, 0b10111) => Some(vp(P::Add)), // ADDP
+        _ => None,
+    };
+    match ir {
+        Some(op) => cx.push(op),
+        None => cx.push(IrOp::Hint { imm: 200 }),
+    }
 }
 
 fn lift_shift_reg(
@@ -980,7 +1269,9 @@ mod tests {
         let mut blk = fresh_block();
         lift_at(&insn, &mut blk, 0x1000).expect("lift BL");
         assert!(blk.ops.iter().any(|o| matches!(o, IrOp::WriteGpr { reg: 30, .. })));
-        assert!(blk.ops.iter().any(|o| matches!(o, IrOp::Call { .. })));
+        // M3 host-dispatch: BL writes the link reg AND WritePc(target) instead
+        // of emitting a CFG Call op (which was dead in the single-block path).
+        assert!(blk.ops.iter().any(|o| matches!(o, IrOp::WritePc { .. })));
     }
 
     #[test]
@@ -989,5 +1280,39 @@ mod tests {
         let mut blk = fresh_block();
         lift(&insn, &mut blk).expect("lift NOP");
         assert!(matches!(blk.ops[0], IrOp::Hint { imm: 0 }));
+    }
+
+    #[test]
+    fn lift_eret_reads_elr_spsr_and_writes_pc() {
+        use crate::decoder::sysreg::SysReg;
+        // ERET = 0xD69F03E0.
+        let insn = decode_instruction(0xD69F_03E0).expect("decode ERET");
+        assert_eq!(insn, DecodedInsn::Eret);
+        let mut blk = fresh_block();
+        lift(&insn, &mut blk).expect("lift ERET");
+
+        // Must read ELR_EL1 and SPSR_EL1 via Mrs.
+        assert!(
+            blk.ops.iter().any(|o| matches!(o, IrOp::Mrs { reg: SysReg::ElrEl1, .. })),
+            "ERET must MRS ELR_EL1: {:?}", blk.ops
+        );
+        assert!(
+            blk.ops.iter().any(|o| matches!(o, IrOp::Mrs { reg: SysReg::SpsrEl1, .. })),
+            "ERET must MRS SPSR_EL1: {:?}", blk.ops
+        );
+        // Must mask the SPSR NZCV bits then MSR the NZCV alias.
+        assert!(
+            blk.ops.iter().any(|o| matches!(o, IrOp::And { .. })),
+            "ERET must mask SPSR NZCV bits: {:?}", blk.ops
+        );
+        assert!(
+            blk.ops.iter().any(|o| matches!(o, IrOp::Msr { reg: SysReg::NzcvEl0, .. })),
+            "ERET must MSR NZCV_EL0 to restore flags: {:?}", blk.ops
+        );
+        // The terminating side effect is WritePc (next guest PC from ELR).
+        assert!(
+            matches!(blk.ops.last().unwrap(), IrOp::WritePc { .. }),
+            "ERET must end with WritePc: {:?}", blk.ops
+        );
     }
 }

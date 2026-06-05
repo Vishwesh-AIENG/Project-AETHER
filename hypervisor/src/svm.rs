@@ -183,6 +183,7 @@ pub const SVM_EXIT_VMMCALL:       u64 = 0x61; // VMMCALL (hypercall)
 pub const SVM_EXIT_XSETBV:        u64 = 0x6D; // XSETBV instruction
 pub const SVM_EXIT_NPF:           u64 = 0x400; // nested page fault (NPT violation)
 pub const SVM_EXIT_AVIC_INCOMPLETE_IPI: u64 = 0x401;
+pub const SVM_EXIT_SHUTDOWN:      u64 = 0x7F; // guest triple fault → SHUTDOWN exit
 pub const SVM_EXIT_INVALID:       u64 = u64::MAX; // invalid VMCB or host state
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -551,11 +552,21 @@ pub unsafe fn npt_lookup_host_pa(pml4_pa: u64, guest_pa: u64) -> Option<u64> {
     let pdpt = (pml4e & !0xFFFu64) as *mut u64;
     let pdpte = unsafe { core::ptr::read_volatile(pdpt.add(i3)) };
     if pdpte & NPT_PRESENT == 0 { return None; }
-    if pdpte & NPT_PAGE_SIZE_BIT != 0 { return None; }
+    // 1 GiB leaf (PDPE.PS=1): the live AMD handoff map uses large leaves, so the
+    // fetch path MUST resolve them (else it fails closed -> Terminate). Address
+    // is bits [51:30]; offset is the low 30 bits of the guest PA.
+    if pdpte & NPT_PAGE_SIZE_BIT != 0 {
+        return Some((pdpte & 0x000F_FFFF_C000_0000) | (guest_pa & 0x3FFF_FFFF));
+    }
     let pd = (pdpte & !0xFFFu64) as *mut u64;
     let pde = unsafe { core::ptr::read_volatile(pd.add(i2)) };
     if pde & NPT_PRESENT == 0 { return None; }
-    if pde & NPT_PAGE_SIZE_BIT != 0 { return None; }
+    // 2 MiB leaf (PDE.PS=1): the handoff window is mapped with 2 MiB leaves
+    // (boot_x86 build_npt_2mib_range). Address is bits [51:21]; offset is the
+    // low 21 bits of the guest PA.
+    if pde & NPT_PAGE_SIZE_BIT != 0 {
+        return Some((pde & 0x000F_FFFF_FFE0_0000) | (guest_pa & 0x001F_FFFF));
+    }
     let pt = (pde & !0xFFFu64) as *mut u64;
     let leaf = unsafe { core::ptr::read_volatile(pt.add(i1)) };
     if leaf & NPT_PRESENT == 0 { return None; }
@@ -1173,6 +1184,48 @@ pub enum SvmExitAction {
     Terminate,
 }
 
+/// Decision the NPF instruction-fetch path takes after attempting to translate
+/// the basic block at the faulting guest PC. Split out as a pure function so the
+/// Resume/Terminate policy is unit-testable on the host without a live VMRUN
+/// harness (the actual host-mode CALL into the translated block is the only part
+/// that needs real silicon / a JIT cache).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NpfDispatchDecision {
+    /// Translation succeeded and the emitted bytes passed the safety gate
+    /// (non-empty, RET-terminated, no UD2). Enter the block, advance the guest
+    /// PC from the block's PC slot, and Resume.
+    EnterBlock,
+    /// Either translation failed, or it succeeded but the emitted bytes failed
+    /// the safety gate. Print a `[dbt] TranslateFail …` diagnostic and Terminate
+    /// (fail-loud — never CALL unvetted bytes).
+    TranslateFail,
+    /// The NPF was not an instruction fetch (e.g. a data-side NPT miss). Outside
+    /// the scope of the cold-translate path; Terminate with the foundation-gate
+    /// `npt_fault_seen` diagnostic, exactly as before this path existed.
+    NotInstrFetch,
+}
+
+/// Pure policy: given whether the NPF was an instruction fetch, whether the
+/// cold translate of the faulting block succeeded, and whether the emitted bytes
+/// passed the safety gate, decide what the dispatcher should do.
+///
+/// Fail-loud invariant: a successful translate whose bytes are NOT safe must
+/// still be `TranslateFail` — we never enter unvetted JIT output.
+pub fn npf_dispatch_decision(
+    is_instr_fetch: bool,
+    translate_ok: bool,
+    block_safe: bool,
+) -> NpfDispatchDecision {
+    if !is_instr_fetch {
+        return NpfDispatchDecision::NotInstrFetch;
+    }
+    if translate_ok && block_safe {
+        NpfDispatchDecision::EnterBlock
+    } else {
+        NpfDispatchDecision::TranslateFail
+    }
+}
+
 /// Handles a VMEXIT by reading exit_code from VMCB offset 0x70.
 ///
 /// HLT (0x58): records gate trigger, advances RIP by 1 byte (if nRIP available),
@@ -1244,15 +1297,67 @@ pub fn handle_vm_exit(vmcb: &mut VmcbRegion, state: &mut SvmFoundationState) -> 
             const NPF_BIT_USER:        u64 = 1 << 2;
             const NPF_BIT_INSTR_FETCH: u64 = 1 << 4;
             let info1 = vmcb.read_u64(VMCB_EXIT_INFO_1);
-            if (info1 & (NPF_BIT_INSTR_FETCH | NPF_BIT_USER)) != 0 {
+            let is_instr_fetch = (info1 & (NPF_BIT_INSTR_FETCH | NPF_BIT_USER)) != 0;
+            if is_instr_fetch {
                 let pc = vmcb.guest_rip();
                 use aether_translator::dbt::{
-                    aether_dbt_dispatch_block, aether_dbt_translate_block,
-                    AetherDbtResult, MAX_INSNS_PER_BLOCK,
+                    aether_dbt_block_host_va, aether_dbt_translate_block,
+                    block_bytes_are_safe, AetherDbtResult, MAX_INSNS_PER_BLOCK,
                 };
                 const WINDOW_BYTES: usize = MAX_INSNS_PER_BLOCK * 4;
+                // M4b-2c — FETCH THROUGH THE WALKER:
+                // Once the guest enables its MMU (`SCTLR_EL1.M == 1`) the ARM64
+                // PC is a VIRTUAL address, so the instruction bytes must be read
+                // from the WALKED physical address, not the raw PC. The fetch
+                // helper returns the flat PC while the MMU is off (early boot)
+                // and the walked guest PA once it is on; on a walk fault it
+                // returns None after recording a pending INSTRUCTION Abort
+                // (ESR.EC=0x21, FAR=pc) for the M4b-3 injection path.
+                //
+                // CRITICAL: the JIT block-cache key stays the VA `pc` below
+                // (`aether_dbt_translate_block(pc, ..)`). ONLY the byte SOURCE
+                // (`fetch_pa`) changes — branches/loops still resolve by VA.
+                #[cfg(target_arch = "x86_64")]
+                let fetch_pa = unsafe { crate::boot_x86::npf_fetch_guest_pa(pc) };
+                #[cfg(not(target_arch = "x86_64"))]
+                let fetch_pa = Some(pc); // no host walker off x86_64 (flat)
+
+                let fetch_pa = match fetch_pa {
+                    Some(pa) => pa,
+                    None => {
+                        // M4b-3: the fetch walk faulted; the walker stashed a
+                        // pending Instruction Abort (ESR.EC=0x21, FAR=pc) in the
+                        // live context. Inject it — vector to the guest's EL1
+                        // abort handler and resume there — instead of halting.
+                        #[cfg(target_arch = "x86_64")]
+                        {
+                            if let Some(handler) =
+                                unsafe { crate::boot_x86::inject_pending_fetch_abort(pc) }
+                            {
+                                unsafe {
+                                    crate::boot_x86::dual_puts(b"[dbt] inst-abort injected pc=");
+                                    crate::boot_x86::dual_puthex64(pc);
+                                    crate::boot_x86::dual_puts(b" -> handler=");
+                                    crate::boot_x86::dual_puthex64(handler);
+                                    crate::boot_x86::dual_puts(b"\n");
+                                }
+                                vmcb.set_guest_rip(handler);
+                                return SvmExitAction::Resume;
+                            }
+                        }
+                        unsafe {
+                            crate::boot_x86::dual_puts(b"[dbt] fetch xlate fault pc=");
+                            crate::boot_x86::dual_puthex64(pc);
+                            crate::boot_x86::dual_puts(b" (no handler)\n");
+                        }
+                        state.gate.npt_fault_seen = true;
+                        return SvmExitAction::Terminate;
+                    }
+                };
                 // SAFETY: ACTIVE_NPT_PML4_PA published by `set_active_npt`.
-                let window = unsafe { npt_read_guest_window(pc, WINDOW_BYTES) };
+                // `fetch_pa` is a guest PA confined to the handoff window (the
+                // walker clamps it; flat path PC is already a guest PA).
+                let window = unsafe { npt_read_guest_window(fetch_pa, WINDOW_BYTES) };
                 if let Some((host_va, len)) = window {
                     // SAFETY: npt_read_guest_window returned a single-page
                     // window; the slice does not span page boundaries.
@@ -1260,43 +1365,81 @@ pub fn handle_vm_exit(vmcb: &mut VmcbRegion, state: &mut SvmFoundationState) -> 
                         core::slice::from_raw_parts(host_va, len)
                     };
                     let t = aether_dbt_translate_block(pc, guest_mem);
-                    if t == AetherDbtResult::Ok {
-                        state.dbt_blocks_translated =
-                            state.dbt_blocks_translated.saturating_add(1);
-                        let d = aether_dbt_dispatch_block(pc, guest_mem);
-                        if d == AetherDbtResult::Ok {
-                            state.dbt_blocks_dispatched =
-                                state.dbt_blocks_dispatched.saturating_add(1);
-                            return SvmExitAction::Resume;
+                    let translate_ok = t == AetherDbtResult::Ok;
+                    // Safety-gate the emitted bytes: non-empty, RET-terminated,
+                    // no UD2. Only meaningful when translation succeeded.
+                    let block_safe = translate_ok
+                        && match aether_dbt_block_host_va(pc) {
+                            Some((bva, blen)) => {
+                                // SAFETY: bva/blen describe translator-produced
+                                // code in the JIT cache.
+                                let code = unsafe {
+                                    core::slice::from_raw_parts(bva as *const u8, blen)
+                                };
+                                block_bytes_are_safe(code)
+                            }
+                            None => false,
+                        };
+                    match npf_dispatch_decision(is_instr_fetch, translate_ok, block_safe) {
+                        NpfDispatchDecision::EnterBlock => {
+                            state.dbt_blocks_translated =
+                                state.dbt_blocks_translated.saturating_add(1);
+                            // Enter the translated block in host mode (a CALL to
+                            // RET-terminated x86 with R15 = live guest context),
+                            // then advance the guest PC from the PC slot the
+                            // block left behind. The trampoline + live context
+                            // live in boot_x86 (x86_64-only).
+                            #[cfg(target_arch = "x86_64")]
+                            {
+                                // SAFETY: translate_ok + block_safe established
+                                // above; JIT cache is NPT-mapped executable.
+                                let next_pc = unsafe {
+                                    crate::boot_x86::enter_translated_block_from_npf(pc)
+                                };
+                                if let Some(npc) = next_pc {
+                                    state.dbt_blocks_dispatched =
+                                        state.dbt_blocks_dispatched.saturating_add(1);
+                                    // In the AT host-mode model the VMCB GUEST_RIP
+                                    // carries the ARM64 PC; advance it so the next
+                                    // VMRUN faults (NPF) at the new block and the
+                                    // loop translates onward.
+                                    vmcb.set_guest_rip(npc);
+                                    return SvmExitAction::Resume;
+                                }
+                                // host_va resolve / safety re-check failed at
+                                // entry — fall through to TranslateFail report.
+                            }
+                            #[cfg(not(target_arch = "x86_64"))]
+                            {
+                                // No host-mode trampoline off x86_64; the NPF
+                                // dispatch path is x86-tier only.
+                                let _ = pc;
+                            }
                         }
-                        // Dispatch failed AFTER successful translate — rare
-                        // (would mean JIT corruption); fall through.
-                        unsafe {
-                            crate::boot_x86::dual_puts(b"[dbt] dispatch failed pc=");
-                            crate::boot_x86::dual_puthex64(pc);
-                            crate::boot_x86::dual_puts(b"\n");
-                        }
-                    } else {
-                        // Translation failed — read the precise (pc, word,
-                        // kind) the translator just stashed and print them.
-                        // Without this, every grind iteration would just
-                        // see "Terminate" with no clue what to lift next.
-                        let (fpc, fw, fkind) =
-                            aether_translator::dbt::aether_dbt_last_failure();
-                        unsafe {
-                            crate::boot_x86::dual_puts(b"[dbt] TranslateFail pc=");
-                            crate::boot_x86::dual_puthex64(fpc);
-                            crate::boot_x86::dual_puts(b" word=");
-                            crate::boot_x86::dual_puthex64(fw as u64);
-                            crate::boot_x86::dual_puts(b" kind=");
-                            crate::boot_x86::dual_puthex64(fkind as u64);
-                            crate::boot_x86::dual_puts(b" (1=decode 2=lift 3=short 4=empty)\n");
-                        }
+                        NpfDispatchDecision::TranslateFail => { /* report below */ }
+                        NpfDispatchDecision::NotInstrFetch => { /* unreachable here */ }
+                    }
+                    // Translation or block-entry failed — read the precise
+                    // (pc, word, kind) the translator stashed and print them.
+                    // Without this, every grind iteration would just see
+                    // "Terminate" with no clue what to lift next.
+                    let (fpc, fw, fkind) =
+                        aether_translator::dbt::aether_dbt_last_failure();
+                    unsafe {
+                        crate::boot_x86::dual_puts(b"[dbt] TranslateFail pc=");
+                        crate::boot_x86::dual_puthex64(fpc);
+                        crate::boot_x86::dual_puts(b" word=");
+                        crate::boot_x86::dual_puthex64(fw as u64);
+                        crate::boot_x86::dual_puts(b" kind=");
+                        crate::boot_x86::dual_puthex64(fkind as u64);
+                        crate::boot_x86::dual_puts(b" (1=decode 2=lift 3=short 4=empty)\n");
                     }
                 } else {
                     unsafe {
                         crate::boot_x86::dual_puts(b"[dbt] NPT window read failed pc=");
                         crate::boot_x86::dual_puthex64(pc);
+                        crate::boot_x86::dual_puts(b" fetch_pa=");
+                        crate::boot_x86::dual_puthex64(fetch_pa);
                         crate::boot_x86::dual_puts(b"\n");
                     }
                 }
@@ -1306,6 +1449,25 @@ pub fn handle_vm_exit(vmcb: &mut VmcbRegion, state: &mut SvmFoundationState) -> 
         }
         SVM_EXIT_INVALID => {
             // INVALID exit means VMCB is misconfigured — halt.
+            SvmExitAction::Terminate
+        }
+        SVM_EXIT_SHUTDOWN => {
+            // Triple fault inside the guest. On the AMD path with the
+            // current build this almost always means: VMRUN started
+            // executing at kernel_entry_pa where ARM64 GKI bytes live,
+            // the host CPU decoded them as x86_64, hit #UD/#GP/#PF, no
+            // guest IDT to dispatch the fault, double-fault, triple-
+            // fault, SHUTDOWN. The fix is the NX-NPT-on-IF-then-
+            // translate-then-redirect model — see the architectural
+            // note in boot_x86.rs above the VMRUN loop. Don't loop;
+            // terminate with a unique diagnostic.
+            unsafe {
+                crate::boot_x86::dual_puts(
+                    b"[svm] SHUTDOWN (0x7F) - guest triple-faulted. Most likely \
+                      cause: VMRUN executed raw ARM64 GKI bytes as x86. \
+                      Translator-on-NPF model not yet wired.\n",
+                );
+            }
             SvmExitAction::Terminate
         }
         _ => SvmExitAction::Resume,
@@ -1857,6 +2019,71 @@ mod tests {
         let action = handle_vm_exit(&mut vmcb, &mut state);
         assert_eq!(action, SvmExitAction::Terminate);
         assert!(state.gate.npt_fault_seen);
+    }
+
+    // ── M4b-2-bootwire: NPF dispatch-decision policy ───────────────────────
+    // The pure Resume/Terminate policy the NPF instruction-fetch path runs
+    // before it CALLs into a translated block. Unit-tested on the host because
+    // the actual host-mode CALL needs real silicon / a JIT cache.
+
+    #[test]
+    fn npf_decision_enters_when_translate_ok_and_safe() {
+        // Instruction fetch + good translate + safe bytes -> enter the block.
+        assert_eq!(
+            npf_dispatch_decision(true, true, true),
+            NpfDispatchDecision::EnterBlock,
+        );
+    }
+
+    #[test]
+    fn npf_decision_fails_when_translate_failed() {
+        // Instruction fetch but translate failed -> fail-loud TranslateFail
+        // (block_safe is necessarily false when translate failed).
+        assert_eq!(
+            npf_dispatch_decision(true, false, false),
+            NpfDispatchDecision::TranslateFail,
+        );
+    }
+
+    #[test]
+    fn npf_decision_fails_when_translate_ok_but_unsafe() {
+        // Fail-loud invariant: a successful translate whose emitted bytes are
+        // NOT safe (e.g. UD2 byte-gated, or not RET-terminated) must NEVER be
+        // entered. The decision is TranslateFail, not EnterBlock.
+        assert_eq!(
+            npf_dispatch_decision(true, true, false),
+            NpfDispatchDecision::TranslateFail,
+        );
+    }
+
+    #[test]
+    fn npf_decision_not_instr_fetch_short_circuits() {
+        // A data-side NPF is out of scope for the cold-translate path. Even if
+        // (hypothetically) translate_ok/block_safe were set, a non-instr-fetch
+        // NPF must classify as NotInstrFetch so the handler terminates with the
+        // foundation-gate npt_fault_seen diagnostic, exactly as before.
+        assert_eq!(
+            npf_dispatch_decision(false, true, true),
+            NpfDispatchDecision::NotInstrFetch,
+        );
+        assert_eq!(
+            npf_dispatch_decision(false, false, false),
+            NpfDispatchDecision::NotInstrFetch,
+        );
+    }
+
+    #[test]
+    fn npf_decision_never_enters_without_instr_fetch_even_if_safe() {
+        // Belt-and-suspenders: the only path that returns EnterBlock requires
+        // is_instr_fetch == true. Sweep the truth table.
+        for translate_ok in [false, true] {
+            for block_safe in [false, true] {
+                assert_ne!(
+                    npf_dispatch_decision(false, translate_ok, block_safe),
+                    NpfDispatchDecision::EnterBlock,
+                );
+            }
+        }
     }
 
     #[test]

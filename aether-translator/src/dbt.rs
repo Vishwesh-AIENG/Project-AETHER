@@ -169,6 +169,7 @@ impl DbtRuntime {
                 | DecodedInsn::Br { .. }
                 | DecodedInsn::Blr { .. }
                 | DecodedInsn::Ret { .. }
+                | DecodedInsn::Eret
                 | DecodedInsn::Cbz { .. }
                 | DecodedInsn::Cbnz { .. }
                 | DecodedInsn::Tbz { .. }
@@ -197,6 +198,20 @@ impl DbtRuntime {
     ///   * the lift step returns `LiftErr` on the first word (same)
     ///   * the encoder runs out of `code_buf` capacity
     pub fn translate_block(&mut self, pc: u64, guest_mem: &[u8]) -> AetherDbtResult {
+        // Idempotent fast path (zero allocation). The host-mode dispatch loop
+        // re-confirms translation by calling this EVERY iteration before each
+        // enter — including on every backward branch. Re-lifting a self-looping
+        // block (e.g. __create_page_tables' `B.LS .-N`) would allocate fresh
+        // IrFunction / BTreeMap / Vec from the 32 MiB never-freeing bump heap on
+        // every iteration, exhausting it after a few thousand loops ->
+        // handle_alloc_error OOM panic (the silent HLT observed in QEMU). A
+        // cache hit returns Ok immediately, matching the contract the loop and
+        // the boot_x86 "cache hit returns Ok immediately" comment both assume.
+        if self.block_cache.lookup(pc).is_some() {
+            self.stat_blocks_dispatched_hit =
+                self.stat_blocks_dispatched_hit.saturating_add(1);
+            return AetherDbtResult::Ok;
+        }
         if guest_mem.len() < 4 {
             self.stat_decode_failures = self.stat_decode_failures.saturating_add(1);
             self.last_fail_pc   = pc;
@@ -212,6 +227,7 @@ impl DbtRuntime {
         let mut insns_lifted   = 0usize;
         let mut cur_pc = pc;
         let mut first_word_ok = false;
+        let mut ended_on_terminator = false;
 
         for _ in 0..MAX_INSNS_PER_BLOCK {
             if bytes_consumed + 4 > guest_mem.len() {
@@ -256,6 +272,7 @@ impl DbtRuntime {
             bytes_consumed += 4;
             cur_pc = cur_pc.wrapping_add(4);
             if term {
+                ended_on_terminator = true;
                 break;
             }
         }
@@ -269,8 +286,42 @@ impl DbtRuntime {
             return AetherDbtResult::TranslationFailed;
         }
 
-        // Allocate registers. Linear scan is currently total — no failure mode.
+        // CROSS-CUTTING FIX (adversarial review): a block that ran to
+        // MAX_INSNS_PER_BLOCK (or the end of the fetched window) WITHOUT hitting a
+        // terminator never emitted a WritePc, so it leaves the guest PC slot at
+        // its START value — the dispatcher then re-runs the SAME block forever
+        // (a hard hang on any >= 64-instruction straight-line run, e.g. an
+        // unrolled memset / clear_page / large prologue). Emit a synthetic
+        // fallthrough next-PC = the instruction after the last one lifted
+        // (cur_pc = pc + insns_lifted*4) so the dispatcher advances.
+        if !ended_on_terminator {
+            let v_next = block.new_value(crate::ir::value::IrValueKind::I64);
+            block.push_op(crate::ir::IrOp::ConstI64 { dst: v_next, val: cur_pc as i64 });
+            block.push_op(crate::ir::IrOp::WritePc { src: v_next });
+        }
+
+        // Allocate registers.
         let alloc = regalloc::allocate(&func);
+
+        // M4a boot-safety (MUST-FIX): the spill area is a fixed 64-slot region in
+        // the R15 context block ([R15+SPILL_BASE..]). If allocation needed more
+        // slots than that, the lowering's spill stores would write PAST the
+        // register-file buffer into adjacent ring-0 hypervisor BSS — and the
+        // spill_disp bounds check is only a debug_assert (compiled out under
+        // release / panic=abort). Reject the block instead; the dispatcher then
+        // falls back to a trap rather than silently corrupting memory. (The M1
+        // per-instruction lift keeps peak liveness ~3 so this cannot fire from
+        // real lift output today, but a release-silent ring-0 OOB write must be
+        // fenced unconditionally.)
+        // This is the SOLE runtime enforcement of the spill bound —
+        // `linear_scan::gate_passes()` carries the same cap but is test-only.
+        if alloc.n_spill_slots as usize > crate::runtime::context::SPILL_SLOTS {
+            self.stat_lower_failures = self.stat_lower_failures.saturating_add(1);
+            self.last_fail_pc = pc;
+            self.last_fail_word = 0;
+            self.last_fail_kind = 2;
+            return AetherDbtResult::TranslationFailed;
+        }
 
         // Lower to x86 bytes. Lower_block currently consumes flag-elision +
         // branch-patches from earlier passes; we synthesise empties here.
@@ -349,6 +400,28 @@ impl DbtRuntime {
     ///   `host_va = jit_base + host_offset`
     pub fn host_offset_for_pc(&mut self, pc: u64) -> Option<(usize, usize)> {
         self.block_cache.lookup(pc).map(|b| (b.host_offset, b.len))
+    }
+
+    /// Invalidate the **entire** block cache (PC → host-offset lookup table).
+    ///
+    /// Called by the runtime when the guest performs a TLB invalidation or a
+    /// translation-table-base switch (TLBI / MSR TTBR…): a guest page-table
+    /// edit can change which bytes a given guest VA maps to, so every cached
+    /// translation keyed on a VA may now be stale. Flushing the cache forces a
+    /// cold re-translate (which re-walks the current tables) on the next
+    /// dispatch of each PC.
+    ///
+    /// CRITICAL — this is callable from **inside a currently-executing
+    /// translated block** (the lowering emits a Win64 CALL to
+    /// `aether_dbt_invalidate_all` for TLBI). We therefore MUST NOT reset /
+    /// zero the code-buffer arena here: the running block's own bytes live in
+    /// that arena and execution returns into them after the call. We only clear
+    /// the lookup table — the old block bodies become unreachable garbage that
+    /// the existing capacity-pressure `code_buf.reset()` path reclaims later.
+    /// Leaving the arena intact keeps the in-flight block valid; dropping its
+    /// cache entry only means the *next* dispatch of that PC retranslates.
+    pub fn invalidate_all(&mut self) {
+        self.block_cache.flush_all();
     }
 }
 
@@ -498,6 +571,26 @@ pub fn aether_dbt_dispatch_block(guest_pc: u64, guest_mem: &[u8]) -> AetherDbtRe
     }
 }
 
+/// Invalidate the entire JIT block cache.
+///
+/// FFI surface for the TLBI / TTBR-switch lowering: a guest TLB invalidation or
+/// translation-table-base change can change what VA→bytes a previously-
+/// translated block assumed, so its cached entry is dropped and the next
+/// dispatch retranslates against the current page tables. Safe to call from
+/// inside a running translated block (see `DbtRuntime::invalidate_all` — it
+/// only clears the lookup table, never the code arena the caller is executing
+/// from). Returns `NotInitialised` if `aether_dbt_init` hasn't run.
+///
+/// This is wired into emitted code as an absolute Win64 CALL (no args, no
+/// return value consumed); the `AetherDbtResult` is for the structural /
+/// host-test callers.
+pub extern "C" fn aether_dbt_invalidate_all() -> AetherDbtResult {
+    match global::with(|rt| rt.invalidate_all()) {
+        Some(()) => AetherDbtResult::Ok,
+        None => AetherDbtResult::NotInitialised,
+    }
+}
+
 /// Shut down the DBT subsystem and release all resources. Idempotent.
 pub fn aether_dbt_shutdown() -> AetherDbtResult {
     AetherDbtResult::Ok
@@ -511,6 +604,42 @@ pub fn aether_dbt_last_failure() -> (u64, u32, u8) {
     global::with(|rt| {
         (rt.last_failure_pc(), rt.last_failure_word(), rt.last_failure_kind())
     }).unwrap_or((0, 0, 0))
+}
+
+/// Resolve the **real host virtual address** of the translated block for
+/// `pc`, plus its byte length. Returns `None` if `pc` is not in the block
+/// cache.
+///
+/// host_va = `code_buf.base_ptr()` + host_offset. Because the JIT arena is a
+/// `Vec<u8>` from the global allocator (which on the hypervisor is the 32 MiB
+/// BSS heap — low, identity-mapped, host-reachable), this is the address the
+/// hypervisor can CALL directly in host mode. This is the M2 execution-proof
+/// entry point: translate a block, resolve its host VA here, then jump to it
+/// with R15 pointing at a `runtime::GuestRegisterFile`.
+pub fn aether_dbt_block_host_va(pc: u64) -> Option<(usize, usize)> {
+    global::with(|rt| {
+        let (off, len) = rt.host_offset_for_pc(pc)?;
+        Some((rt.code_buf.base_ptr() as usize + off, len))
+    })
+    .flatten()
+}
+
+/// Static structural safety check for a translated x86 block before the
+/// hypervisor CALLs into it. A block is safe to enter iff it is non-empty,
+/// ends in `RET` (0xC3), and contains no `UD2` (0F 0B) — the latter is the
+/// sentinel `lower_int` plants for an unhandled/poison case (e.g. a Csel with
+/// a spilled destination), so its presence means the translator deliberately
+/// refused to produce executable code for some instruction in the block.
+///
+/// This is the SOLE structural gate the production VMEXIT/NPF resume paths use
+/// before transferring control to JIT output; it operates on a byte slice so
+/// it stays in the `#![deny(unsafe_code)]` translator crate and is unit-test
+/// covered. The hypervisor forms the slice from the block's host VA (the only
+/// `unsafe`, on its side) and delegates here.
+pub fn block_bytes_are_safe(code: &[u8]) -> bool {
+    !code.is_empty()
+        && code.last() == Some(&0xC3)
+        && !code.windows(2).any(|w| w == [0x0F, 0x0B])
 }
 
 // ── Symbol audit helpers ──────────────────────────────────────────────────────

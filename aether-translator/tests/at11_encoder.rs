@@ -74,10 +74,13 @@ fn at11_cpuid() {
 
 #[test]
 fn at11_isb_sequence() {
-    // XOR EAX,EAX (31 C0) + CPUID (0F A2)
+    // push rbx (53) + push rdx (52) + XOR EAX,EAX (31 C0) + CPUID (0F A2)
+    // + pop rdx (5A) + pop rbx (5B). CPUID clobbers EBX/EDX, which are
+    // allocatable value registers, so the sequence brackets it with a
+    // save/restore of RBX/RDX (M4b-5 clobber fix).
     let mut e = enc();
     e.emit_isb_sequence();
-    assert_eq!(e.finish(), [0x31, 0xC0, 0x0F, 0xA2]);
+    assert_eq!(e.finish(), [0x53, 0x52, 0x31, 0xC0, 0x0F, 0xA2, 0x5A, 0x5B]);
 }
 
 // ── MOV register-to-register (64-bit) ────────────────────────────────────────
@@ -722,4 +725,48 @@ fn at11_opcode_coverage_100pct() {
     }
 
     println!("AT-11 gate: {} opcodes all emit ≥1 byte — 100% coverage", opcodes.len());
+}
+
+// ── M4b-6 SIMD/FP/crypto encoder additions — byte-exact (BUILDSPEC §9) ────────
+
+#[test]
+fn at11_m4b6_byte_exact() {
+    // 66 0F EC /r : PADDSB xmm1, xmm2  (modrm 11 001 010 = 0xCA)
+    { let mut e = enc(); e.emit_paddsb(1, 2); assert_eq!(e.finish(), [0x66, 0x0F, 0xEC, 0xCA]); }
+    // 66 0F DC /r : PADDUSB xmm0, xmm1
+    { let mut e = enc(); e.emit_paddusb(0, 1); assert_eq!(e.finish(), [0x66, 0x0F, 0xDC, 0xC1]); }
+    // 66 0F E8 /r : PSUBSB
+    { let mut e = enc(); e.emit_psubsb(0, 1); assert_eq!(e.finish(), [0x66, 0x0F, 0xE8, 0xC1]); }
+    // 66 0F 38 1E /r : PABSD xmm0, xmm1
+    { let mut e = enc(); e.emit_pabsd(0, 1); assert_eq!(e.finish(), [0x66, 0x0F, 0x38, 0x1E, 0xC1]); }
+    // 66 0F 38 37 /r : PCMPGTQ xmm2, xmm3  (modrm 11 010 011 = 0xD3)
+    { let mut e = enc(); e.emit_pcmpgtq(2, 3); assert_eq!(e.finish(), [0x66, 0x0F, 0x38, 0x37, 0xD3]); }
+    // 66 0F 38 29 /r : PCMPEQQ
+    { let mut e = enc(); e.emit_pcmpeqq(0, 1); assert_eq!(e.finish(), [0x66, 0x0F, 0x38, 0x29, 0xC1]); }
+    // 66 0F 38 13 /r : CVTPH2PS (F16C)
+    { let mut e = enc(); e.emit_cvtph2ps(0, 1); assert_eq!(e.finish(), [0x66, 0x0F, 0x38, 0x13, 0xC1]); }
+    // 66 0F 38 30 /r with REX.R (dst=xmm8) : PMOVZXBW xmm8, xmm1
+    { let mut e = enc(); e.emit_pmovzxbw(8, 1); assert_eq!(e.finish(), [0x66, 0x44, 0x0F, 0x38, 0x30, 0xC1]); }
+    // 66 0F 3A 0B /r ib : ROUNDSD xmm0, xmm1, 0x08
+    { let mut e = enc(); e.emit_roundsd(0, 1, 0x08); assert_eq!(e.finish(), [0x66, 0x0F, 0x3A, 0x0B, 0xC1, 0x08]); }
+    // 0F C6 /r ib : SHUFPS xmm0, xmm1, 0xFF (no mandatory prefix)
+    { let mut e = enc(); e.emit_shufps(0, 1, 0xFF); assert_eq!(e.finish(), [0x0F, 0xC6, 0xC1, 0xFF]); }
+    // F2 0F 70 /r ib : PSHUFLW
+    { let mut e = enc(); e.emit_pshuflw(0, 1, 0x1B); assert_eq!(e.finish(), [0xF2, 0x0F, 0x70, 0xC1, 0x1B]); }
+    // 0F 5D /r : MINPS
+    { let mut e = enc(); e.emit_minps(0, 1); assert_eq!(e.finish(), [0x0F, 0x5D, 0xC1]); }
+    // F3 0F 5D /r : MINSS
+    { let mut e = enc(); e.emit_minss(0, 1); assert_eq!(e.finish(), [0xF3, 0x0F, 0x5D, 0xC1]); }
+    // 66 0F 6E /r (no REX.W) : MOVD xmm0, eax
+    { let mut e = enc(); e.emit_movd_xmm_r32(0, 0); assert_eq!(e.finish(), [0x66, 0x0F, 0x6E, 0xC0]); }
+    // F3 0F 7E /r : MOVQ xmm0, xmm1 (zero-upper idiom)
+    { let mut e = enc(); e.emit_movq_xmm_xmm(0, 1); assert_eq!(e.finish(), [0xF3, 0x0F, 0x7E, 0xC1]); }
+    // F3 0F 2A /r (no REX.W) : CVTSI2SS xmm0, r32
+    { let mut e = enc(); e.emit_cvtsi2ss_r32(0, 1); assert_eq!(e.finish(), [0xF3, 0x0F, 0x2A, 0xC1]); }
+    // F2 0F 2D /r REX.W : CVTSD2SI r64, xmm1
+    { let mut e = enc(); e.emit_cvtsd2si_r64(0, 1); assert_eq!(e.finish(), [0xF2, 0x48, 0x0F, 0x2D, 0xC1]); }
+    // 66 0F F5 /r : PMADDWD
+    { let mut e = enc(); e.emit_pmaddwd(0, 1); assert_eq!(e.finish(), [0x66, 0x0F, 0xF5, 0xC1]); }
+    // 66 0F F6 /r : PSADBW
+    { let mut e = enc(); e.emit_psadbw(0, 1); assert_eq!(e.finish(), [0x66, 0x0F, 0xF6, 0xC1]); }
 }

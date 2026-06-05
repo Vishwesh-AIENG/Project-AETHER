@@ -57,6 +57,86 @@ pub const VEC_OFFSET: usize = 0x128;
 /// Total size of `GuestRegisterFile` in bytes.
 pub const GUEST_REG_FILE_SIZE: usize = 0x328;
 
+/// Byte displacement of guest V<reg> (q0..q31) within the flat context buffer,
+/// i.e. the disp32 to use with a `[R15 + disp]` movdqu in the SIMD templates.
+/// Single-sourced off `VEC_OFFSET` so the q-register base can never drift.
+#[inline]
+pub const fn vec_disp(reg: u8) -> i32 {
+    (VEC_OFFSET + (reg as usize) * 16) as i32
+}
+
+// ── M4a extended R15 context layout (beyond GuestRegisterFile) ────────────────
+//
+// The translated code addresses three regions off CONTEXT_REG (R15). The
+// GuestRegisterFile struct stays 0x328 bytes; the sysreg + spill regions live
+// ABOVE it in the flat context buffer the hypervisor / host harness allocate.
+// Reconciled so no offsets collide:
+//   [GuestRegisterFile 0x000..0x327][sysreg 0x328..0x527][spill 0x528..0x727]
+//
+//   nzcv         @ 0x108  (inside GuestRegisterFile; ARM N@31 Z@30 C@29 V@28)
+//   sysreg[0..64]@ 0x328  (64 × u64; idx 40..55 = RO ID regs, idx 63 = sink)
+//   spill[0..64] @ 0x528  (64 × u64; linear-scan spill slots)
+//
+/// First byte offset of the 64-slot system-register array.
+pub const SYSREG_BASE: usize = 0x328;
+/// Number of system-register slots.
+pub const SYSREG_SLOTS: usize = 64;
+/// u64 index (not byte offset) of sysreg slot 0 in the flat context buffer.
+pub const SYSREG_SLOT0: usize = SYSREG_BASE / 8; // 101
+/// Sink slot index for unmodeled / RO-on-write registers.
+pub const SYSREG_SINK_IDX: usize = 63;
+/// First byte offset of the 64-slot linear-scan spill area.
+pub const SPILL_BASE: usize = 0x528;
+/// Number of spill slots.
+pub const SPILL_SLOTS: usize = 64;
+/// Total extended-context size in bytes (GuestRegisterFile + sysreg + spill).
+pub const CTX_SIZE: usize = 0x728;
+/// Total extended-context size in u64 slots — the size the hypervisor
+/// `M2_REGFILE` static and the host-test ctx buffer must allocate.
+pub const CTX_U64S: usize = CTX_SIZE / 8; // 229
+
+// Compile-time guards: the regions tile exactly and do not overlap.
+const _: () = assert!(SYSREG_BASE == GUEST_REG_FILE_SIZE);
+const _: () = assert!(SYSREG_BASE + SYSREG_SLOTS * 8 == SPILL_BASE);
+const _: () = assert!(SPILL_BASE + SPILL_SLOTS * 8 == CTX_SIZE);
+const _: () = assert!(SYSREG_BASE + SYSREG_SINK_IDX * 8 < SPILL_BASE); // sink in range
+const _: () = assert!(NZCV_OFFSET < SYSREG_BASE); // nzcv untouched by both regions
+
+/// Seed the read-only ID system registers into a flat context buffer, so that
+/// `MRS Xn, <ID reg>` is a plain load returning a plausible CPU identity (per
+/// the CLAUDE.md hardware-authenticity rule: MIDR/MPIDR must read real values).
+/// Call once after zeroing the buffer, before the first block dispatch.
+///
+/// `ctx` must be at least `CTX_U64S` long.
+pub fn seed_sysregs(ctx: &mut [u64]) {
+    debug_assert!(ctx.len() >= CTX_U64S, "context buffer too small for sysregs");
+    let s = |i: usize| SYSREG_SLOT0 + i;
+    // SPSel = 1 — the guest runs at EL1h (uses SP_EL1), the bring-up state the
+    // ARM64 Linux kernel assumes. exceptions::vector_offset() reads this slot to
+    // pick the EL1h vector group (VBAR_EL1 + 0x200); a 0 (unseeded) value would
+    // route every injected abort/IRQ to the EL1t group (0x000 → Linux's
+    // invalid-EL1t handler → bad_mode panic). The guest also keeps it correct
+    // via `MSR SPSel,#1` once PSTATE-immediate writes are functional.
+    ctx[s(23)] = 1; // SPSel_EL1 — EL1h
+    ctx[s(40)] = 0x410F_D0C0; // MIDR_EL1   — ARM Cortex-A-class implementer
+    ctx[s(41)] = 0x8000_0000; // MPIDR_EL1  — core0, bit31 RES1
+    ctx[s(42)] = 0x4; // CurrentEL  — EL1 (bits[3:2]=01)
+    ctx[s(43)] = 0x8444_4004; // CTR_EL0    — 64B I/D line
+    ctx[s(44)] = 0x4; // DCZID_EL0  — 64-byte zero block
+    ctx[s(45)] = 24_000_000; // CNTFRQ_EL0 — 24 MHz
+    ctx[s(46)] = 0x0000_0000_1100_0011; // ID_AA64PFR0 — EL0/EL1 AArch64, FP/SIMD
+    ctx[s(47)] = 0; // ID_AA64PFR1
+    ctx[s(48)] = 0x0000_0000_0010_1122; // ID_AA64MMFR0 — 40-bit PA, 4K granule
+    ctx[s(49)] = 0; // ID_AA64MMFR1
+    ctx[s(50)] = 0; // ID_AA64MMFR2
+    ctx[s(51)] = 0x0000_1000_1011_0000; // ID_AA64ISAR0
+    ctx[s(52)] = 0; // ID_AA64ISAR1
+    ctx[s(53)] = 0x0A20_0023; // CLIDR_EL1  — L1 I+D, L2 unified
+    ctx[s(54)] = 0; // REVIDR_EL1
+    ctx[s(55)] = 0; // AIDR_EL1
+    ctx[s(63)] = 0; // overflow sink
+}
+
 // ── Register file ─────────────────────────────────────────────────────────────
 
 /// In-memory layout of the guest ARM64 register state as seen from EL2.
@@ -199,14 +279,15 @@ pub fn emit_save_prologue(arm_gpr_count: usize) -> ContextCode {
         emit_mov_mem_reg(&mut bytes, CONTEXT_REG_ENC, offset as i32, x86_reg);
     }
 
-    // Also save the XMM regs used for NEON (q0..q15 → XMM0..XMM15).
-    // VMOVDQU [R15 + VEC_OFFSET + i*16], XMMi
-    for i in 0..16usize {
-        let offset = VEC_OFFSET + i * 16;
-        emit_vmovdqu_mem_xmm(&mut bytes, CONTEXT_REG_ENC, offset as i32, i as u8);
-    }
-
-    ContextCode { bytes, reg_count: count + 16 }
+    // M4b-6: the NEON q-registers are NOT saved/restored here. Under the
+    // ctx-template SIMD model the guest q-register file at [R15+VEC_OFFSET] is
+    // authoritative between ops and between blocks — every vector op loads its
+    // operands from ctx and stores its result back to ctx, so there is nothing
+    // for a block prologue/epilogue to persist. A blind "save XMM0..15 -> ctx"
+    // here would clobber q0..q15 with whatever stale scratch the templates left
+    // in those XMMs. (The old loop also mis-encoded the R15 base via a 2-byte
+    // VEX that cannot carry REX.B.)
+    ContextCode { bytes, reg_count: count }
 }
 
 /// Emits the x86_64 restore epilogue: `MOV reg, [R15+offset]` for each GPR.
@@ -214,19 +295,15 @@ pub fn emit_restore_epilogue(arm_gpr_count: usize) -> ContextCode {
     let count = arm_gpr_count.min(X86_GPRS.len());
     let mut bytes = Vec::new();
 
-    // Restore XMM regs first (before we clobber the base reg).
-    for i in 0..16usize {
-        let offset = VEC_OFFSET + i * 16;
-        emit_vmovdqu_xmm_mem(&mut bytes, i as u8, CONTEXT_REG_ENC, offset as i32);
-    }
-
+    // M4b-6: no XMM restore — the q-register file in ctx is authoritative; see
+    // emit_save_prologue. Vector ops re-load from ctx on demand.
     for i in 0..count {
         let x86_reg = X86_GPRS[i];
         let offset = GPR_OFFSET + i * 8;
         emit_mov_reg_mem(&mut bytes, x86_reg, CONTEXT_REG_ENC, offset as i32);
     }
 
-    ContextCode { bytes, reg_count: count + 16 }
+    ContextCode { bytes, reg_count: count }
 }
 
 // ── Low-level instruction emitters ───────────────────────────────────────────
@@ -262,41 +339,11 @@ fn emit_mov_reg_mem(buf: &mut Vec<u8>, dst: u8, base: u8, disp: i32) {
     buf.extend_from_slice(&disp.to_le_bytes());
 }
 
-/// Emit `VMOVDQU [base_reg + disp32], XMMi` (VEX.128.F3.0F.WIG 7F /r).
-fn emit_vmovdqu_mem_xmm(buf: &mut Vec<u8>, base: u8, disp: i32, xmm: u8) {
-    // VEX 2-byte prefix: C5 + (R̄|vvvv=1111|L=0|pp=10).
-    // R̄ = NOT(xmm >= 8), vvvv = 1111, L = 0, pp = 10 (F3).
-    let r_bar = if xmm < 8 { 1u8 } else { 0u8 };
-    buf.push(0xC5);
-    buf.push((r_bar << 7) | 0x7A); // R̄ | vvvv=1111 | L=0 | pp=10
-    buf.push(0x7F); // VMOVDQU opcode
-    // ModRM: mod=10, reg=xmm&7, rm=base&7.
-    let rm = base & 7;
-    let modrm = 0x80 | ((xmm & 7) << 3) | rm;
-    buf.push(modrm);
-    if rm == 4 {
-        buf.push(0x24);
-    }
-    // For R15-based base we need REX.B — use 3-byte VEX instead.
-    // Simplified: emit plain MOVDQU (F3 0F 7F) for correctness test.
-    // (Full REX handling happens via 3-byte VEX in production.)
-    buf.extend_from_slice(&disp.to_le_bytes());
-}
-
-/// Emit `VMOVDQU XMMi, [base_reg + disp32]` (VEX.128.F3.0F.WIG 6F /r).
-fn emit_vmovdqu_xmm_mem(buf: &mut Vec<u8>, xmm: u8, base: u8, disp: i32) {
-    let r_bar = if xmm < 8 { 1u8 } else { 0u8 };
-    buf.push(0xC5);
-    buf.push((r_bar << 7) | 0x7A);
-    buf.push(0x6F); // VMOVDQU (load) opcode
-    let rm = base & 7;
-    let modrm = 0x80 | ((xmm & 7) << 3) | rm;
-    buf.push(modrm);
-    if rm == 4 {
-        buf.push(0x24);
-    }
-    buf.extend_from_slice(&disp.to_le_bytes());
-}
+// (The two VEX-prefixed VMOVDQU helpers that used to live here were removed in
+// M4b-6: they were emitted only by the now-deleted XMM prologue/epilogue loops
+// and were structurally mis-encoded — a 2-byte VEX (C5) cannot carry REX.B, so
+// they addressed the wrong base register for R15. The ctx-template SIMD path
+// uses the correctly-REX'd `emit_movdqu_load`/`emit_movdqu_store` in encode.rs.)
 
 // ── Structural round-trip test helper ────────────────────────────────────────
 

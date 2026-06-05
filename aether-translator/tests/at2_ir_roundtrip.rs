@@ -8,6 +8,10 @@
 
 use aether_translator::decoder::Cond;
 use aether_translator::ir::memory::{AtomicOp, BarrierDomain, LoadTy, MemOrder, StoreTy};
+use aether_translator::ir::ops::{
+    FpBinOp, FpUnOp, RoundMode, VecBinOp, VecCmpOp, VecFpOp, VecPairOp, VecReduceOp, VecShiftOp,
+    VecUnOp,
+};
 use aether_translator::ir::serialize::{decode, encode, is_codec_implemented, variant_tag};
 use aether_translator::ir::{BlockId, IrFlagsId, IrOp, IrValueId, NzcvBit};
 
@@ -42,12 +46,12 @@ fn samples() -> Vec<IrOp> {
         IrOp::Bswap16 { dst: v(0), a: v(1) },
         IrOp::Bswap32 { dst: v(0), a: v(1) },
         IrOp::Bswap64 { dst: v(0), a: v(1) },
-        IrOp::AddS { dst: v(0), flags: f(0), a: v(1), b: v(2) },
-        IrOp::SubS { dst: v(0), flags: f(0), a: v(1), b: v(2) },
-        IrOp::AndS { dst: v(0), flags: f(0), a: v(1), b: v(2) },
-        IrOp::Cmp { flags: f(0), a: v(1), b: v(2) },
-        IrOp::Cmn { flags: f(0), a: v(1), b: v(2) },
-        IrOp::Tst { flags: f(0), a: v(1), b: v(2) },
+        IrOp::AddS { dst: v(0), flags: f(0), a: v(1), b: v(2), sf: true },
+        IrOp::SubS { dst: v(0), flags: f(0), a: v(1), b: v(2), sf: false },
+        IrOp::AndS { dst: v(0), flags: f(0), a: v(1), b: v(2), sf: true },
+        IrOp::Cmp { flags: f(0), a: v(1), b: v(2), sf: false },
+        IrOp::Cmn { flags: f(0), a: v(1), b: v(2), sf: true },
+        IrOp::Tst { flags: f(0), a: v(1), b: v(2), sf: false },
         IrOp::NzcvBitOp { dst: v(0), flags: f(0), bit: NzcvBit::Z },
         IrOp::Sext { dst: v(0), a: v(1), from_bits: 8, to_bits: 64 },
         IrOp::Zext { dst: v(0), a: v(1), from_bits: 16, to_bits: 32 },
@@ -92,6 +96,27 @@ fn samples() -> Vec<IrOp> {
         IrOp::Sb,
         IrOp::Hint { imm: 0 },
         IrOp::Hint { imm: 200 },
+        // ── M4b-6 SIMD/FP/crypto ctx-template ops (one per tag) ──
+        IrOp::VecBin { op: VecBinOp::SqAdd, size: 2, q: true, d: 0, n: 1, m: 2 },
+        IrOp::VecUn { op: VecUnOp::Abs, size: 1, q: false, d: 3, n: 4 },
+        IrOp::VecShift { op: VecShiftOp::SShr, size: 2, q: true, d: 5, n: 6, amount: 7 },
+        IrOp::VecCmp { op: VecCmpOp::UGt, size: 0, q: true, d: 8, n: 9, m: 10 },
+        IrOp::VecPair { op: VecPairOp::Add, size: 1, q: false, d: 11, n: 12, m: 13 },
+        IrOp::VecReduce { op: VecReduceOp::UMax, size: 2, q: true, d: 14, n: 15 },
+        IrOp::VecAddLong { across: true, signed: false, size: 0, q: true, d: 16, n: 17 },
+        IrOp::VecFp { op: VecFpOp::Div, dbl: true, q: true, d: 18, n: 19, m: 20 },
+        IrOp::FpFromInt { d: 1, n_gpr: 2, from_bits: 64, to_bits: 32, signed: true },
+        IrOp::FpToIntR { d_gpr: 3, n: 4, from_bits: 32, to_bits: 64, signed: false, round: RoundMode::Zero },
+        IrOp::FpRound { d: 5, n: 6, dbl: false, round: RoundMode::NearestTiesAway, raise_inexact: true },
+        IrOp::FpCvt2 { d: 7, n: 8, from_bits: 32, to_bits: 64 },
+        IrOp::FpMov { d: 9, n: 10, width_bits: 64 },
+        IrOp::FpBin { op: FpBinOp::NMul, dbl: true, d: 11, n: 12, m: 13 },
+        IrOp::FpUn { op: FpUnOp::Sqrt, dbl: false, d: 14, n: 15 },
+        IrOp::FpCmpN { n: 16, m: 17, dbl: true, zero: true },
+        IrOp::FpToGpr { d_gpr: 18, n: 19, bits: 64, high_half: true },
+        IrOp::FpFromGpr { d: 20, n_gpr: 21, bits: 32, high_half: false },
+        IrOp::CryptoAesR { kind: 4, d: 22, n: 23, m: 24 },
+        IrOp::CryptoShaR { kind: 1, d: 25, n: 26, m: 27 },
         IrOp::Unimplemented(0xDEAD_BEEF),
     ]
 }

@@ -89,6 +89,12 @@ pub enum X86BootError {
     NotProductionReady,
     /// VBMeta header was supplied but failed structural validation.
     VbmetaInvalid,
+    /// Kernel payload is gzip-compressed but inflation failed (corrupt stream,
+    /// or it decompresses to more than the 64 MiB kernel region holds).
+    KernelDecompressFailed,
+    /// Kernel payload uses a compression format AETHER does not implement
+    /// (e.g. lz4 / lzma). Only raw `Image` and gzip `Image.gz` are supported.
+    KernelCompressionUnsupported,
 }
 
 impl From<BootloaderError> for X86BootError {
@@ -143,7 +149,8 @@ fn boot_img_offsets(hdr: &BootImageHeader) -> (usize, usize) {
 ///      helpers; on the x86 path we currently accept any well-formed vbmeta
 ///      and let the trust-anchor / rollback step in `RollbackIndexStore`
 ///      veto.
-///   5. Copy kernel bytes to `guest_ram_pa`.
+///   5. Load kernel to `guest_ram_pa` — gzip `Image.gz` is inflated in place,
+///      raw `Image` is copied verbatim, unsupported compression is rejected.
 ///   6. Copy ramdisk bytes to `guest_ram_pa + KERNEL_REGION_BYTES`.
 ///   7. Return layout for the dispatcher.
 ///
@@ -217,15 +224,57 @@ pub unsafe fn load_boot_img(
         return Err(X86BootError::GuestRamTooSmall);
     }
 
-    // Copy kernel.
+    // Load kernel into the guest RAM kernel region.
+    //
+    // AETHER is the bootloader (No-Boundary, Ch. 3) and arm64 has no
+    // self-extracting kernel, so a gzip-compressed payload (`Image.gz` /
+    // `Image.gz-dtb`, by far the common Android case) must be inflated HERE —
+    // otherwise the DBT dispatch loop fetches the kernel entry as raw bytes and
+    // the very first block lifts the gzip magic `1f 8b 08 00` instead of ARM64
+    // code (observed on the first real-hardware boot: TranslateFail at pc ==
+    // kernel_pa, word == 0x00088b1f). Trailing bytes after the DEFLATE stream
+    // (gzip CRC32/ISIZE trailer, or an appended DTB on `Image.gz-dtb`) are
+    // ignored by `inflate::gunzip`.
     let kernel_src = &boot_img_bytes[kernel_off..kernel_off + kernel_size];
-    // SAFETY: caller guarantees guest_ram_pa points to ≥ guest_ram_size
-    // bytes of writable identity-mapped RAM.
-    unsafe {
-        let dst = guest_ram_pa as *mut u8;
-        core::ptr::copy_nonoverlapping(kernel_src.as_ptr(), dst, kernel_size);
-    }
     let kernel_pa = guest_ram_pa;
+    let dst = guest_ram_pa as *mut u8;
+
+    // Reject formats we don't implement BEFORE feeding garbage to the DBT.
+    const LZ4_FRAME_MAGIC: [u8; 4] = [0x04, 0x22, 0x4D, 0x18];
+    const LZ4_LEGACY_MAGIC: [u8; 4] = [0x02, 0x21, 0x4C, 0x18];
+    const LZMA_XZ_MAGIC: [u8; 4] = [0xFD, b'7', b'z', b'X']; // \xFD 7 z X (Z)
+    let head4 = if kernel_src.len() >= 4 {
+        [kernel_src[0], kernel_src[1], kernel_src[2], kernel_src[3]]
+    } else {
+        [0; 4]
+    };
+
+    let kernel_size_loaded = if crate::inflate::is_gzip(kernel_src) {
+        // Inflate directly into the kernel region; the output slice doubles as
+        // the LZ77 window. Bounded to KERNEL_REGION_BYTES so a (possibly
+        // hostile) stream can never spill past the kernel region into the
+        // ramdisk that follows it.
+        // SAFETY: the capacity check above guarantees `guest_ram_size >=
+        // KERNEL_REGION_BYTES + ramdisk_size`, so KERNEL_REGION_BYTES bytes at
+        // `dst` are within the caller's writable identity-mapped RAM.
+        let out = unsafe { core::slice::from_raw_parts_mut(dst, KERNEL_REGION_BYTES) };
+        crate::inflate::gunzip(kernel_src, out)
+            .map_err(|_| X86BootError::KernelDecompressFailed)?
+    } else if head4 == LZ4_FRAME_MAGIC || head4 == LZ4_LEGACY_MAGIC || head4 == LZMA_XZ_MAGIC {
+        return Err(X86BootError::KernelCompressionUnsupported);
+    } else {
+        // Uncompressed `Image` — copy verbatim.
+        // SAFETY: caller guarantees guest_ram_pa points to ≥ guest_ram_size
+        // bytes of writable identity-mapped RAM; kernel_size ≤ KERNEL_REGION.
+        if kernel_size > KERNEL_REGION_BYTES {
+            return Err(X86BootError::GuestRamTooSmall);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(kernel_src.as_ptr(), dst, kernel_size);
+        }
+        kernel_size
+    };
+    let kernel_size = kernel_size_loaded;
 
     // Copy ramdisk if present.
     let (ramdisk_pa, ramdisk_size_out) = if ramdisk_size > 0 {

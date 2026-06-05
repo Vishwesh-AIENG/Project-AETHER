@@ -12,6 +12,10 @@ use alloc::vec::Vec;
 
 use super::flags::{IrFlagsId, NzcvBit};
 use super::memory::{AtomicOp, BarrierDomain, LoadTy, MemOrder, StoreTy};
+use super::ops::{
+    FpBinOp, FpUnOp, RoundMode, VecBinOp, VecCmpOp, VecFpOp, VecPairOp, VecReduceOp, VecShiftOp,
+    VecUnOp,
+};
 use super::value::IrValueId;
 use super::{BlockId, IrOp};
 
@@ -151,6 +155,20 @@ fn put_nzcv(out: &mut Vec<u8>, n: NzcvBit) {
     put_u8(out, v);
 }
 
+// ---------- M4b-6 SIMD/FP op-kind enum codecs ----------
+// Each fieldless enum has declaration-order discriminants (no repr/explicit
+// values), so `v as u8` is the stable byte tag. Readers map back explicitly.
+fn put_vecbinop(out: &mut Vec<u8>, v: VecBinOp) { put_u8(out, v as u8); }
+fn put_vecunop(out: &mut Vec<u8>, v: VecUnOp) { put_u8(out, v as u8); }
+fn put_vecshiftop(out: &mut Vec<u8>, v: VecShiftOp) { put_u8(out, v as u8); }
+fn put_veccmpop(out: &mut Vec<u8>, v: VecCmpOp) { put_u8(out, v as u8); }
+fn put_vecpairop(out: &mut Vec<u8>, v: VecPairOp) { put_u8(out, v as u8); }
+fn put_vecreduceop(out: &mut Vec<u8>, v: VecReduceOp) { put_u8(out, v as u8); }
+fn put_vecfpop(out: &mut Vec<u8>, v: VecFpOp) { put_u8(out, v as u8); }
+fn put_fpbinop(out: &mut Vec<u8>, v: FpBinOp) { put_u8(out, v as u8); }
+fn put_fpunop(out: &mut Vec<u8>, v: FpUnOp) { put_u8(out, v as u8); }
+fn put_round(out: &mut Vec<u8>, v: RoundMode) { put_u8(out, v as u8); }
+
 // ---------- reader helpers ----------
 
 struct Reader<'a> {
@@ -280,6 +298,82 @@ impl<'a> Reader<'a> {
             v => return Err(SerErr::BadEnum(v)),
         })
     }
+
+    // ---------- M4b-6 SIMD/FP op-kind readers ----------
+    fn vecbinop(&mut self) -> Result<VecBinOp, SerErr> {
+        Ok(match self.u8()? {
+            0 => VecBinOp::Add, 1 => VecBinOp::Sub, 2 => VecBinOp::Mul,
+            3 => VecBinOp::Mla, 4 => VecBinOp::Mls, 5 => VecBinOp::SqAdd,
+            6 => VecBinOp::UqAdd, 7 => VecBinOp::SqSub, 8 => VecBinOp::UqSub,
+            9 => VecBinOp::SHadd, 10 => VecBinOp::UHadd, 11 => VecBinOp::SrHadd,
+            12 => VecBinOp::UrHadd, 13 => VecBinOp::SAbd, 14 => VecBinOp::UAbd,
+            15 => VecBinOp::SAba, 16 => VecBinOp::UAba, 17 => VecBinOp::SMax,
+            18 => VecBinOp::SMin, 19 => VecBinOp::UMax, 20 => VecBinOp::UMin,
+            21 => VecBinOp::And, 22 => VecBinOp::Or, 23 => VecBinOp::Eor,
+            24 => VecBinOp::Bic, 25 => VecBinOp::Orn,
+            v => return Err(SerErr::BadEnum(v)),
+        })
+    }
+    fn vecunop(&mut self) -> Result<VecUnOp, SerErr> {
+        Ok(match self.u8()? {
+            0 => VecUnOp::Abs, 1 => VecUnOp::Neg,
+            v => return Err(SerErr::BadEnum(v)),
+        })
+    }
+    fn vecshiftop(&mut self) -> Result<VecShiftOp, SerErr> {
+        Ok(match self.u8()? {
+            0 => VecShiftOp::Shl, 1 => VecShiftOp::SShr, 2 => VecShiftOp::UShr,
+            v => return Err(SerErr::BadEnum(v)),
+        })
+    }
+    fn veccmpop(&mut self) -> Result<VecCmpOp, SerErr> {
+        Ok(match self.u8()? {
+            0 => VecCmpOp::Eq, 1 => VecCmpOp::SGt, 2 => VecCmpOp::SGe,
+            3 => VecCmpOp::UGt, 4 => VecCmpOp::UGe,
+            v => return Err(SerErr::BadEnum(v)),
+        })
+    }
+    fn vecpairop(&mut self) -> Result<VecPairOp, SerErr> {
+        Ok(match self.u8()? {
+            0 => VecPairOp::Add, 1 => VecPairOp::SMax, 2 => VecPairOp::SMin,
+            3 => VecPairOp::UMax, 4 => VecPairOp::UMin,
+            v => return Err(SerErr::BadEnum(v)),
+        })
+    }
+    fn vecreduceop(&mut self) -> Result<VecReduceOp, SerErr> {
+        Ok(match self.u8()? {
+            0 => VecReduceOp::Add, 1 => VecReduceOp::SMax, 2 => VecReduceOp::SMin,
+            3 => VecReduceOp::UMax, 4 => VecReduceOp::UMin,
+            v => return Err(SerErr::BadEnum(v)),
+        })
+    }
+    fn vecfpop(&mut self) -> Result<VecFpOp, SerErr> {
+        Ok(match self.u8()? {
+            0 => VecFpOp::Add, 1 => VecFpOp::Sub, 2 => VecFpOp::Mul,
+            3 => VecFpOp::Div, 4 => VecFpOp::Min, 5 => VecFpOp::Max,
+            v => return Err(SerErr::BadEnum(v)),
+        })
+    }
+    fn fpbinop(&mut self) -> Result<FpBinOp, SerErr> {
+        Ok(match self.u8()? {
+            0 => FpBinOp::Add, 1 => FpBinOp::Sub, 2 => FpBinOp::Mul,
+            3 => FpBinOp::Div, 4 => FpBinOp::Min, 5 => FpBinOp::Max, 6 => FpBinOp::NMul,
+            v => return Err(SerErr::BadEnum(v)),
+        })
+    }
+    fn fpunop(&mut self) -> Result<FpUnOp, SerErr> {
+        Ok(match self.u8()? {
+            0 => FpUnOp::Abs, 1 => FpUnOp::Neg, 2 => FpUnOp::Sqrt,
+            v => return Err(SerErr::BadEnum(v)),
+        })
+    }
+    fn round(&mut self) -> Result<RoundMode, SerErr> {
+        Ok(match self.u8()? {
+            0 => RoundMode::Nearest, 1 => RoundMode::NegInf, 2 => RoundMode::PosInf,
+            3 => RoundMode::Zero, 4 => RoundMode::NearestTiesAway, 5 => RoundMode::Current,
+            v => return Err(SerErr::BadEnum(v)),
+        })
+    }
 }
 
 // ---------- public API ----------
@@ -326,17 +420,19 @@ pub fn encode(op: &IrOp, out: &mut Vec<u8>) -> Result<(), SerErr> {
             put_vid(out, *b);
             put_vid(out, *c);
         }
-        IrOp::AddS { dst, flags, a, b } | IrOp::SubS { dst, flags, a, b }
-        | IrOp::AndS { dst, flags, a, b } => {
+        IrOp::AddS { dst, flags, a, b, sf } | IrOp::SubS { dst, flags, a, b, sf }
+        | IrOp::AndS { dst, flags, a, b, sf } => {
             put_vid(out, *dst);
             put_fid(out, *flags);
             put_vid(out, *a);
             put_vid(out, *b);
+            put_u8(out, *sf as u8);
         }
-        IrOp::Cmp { flags, a, b } | IrOp::Cmn { flags, a, b } | IrOp::Tst { flags, a, b } => {
+        IrOp::Cmp { flags, a, b, sf } | IrOp::Cmn { flags, a, b, sf } | IrOp::Tst { flags, a, b, sf } => {
             put_fid(out, *flags);
             put_vid(out, *a);
             put_vid(out, *b);
+            put_u8(out, *sf as u8);
         }
         IrOp::Load { dst, addr, ty, order } => {
             put_vid(out, *dst);
@@ -454,6 +550,80 @@ pub fn encode(op: &IrOp, out: &mut Vec<u8>) -> Result<(), SerErr> {
         IrOp::ReadPc { dst } => put_vid(out, *dst),
         IrOp::WritePc { src } => put_vid(out, *src),
 
+        // ───── M4b-6 SIMD/FP/crypto ctx-template ops ─────
+        IrOp::VecBin { op, size, q, d, n, m } => {
+            put_vecbinop(out, *op); put_u8(out, *size); put_u8(out, *q as u8);
+            put_u8(out, *d); put_u8(out, *n); put_u8(out, *m);
+        }
+        IrOp::VecUn { op, size, q, d, n } => {
+            put_vecunop(out, *op); put_u8(out, *size); put_u8(out, *q as u8);
+            put_u8(out, *d); put_u8(out, *n);
+        }
+        IrOp::VecShift { op, size, q, d, n, amount } => {
+            put_vecshiftop(out, *op); put_u8(out, *size); put_u8(out, *q as u8);
+            put_u8(out, *d); put_u8(out, *n); put_u8(out, *amount);
+        }
+        IrOp::VecCmp { op, size, q, d, n, m } => {
+            put_veccmpop(out, *op); put_u8(out, *size); put_u8(out, *q as u8);
+            put_u8(out, *d); put_u8(out, *n); put_u8(out, *m);
+        }
+        IrOp::VecPair { op, size, q, d, n, m } => {
+            put_vecpairop(out, *op); put_u8(out, *size); put_u8(out, *q as u8);
+            put_u8(out, *d); put_u8(out, *n); put_u8(out, *m);
+        }
+        IrOp::VecReduce { op, size, q, d, n } => {
+            put_vecreduceop(out, *op); put_u8(out, *size); put_u8(out, *q as u8);
+            put_u8(out, *d); put_u8(out, *n);
+        }
+        IrOp::VecAddLong { across, signed, size, q, d, n } => {
+            put_u8(out, *across as u8); put_u8(out, *signed as u8); put_u8(out, *size);
+            put_u8(out, *q as u8); put_u8(out, *d); put_u8(out, *n);
+        }
+        IrOp::VecFp { op, dbl, q, d, n, m } => {
+            put_vecfpop(out, *op); put_u8(out, *dbl as u8); put_u8(out, *q as u8);
+            put_u8(out, *d); put_u8(out, *n); put_u8(out, *m);
+        }
+        IrOp::FpFromInt { d, n_gpr, from_bits, to_bits, signed } => {
+            put_u8(out, *d); put_u8(out, *n_gpr); put_u8(out, *from_bits);
+            put_u8(out, *to_bits); put_u8(out, *signed as u8);
+        }
+        IrOp::FpToIntR { d_gpr, n, from_bits, to_bits, signed, round } => {
+            put_u8(out, *d_gpr); put_u8(out, *n); put_u8(out, *from_bits);
+            put_u8(out, *to_bits); put_u8(out, *signed as u8); put_round(out, *round);
+        }
+        IrOp::FpRound { d, n, dbl, round, raise_inexact } => {
+            put_u8(out, *d); put_u8(out, *n); put_u8(out, *dbl as u8);
+            put_round(out, *round); put_u8(out, *raise_inexact as u8);
+        }
+        IrOp::FpCvt2 { d, n, from_bits, to_bits } => {
+            put_u8(out, *d); put_u8(out, *n); put_u8(out, *from_bits); put_u8(out, *to_bits);
+        }
+        IrOp::FpMov { d, n, width_bits } => {
+            put_u8(out, *d); put_u8(out, *n); put_u8(out, *width_bits);
+        }
+        IrOp::FpBin { op, dbl, d, n, m } => {
+            put_fpbinop(out, *op); put_u8(out, *dbl as u8);
+            put_u8(out, *d); put_u8(out, *n); put_u8(out, *m);
+        }
+        IrOp::FpUn { op, dbl, d, n } => {
+            put_fpunop(out, *op); put_u8(out, *dbl as u8); put_u8(out, *d); put_u8(out, *n);
+        }
+        IrOp::FpCmpN { n, m, dbl, zero } => {
+            put_u8(out, *n); put_u8(out, *m); put_u8(out, *dbl as u8); put_u8(out, *zero as u8);
+        }
+        IrOp::FpToGpr { d_gpr, n, bits, high_half } => {
+            put_u8(out, *d_gpr); put_u8(out, *n); put_u8(out, *bits); put_u8(out, *high_half as u8);
+        }
+        IrOp::FpFromGpr { d, n_gpr, bits, high_half } => {
+            put_u8(out, *d); put_u8(out, *n_gpr); put_u8(out, *bits); put_u8(out, *high_half as u8);
+        }
+        IrOp::CryptoAesR { kind, d, n, m } => {
+            put_u8(out, *kind); put_u8(out, *d); put_u8(out, *n); put_u8(out, *m);
+        }
+        IrOp::CryptoShaR { kind, d, n, m } => {
+            put_u8(out, *kind); put_u8(out, *d); put_u8(out, *n); put_u8(out, *m);
+        }
+
         // Variants whose payload codec lands in a follow-up prompt:
         _ => return Err(SerErr::NotYetImplemented),
     }
@@ -500,12 +670,12 @@ pub fn decode(bytes: &[u8]) -> Result<(IrOp, usize), SerErr> {
         0x26 => IrOp::Bswap16 { dst: r.vid()?, a: r.vid()? },
         0x27 => IrOp::Bswap32 { dst: r.vid()?, a: r.vid()? },
         0x28 => IrOp::Bswap64 { dst: r.vid()?, a: r.vid()? },
-        0x30 => IrOp::AddS { dst: r.vid()?, flags: r.fid()?, a: r.vid()?, b: r.vid()? },
-        0x31 => IrOp::SubS { dst: r.vid()?, flags: r.fid()?, a: r.vid()?, b: r.vid()? },
-        0x32 => IrOp::AndS { dst: r.vid()?, flags: r.fid()?, a: r.vid()?, b: r.vid()? },
-        0x35 => IrOp::Cmp { flags: r.fid()?, a: r.vid()?, b: r.vid()? },
-        0x36 => IrOp::Cmn { flags: r.fid()?, a: r.vid()?, b: r.vid()? },
-        0x37 => IrOp::Tst { flags: r.fid()?, a: r.vid()?, b: r.vid()? },
+        0x30 => IrOp::AddS { dst: r.vid()?, flags: r.fid()?, a: r.vid()?, b: r.vid()?, sf: r.u8()? != 0 },
+        0x31 => IrOp::SubS { dst: r.vid()?, flags: r.fid()?, a: r.vid()?, b: r.vid()?, sf: r.u8()? != 0 },
+        0x32 => IrOp::AndS { dst: r.vid()?, flags: r.fid()?, a: r.vid()?, b: r.vid()?, sf: r.u8()? != 0 },
+        0x35 => IrOp::Cmp { flags: r.fid()?, a: r.vid()?, b: r.vid()?, sf: r.u8()? != 0 },
+        0x36 => IrOp::Cmn { flags: r.fid()?, a: r.vid()?, b: r.vid()?, sf: r.u8()? != 0 },
+        0x37 => IrOp::Tst { flags: r.fid()?, a: r.vid()?, b: r.vid()?, sf: r.u8()? != 0 },
         0x40 => IrOp::Sext { dst: r.vid()?, a: r.vid()?, from_bits: r.u8()?, to_bits: r.u8()? },
         0x41 => IrOp::Zext { dst: r.vid()?, a: r.vid()?, from_bits: r.u8()?, to_bits: r.u8()? },
         0x42 => IrOp::Trunc { dst: r.vid()?, a: r.vid()?, to_bits: r.u8()? },
@@ -559,6 +729,62 @@ pub fn decode(bytes: &[u8]) -> Result<(IrOp, usize), SerErr> {
         0xE9 => IrOp::WritePc { src: r.vid()? },
         0xF0 => IrOp::X86Mfence,
         0xF1 => IrOp::X86Cpuid,
+
+        // ───── M4b-6 SIMD/FP/crypto ctx-template ops ─────
+        0xCD => IrOp::VecBin {
+            op: r.vecbinop()?, size: r.u8()?, q: r.u8()? != 0,
+            d: r.u8()?, n: r.u8()?, m: r.u8()?,
+        },
+        0xCE => IrOp::VecUn {
+            op: r.vecunop()?, size: r.u8()?, q: r.u8()? != 0, d: r.u8()?, n: r.u8()?,
+        },
+        0xCF => IrOp::VecShift {
+            op: r.vecshiftop()?, size: r.u8()?, q: r.u8()? != 0,
+            d: r.u8()?, n: r.u8()?, amount: r.u8()?,
+        },
+        0xD0 => IrOp::VecCmp {
+            op: r.veccmpop()?, size: r.u8()?, q: r.u8()? != 0,
+            d: r.u8()?, n: r.u8()?, m: r.u8()?,
+        },
+        0xD1 => IrOp::VecPair {
+            op: r.vecpairop()?, size: r.u8()?, q: r.u8()? != 0,
+            d: r.u8()?, n: r.u8()?, m: r.u8()?,
+        },
+        0xD2 => IrOp::VecReduce {
+            op: r.vecreduceop()?, size: r.u8()?, q: r.u8()? != 0, d: r.u8()?, n: r.u8()?,
+        },
+        0xD3 => IrOp::VecAddLong {
+            across: r.u8()? != 0, signed: r.u8()? != 0, size: r.u8()?,
+            q: r.u8()? != 0, d: r.u8()?, n: r.u8()?,
+        },
+        0xD4 => IrOp::VecFp {
+            op: r.vecfpop()?, dbl: r.u8()? != 0, q: r.u8()? != 0,
+            d: r.u8()?, n: r.u8()?, m: r.u8()?,
+        },
+        0xD5 => IrOp::FpFromInt {
+            d: r.u8()?, n_gpr: r.u8()?, from_bits: r.u8()?, to_bits: r.u8()?, signed: r.u8()? != 0,
+        },
+        0xD6 => IrOp::FpToIntR {
+            d_gpr: r.u8()?, n: r.u8()?, from_bits: r.u8()?, to_bits: r.u8()?,
+            signed: r.u8()? != 0, round: r.round()?,
+        },
+        0xD7 => IrOp::FpRound {
+            d: r.u8()?, n: r.u8()?, dbl: r.u8()? != 0, round: r.round()?, raise_inexact: r.u8()? != 0,
+        },
+        0xD8 => IrOp::FpCvt2 {
+            d: r.u8()?, n: r.u8()?, from_bits: r.u8()?, to_bits: r.u8()?,
+        },
+        0xD9 => IrOp::FpMov { d: r.u8()?, n: r.u8()?, width_bits: r.u8()? },
+        0xDA => IrOp::FpBin {
+            op: r.fpbinop()?, dbl: r.u8()? != 0, d: r.u8()?, n: r.u8()?, m: r.u8()?,
+        },
+        0xDB => IrOp::FpUn { op: r.fpunop()?, dbl: r.u8()? != 0, d: r.u8()?, n: r.u8()? },
+        0xDC => IrOp::FpCmpN { n: r.u8()?, m: r.u8()?, dbl: r.u8()? != 0, zero: r.u8()? != 0 },
+        0xDD => IrOp::FpToGpr { d_gpr: r.u8()?, n: r.u8()?, bits: r.u8()?, high_half: r.u8()? != 0 },
+        0xDE => IrOp::FpFromGpr { d: r.u8()?, n_gpr: r.u8()?, bits: r.u8()?, high_half: r.u8()? != 0 },
+        0xDF => IrOp::CryptoAesR { kind: r.u8()?, d: r.u8()?, n: r.u8()?, m: r.u8()? },
+        0xEA => IrOp::CryptoShaR { kind: r.u8()?, d: r.u8()?, n: r.u8()?, m: r.u8()? },
+
         0xFF => IrOp::Unimplemented(r.u32()?),
         other => return Err(SerErr::BadTag(other)),
     };
@@ -703,6 +929,7 @@ pub fn variant_tag(op: &IrOp) -> u8 {
         IrOp::Isb => 0xC9,
         IrOp::Sb => 0xCA,
         IrOp::Hint { .. } => 0xCB,
+        IrOp::TlbInval { .. } => 0xCC,
 
         // Guest CPU state access
         IrOp::ReadGpr { .. } => 0xE0,
@@ -718,6 +945,29 @@ pub fn variant_tag(op: &IrOp) -> u8 {
 
         IrOp::X86Mfence => 0xF0,
         IrOp::X86Cpuid => 0xF1,
+
+        // M4b-6 SIMD/FP/crypto ctx-template ops (0xCD..0xDF + 0xEA).
+        IrOp::VecBin { .. } => 0xCD,
+        IrOp::VecUn { .. } => 0xCE,
+        IrOp::VecShift { .. } => 0xCF,
+        IrOp::VecCmp { .. } => 0xD0,
+        IrOp::VecPair { .. } => 0xD1,
+        IrOp::VecReduce { .. } => 0xD2,
+        IrOp::VecAddLong { .. } => 0xD3,
+        IrOp::VecFp { .. } => 0xD4,
+        IrOp::FpFromInt { .. } => 0xD5,
+        IrOp::FpToIntR { .. } => 0xD6,
+        IrOp::FpRound { .. } => 0xD7,
+        IrOp::FpCvt2 { .. } => 0xD8,
+        IrOp::FpMov { .. } => 0xD9,
+        IrOp::FpBin { .. } => 0xDA,
+        IrOp::FpUn { .. } => 0xDB,
+        IrOp::FpCmpN { .. } => 0xDC,
+        IrOp::FpToGpr { .. } => 0xDD,
+        IrOp::FpFromGpr { .. } => 0xDE,
+        IrOp::CryptoAesR { .. } => 0xDF,
+        IrOp::CryptoShaR { .. } => 0xEA,
+
         IrOp::Unimplemented(_) => 0xFF,
     }
 }
@@ -798,6 +1048,26 @@ pub fn is_codec_implemented(op: &IrOp) -> bool {
             | IrOp::WriteFlags { .. }
             | IrOp::ReadPc { .. }
             | IrOp::WritePc { .. }
+            | IrOp::VecBin { .. }
+            | IrOp::VecUn { .. }
+            | IrOp::VecShift { .. }
+            | IrOp::VecCmp { .. }
+            | IrOp::VecPair { .. }
+            | IrOp::VecReduce { .. }
+            | IrOp::VecAddLong { .. }
+            | IrOp::VecFp { .. }
+            | IrOp::FpFromInt { .. }
+            | IrOp::FpToIntR { .. }
+            | IrOp::FpRound { .. }
+            | IrOp::FpCvt2 { .. }
+            | IrOp::FpMov { .. }
+            | IrOp::FpBin { .. }
+            | IrOp::FpUn { .. }
+            | IrOp::FpCmpN { .. }
+            | IrOp::FpToGpr { .. }
+            | IrOp::FpFromGpr { .. }
+            | IrOp::CryptoAesR { .. }
+            | IrOp::CryptoShaR { .. }
             | IrOp::Unimplemented(_)
     )
 }

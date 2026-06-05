@@ -48,6 +48,9 @@ impl RedundantLoadPass {
                     | IrOp::Dsb { .. }
                     | IrOp::Isb
                     | IrOp::Sb
+                    // A TLBI changes VA→PA mapping, so a value loaded before it
+                    // may differ from one loaded after — drop the load cache.
+                    | IrOp::TlbInval { .. }
                     | IrOp::Call { .. } => {
                         cache.clear();
                         new_ops.push(op);

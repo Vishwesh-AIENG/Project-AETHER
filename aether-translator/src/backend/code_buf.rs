@@ -151,6 +151,17 @@ impl CodeBuf {
         self.buf.len()
     }
 
+    /// Host virtual address of byte 0 of the code arena.
+    ///
+    /// The arena is a `Vec<u8>` from the global allocator, so the emitted x86
+    /// for a block at host_offset lives at `base_ptr() + host_offset` — this
+    /// is the real executable address for host-mode dispatch (the logical
+    /// `jit_cache_pa` passed to `aether_dbt_init` is only used to compute the
+    /// guest-side NPT/EPT W^X-flip target, not where the bytes physically are).
+    pub fn base_ptr(&self) -> *const u8 {
+        self.buf.as_ptr()
+    }
+
     /// Current high-water mark.
     pub fn written_len(&self) -> usize {
         self.written_len

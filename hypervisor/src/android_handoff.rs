@@ -133,6 +133,10 @@ pub struct AndroidHandoff {
     /// Base + size of the contiguous host PA range the EPT/NPT must map.
     pub region_pa:   u64,
     pub region_size: u64,
+    /// `true` if the boot.img kernel was gzip-compressed and inflated into a
+    /// dedicated region (so `kernel_pc` is the decompressed entry, not the
+    /// in-place compressed payload).
+    pub kernel_decompressed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +151,14 @@ pub enum HandoffError {
     DtbBuild(KernelError),
     /// DTB emission produced more bytes than `GUEST_DTB_SIZE`.
     DtbTooLarge,
+    /// Kernel payload is gzip-compressed but inflation failed (corrupt stream,
+    /// or it decompresses to more than the destination region holds).
+    KernelDecompressFailed,
+    /// Kernel payload uses a compression format AETHER does not implement
+    /// (e.g. lz4 / xz). Only raw `Image` and gzip `Image.gz` are supported.
+    KernelCompressionUnsupported,
+    /// No room above the DTB in the mapped region for the decompressed kernel.
+    KernelDecompressNoRoom,
 }
 
 impl From<AndroidBootError> for HandoffError {
@@ -217,40 +229,143 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
 ///   the early CR3 directly).
 /// * Concurrent calls are forbidden — this writes the DTB blob in place.
 pub unsafe fn prepare_android_handoff() -> Result<AndroidHandoff, HandoffError> {
+    unsafe {
+        prepare_android_handoff_at(
+            STAGED_BOOT_IMG_PA,
+            STAGED_BOOT_IMG_SIZE,
+            GUEST_DTB_PA,
+            GUEST_DTB_SIZE,
+            HANDOFF_REGION_SIZE,
+        )
+    }
+}
+
+/// Same as `prepare_android_handoff` but accepts caller-supplied PAs for the
+/// staged boot.img window and the DTB destination. Used when the UEFI ESP
+/// reader allocated the staging buffer at runtime (audit §2a fix) so the
+/// scan looks at the actual UEFI-allocated PA instead of the legacy
+/// hardcoded `0x8000_0000` constant. The fallback path still calls the
+/// constants-based form above for backward compatibility.
+///
+/// # Safety
+/// Same contract as [`prepare_android_handoff`]; in addition, both
+/// `(stage_pa, stage_size)` and `(dtb_pa, dtb_size)` must point at host RAM
+/// the hypervisor exclusively owns.
+pub unsafe fn prepare_android_handoff_at(
+    stage_pa:        u64,
+    stage_size:      u64,
+    dtb_pa:          u64,
+    dtb_size:        u64,
+    region_size_out: u64,
+) -> Result<AndroidHandoff, HandoffError> {
     // SAFETY: caller guarantees mapping; we cast the PA window to a `&[u8]`.
     let region: &[u8] = unsafe {
-        core::slice::from_raw_parts(
-            STAGED_BOOT_IMG_PA as *const u8,
-            STAGED_BOOT_IMG_SIZE as usize,
-        )
+        core::slice::from_raw_parts(stage_pa as *const u8, stage_size as usize)
     };
 
-    let layout = scan_for_boot_image(region, STAGED_BOOT_IMG_PA)?;
+    let mut layout = scan_for_boot_image(region, stage_pa)?;
 
-    // Emit the DTB into the dedicated guest region.
-    let dtb_cfg = default_dtb_config();
+    // Emit the DTB into the dedicated guest region. Re-target memory_base /
+    // memory_size at the caller-supplied region so the guest DTB matches
+    // what the NPT actually maps.
+    let mut dtb_cfg = default_dtb_config();
+    dtb_cfg.memory_base = stage_pa;
+    dtb_cfg.memory_size = region_size_out;
     let dtb_buf: &mut [u8] = unsafe {
-        core::slice::from_raw_parts_mut(
-            GUEST_DTB_PA as *mut u8,
-            GUEST_DTB_SIZE as usize,
-        )
+        core::slice::from_raw_parts_mut(dtb_pa as *mut u8, dtb_size as usize)
     };
     let dtb_len = build_android_dtb(&dtb_cfg, dtb_buf)?;
-    if dtb_len as u64 > GUEST_DTB_SIZE {
+    if dtb_len as u64 > dtb_size {
         return Err(HandoffError::DtbTooLarge);
     }
 
-    let dbt_regs = DbtInitialRegs::for_kernel_entry(layout.kernel_pa, GUEST_DTB_PA);
+    // ── Decompress the kernel if it is gzip-compressed ────────────────────
+    //
+    // The discovered kernel runs IN PLACE inside the boot.img window
+    // (`kernel_pa == header_pa + 4096`). Android boot.img kernels are almost
+    // always gzip-compressed (`Image.gz` / `Image.gz-dtb`); the DBT dispatcher
+    // fetches the entry as raw bytes, so a compressed payload makes the very
+    // first translated block lift the gzip magic `1f 8b 08 00` instead of ARM64
+    // code (observed on the first real-hardware boot: TranslateFail at
+    // pc == kernel_pa == 0xac401000, word == 0x00088b1f, kind=lift).
+    //
+    // AETHER is the bootloader (No-Boundary, Ch. 3) and arm64 has no
+    // self-extracting kernel, so we inflate here into a dedicated 2-MiB-aligned
+    // destination immediately above the DTB. The destination lives inside the
+    // EPT/NPT-mapped handoff region (which the design already treats as
+    // guest-owned conventional RAM — the guest writes there during boot), is
+    // disjoint from the compressed source in the boot.img window, and is what
+    // the dispatch loop's MMU window + identity reader cover. We then repoint
+    // `kernel_pa` (and the DbtInitialRegs PC) at the decompressed entry.
+    let kernel_off = (layout.kernel_pa - stage_pa) as usize;
+    let kernel_size = layout.kernel_size as usize;
+    if kernel_off + kernel_size > region.len() {
+        return Err(HandoffError::KernelOutOfRange);
+    }
+    let kernel_src = &region[kernel_off..kernel_off + kernel_size];
+
+    let kernel_decompressed = if crate::inflate::is_gzip(kernel_src) {
+        // 2-MiB-aligned destination just above the DTB region.
+        let dest_pa = (dtb_pa + dtb_size + 0x1F_FFFF) & !0x1F_FFFF;
+        let region_end = stage_pa + region_size_out;
+        if dest_pa >= region_end {
+            return Err(HandoffError::KernelDecompressNoRoom);
+        }
+        let dest_cap = (region_end - dest_pa) as usize;
+        // SAFETY: the caller guarantees [stage_pa, stage_pa+region_size_out) is
+        // hypervisor-owned, host-identity-mapped RAM. `dest_pa..region_end` is a
+        // subrange of it that is disjoint from the boot.img window holding
+        // `kernel_src` (dest_pa >= dtb_pa+dtb_size, and the boot.img window ends
+        // at stage_pa+STAGED_BOOT_IMG_SIZE <= dtb_pa).
+        let dest: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(dest_pa as *mut u8, dest_cap)
+        };
+        let n = crate::inflate::gunzip(kernel_src, dest)
+            .map_err(|_| HandoffError::KernelDecompressFailed)?;
+        // Repoint the entry at the decompressed image. Leave ramdisk_pa
+        // pointing at the original in-place ramdisk in the boot.img window.
+        layout.kernel_pa = dest_pa;
+        layout.kernel_size = n as u32;
+        true
+    } else if is_unsupported_kernel_compression(kernel_src) {
+        return Err(HandoffError::KernelCompressionUnsupported);
+    } else {
+        // Uncompressed `Image` — run in place.
+        false
+    };
+
+    let dbt_regs = DbtInitialRegs::for_kernel_entry(layout.kernel_pa, dtb_pa);
 
     Ok(AndroidHandoff {
         layout,
-        dtb_pa:  GUEST_DTB_PA,
+        dtb_pa,
         dtb_len,
         dbt_regs,
         kernel_pc: layout.kernel_pa,
-        region_pa:   STAGED_BOOT_IMG_PA,
-        region_size: HANDOFF_REGION_SIZE,
+        region_pa:   stage_pa,
+        region_size: region_size_out,
+        kernel_decompressed,
     })
+}
+
+/// Detect compressed-kernel formats AETHER does NOT implement, so the boot
+/// path can fail-loud with a clear diagnostic instead of feeding the bytes to
+/// the DBT (which would TranslateFail on the compression magic).
+fn is_unsupported_kernel_compression(k: &[u8]) -> bool {
+    if k.len() < 4 {
+        return false;
+    }
+    let h = [k[0], k[1], k[2], k[3]];
+    const LZ4_FRAME: [u8; 4] = [0x04, 0x22, 0x4D, 0x18];
+    const LZ4_LEGACY: [u8; 4] = [0x02, 0x21, 0x4C, 0x18];
+    const XZ: [u8; 4] = [0xFD, b'7', b'z', b'X']; // \xFD 7 z X (Z)
+    const LZMA_ALONE: [u8; 3] = [0x5D, 0x00, 0x00];
+    const ZSTD: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+    h == LZ4_FRAME
+        || h == LZ4_LEGACY
+        || h == XZ
+        || h == ZSTD
+        || k[..3] == LZMA_ALONE
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

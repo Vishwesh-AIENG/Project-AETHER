@@ -220,8 +220,14 @@ fn decode_system(word: u32) -> Result<DecodedInsn, DecodeErr> {
         });
     }
 
-    // MSR (reg) / MRS: l=0 -> MSR, l=1 -> MRS
-    let sysreg = ((1u16 + op0_field as u16) << 14)
+    // MSR (reg) / MRS: l=0 -> MSR, l=1 -> MRS.
+    // op0_field = bits[20:19] holds op0 LITERALLY (2 or 3) for AArch64 system
+    // registers, matching SysRegId::op0() = (id>>14)&0b11. The previous
+    // `1 + op0_field` packing was off-by-one (op0=3 -> 4 -> masked to 0), so
+    // EVERY sysreg decoded to op0=0 and lookup() returned Unknown. The bug was
+    // dormant because MRS/MSR lowered to UD2 (the decoded sysreg was never
+    // used) until M4a gave them a real load/store lowering.
+    let sysreg = ((op0_field as u16) << 14)
         | ((op1 as u16) << 11)
         | ((crn as u16) << 7)
         | ((crm as u16) << 3)
@@ -235,16 +241,74 @@ fn decode_system(word: u32) -> Result<DecodedInsn, DecodeErr> {
 
 fn decode_uncond_branch_reg(word: u32) -> Result<DecodedInsn, DecodeErr> {
     // 1101 0110 opc(4) 11111 op2(5) op3(6) Rn op4(5)
+    // (ARM ARM C6.2 "Unconditional branch (register)"; op2 = bits[20:16].)
     let opc = (word >> 21) & 0xF;
-    let bits20_16 = (word >> 16) & 0x1F;
+    let bits20_16 = (word >> 16) & 0x1F; // op2
     if bits20_16 != 0b11111 {
         return Err(DecodeErr::Reserved);
     }
+    let op3 = (word >> 10) & 0x3F; // bits[15:10]
     let rn = Reg(((word >> 5) & 0x1F) as u8);
+    let op4 = (word & 0x1F) as u8; // bits[4:0]
     Ok(match opc {
         0b0000 => DecodedInsn::Br { rn },
         0b0001 => DecodedInsn::Blr { rn },
         0b0010 => DecodedInsn::Ret { rn },
-        _ => return Err(DecodeErr::Unimplemented), // ERET/DRPS/BRAA/BLRAA in later revisions
+        // ERET — exception return (C6.2.ERET). Plain (non-PAC) form requires
+        //   op3=000000, Rn=11111, op4=00000. ERETAA/ERETAB (PAC variants) use
+        //   op3=000010/000011 with op4=11111 and are left Unimplemented so they
+        //   fail loud (UD2) rather than silently executing a bare ERET.
+        0b0100 => {
+            if op3 == 0b000000 && rn.0 == 0b11111 && op4 == 0b00000 {
+                DecodedInsn::Eret
+            } else {
+                // ERETAA / ERETAB / reserved op3/op4 combinations.
+                return Err(DecodeErr::Unimplemented);
+            }
+        }
+        // 0b0101 = DRPS (debug restore PE state) — Phase A models no debug state.
+        // 0b0011 reserved; 0b1000/0b1001 = BRAA/BLRAA (PAC) — later revisions.
+        _ => return Err(DecodeErr::Unimplemented),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{decode_instruction, DecodeErr, DecodedInsn, Reg};
+
+    #[test]
+    fn eret_decodes() {
+        // ERET = 0xD69F03E0 (opc=0100, op2=11111, op3=000000, Rn=11111, op4=00000).
+        let insn = decode_instruction(0xD69F_03E0).expect("ERET must decode");
+        assert_eq!(insn, DecodedInsn::Eret);
+    }
+
+    #[test]
+    fn ret_still_decodes() {
+        // RET x30 = 0xD65F03C0 — guard against the new ERET arm shadowing RET.
+        let insn = decode_instruction(0xD65F_03C0).expect("RET must decode");
+        assert_eq!(insn, DecodedInsn::Ret { rn: Reg(30) });
+    }
+
+    #[test]
+    fn eretaa_is_not_plain_eret() {
+        // ERETAA = 0xD69F0BFF (op3=000010, op4=11111) — PAC variant. Must NOT
+        // decode to plain Eret; it stays Unimplemented so it fails loud (UD2).
+        match decode_instruction(0xD69F_0BFF) {
+            Ok(DecodedInsn::Eret) => panic!("ERETAA must not decode as plain ERET"),
+            Err(DecodeErr::Unimplemented) => {}
+            other => panic!("ERETAA expected Unimplemented, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drps_is_not_eret() {
+        // DRPS = 0xD6BF03E0 (opc=0101) — debug restore. Not modeled; must not
+        // collide with the ERET decode.
+        match decode_instruction(0xD6BF_03E0) {
+            Ok(DecodedInsn::Eret) => panic!("DRPS must not decode as ERET"),
+            Err(DecodeErr::Unimplemented) => {}
+            other => panic!("DRPS expected Unimplemented, got {other:?}"),
+        }
+    }
 }

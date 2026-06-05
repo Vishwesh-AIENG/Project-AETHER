@@ -15,8 +15,41 @@ use core::panic::PanicInfo;
 // ─────────────────────────────────────────────────────────────────────────────
 // Panic handler — common to both architectures.
 // ─────────────────────────────────────────────────────────────────────────────
+// x86_64: a polled COM1 (0x3F8) writer so a Rust panic in the DBT dispatch
+// path prints its location+message instead of halting silently. COM1 is
+// already initialised post-ExitBootServices by boot_x86::com1_init().
+#[cfg(target_arch = "x86_64")]
+struct Com1Writer;
+#[cfg(target_arch = "x86_64")]
+impl core::fmt::Write for Com1Writer {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for &b in s.as_bytes() {
+            // SAFETY: legacy 16550 port I/O; poll LSR.THRE (bit5) then write THR.
+            unsafe {
+                loop {
+                    let lsr: u8;
+                    core::arch::asm!("in al, dx", out("al") lsr, in("dx") 0x3FDu16,
+                                     options(nomem, nostack));
+                    if lsr & 0x20 != 0 { break; }
+                }
+                core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b,
+                                 options(nomem, nostack));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[panic_handler]
-fn panic(_: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    // Surface the panic (message + file:line via PanicInfo's Display) so a
+    // silent hypervisor panic during DBT bring-up is diagnosable on the serial
+    // log instead of just a frozen HLT.
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::fmt::Write;
+        let _ = writeln!(Com1Writer, "\n[PANIC] {}", info);
+    }
     loop {
         #[cfg(target_arch = "aarch64")]
         unsafe { core::arch::asm!("wfe", options(nomem, nostack)); }
@@ -509,9 +542,19 @@ mod x86_entry {
         let width   = unsafe { (*info).horizontal_res };
         let height  = unsafe { (*info).vertical_res };
         let pitch   = unsafe { (*info).pixels_per_scan_line };
-        // pixel_format 0 = RGB (BGRA in memory? actually UEFI's RGB means red in low byte).
-        // pixel_format 1 = BGR (most common: B,G,R,reserved in memory order).
+        // pixel_format 0 = PixelRedGreenBlueReserved8BitPerColor
+        // pixel_format 1 = PixelBlueGreenRedReserved8BitPerColor (most common)
+        // pixel_format 2 = PixelBitMask  (custom channel masks)
+        // pixel_format 3 = PixelBltOnly  — fb_base is undefined; writes UB
+        // pixel_format ≥ 4 = reserved
+        //
+        // We only support 0 and 1 — direct 32-bit-pixel writes. Leave
+        // FB_INFO unset on anything else so fb_text_puts becomes a no-op
+        // and dual_puts falls back to COM1 + VGA-text without faulting.
         let fmt = unsafe { (*info).pixel_format };
+        if fmt >= 2 {
+            return;
+        }
         let bgr = fmt == 1;
 
         set_framebuffer(FramebufferInfo {

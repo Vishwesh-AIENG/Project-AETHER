@@ -217,6 +217,7 @@ impl Dispatcher {
         let mut block = IrBlock::new(BlockId(0));
         let mut offset = 0usize;
         let mut count = 0;
+        let mut ended_on_terminator = false;
 
         while offset + 4 <= insn_bytes.len() && count < MAX_INSNS {
             let word = u32::from_le_bytes([
@@ -233,6 +234,7 @@ impl Dispatcher {
                     offset += 4;
                     count += 1;
                     if term {
+                        ended_on_terminator = true;
                         break;
                     }
                 }
@@ -242,6 +244,17 @@ impl Dispatcher {
 
         if count == 0 {
             return Err(DispatchError::EmptyBlock);
+        }
+        // Sibling of the dbt.rs fix: a terminator-less block (>= MAX_INSNS, or
+        // decode-exhausted) must emit a synthetic fallthrough WritePc or the
+        // dispatcher would re-run it forever. Next PC = guest_pc + count*4.
+        if !ended_on_terminator {
+            let v_next = block.new_value(crate::ir::value::IrValueKind::I64);
+            block.push_op(crate::ir::IrOp::ConstI64 {
+                dst: v_next,
+                val: (guest_pc + count as u64 * 4) as i64,
+            });
+            block.push_op(crate::ir::IrOp::WritePc { src: v_next });
         }
         Ok(block)
     }
@@ -270,6 +283,7 @@ fn is_terminator(insn: &DecodedInsn) -> bool {
             | DecodedInsn::Blr { .. }
             | DecodedInsn::Br { .. }
             | DecodedInsn::Ret { .. }
+            | DecodedInsn::Eret
             | DecodedInsn::Cbz { .. }
             | DecodedInsn::Cbnz { .. }
             | DecodedInsn::Tbz { .. }

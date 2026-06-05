@@ -228,7 +228,20 @@ impl BootImageHeader {
             return Err(BootloaderError::UnsupportedHeaderVersion);
         }
 
-        if header_size != BOOT_PAGE_SIZE {
+        // Real AOSP-built boot.img headers use the C struct size, not the
+        // page size: v3 → 1580 bytes, v4 → 1584 bytes. The old check rejected
+        // every real boot.img and accepted only synthetic fixtures whose
+        // header_size was rounded to BOOT_PAGE_SIZE (4096). Accept the spec
+        // values from AOSP system/tools/mkbootimg/include/bootimg/bootimg.h
+        // plus the legacy 4096 for backward compat with internal fixtures.
+        const V3_HDR_BYTES: u32 = 1580;
+        const V4_HDR_BYTES: u32 = 1584;
+        let header_size_ok = match header_version {
+            BOOT_HEADER_VERSION_3 => header_size == V3_HDR_BYTES || header_size == BOOT_PAGE_SIZE,
+            BOOT_HEADER_VERSION_4 => header_size == V4_HDR_BYTES || header_size == BOOT_PAGE_SIZE,
+            _ => false,
+        };
+        if !header_size_ok {
             return Err(BootloaderError::InvalidHeaderSize);
         }
 

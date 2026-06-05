@@ -252,6 +252,43 @@ pub unsafe fn read_esp_file(
     Ok(size)
 }
 
+// ── UEFI AllocatePages constants (UEFI Spec 2.10 §7.2.1) ─────────────────────
+
+/// Allocate any free pages anywhere in conventional memory.
+pub const EFI_ALLOCATE_ANY_PAGES:    u32 = 0;
+/// Allocate any free pages whose top address is ≤ caller-supplied max.
+pub const EFI_ALLOCATE_MAX_ADDRESS:  u32 = 1;
+/// Allocate at a specific PA (fails if not conventional memory).
+pub const EFI_ALLOCATE_ADDRESS:      u32 = 2;
+
+/// EfiLoaderData — memory owned by the loaded image. Stays valid across
+/// ExitBootServices and the firmware leaves it untouched on takeover.
+pub const EFI_LOADER_DATA: u32 = 2;
+
+// ── Boot.img staging buffer — allocated via AllocatePages ───────────────────
+
+/// PA returned by AllocatePages for the boot.img staging window. Set by
+/// `try_read_boot_img` on success; zero means we fell back to a fixed
+/// constant PA (older code path). Read by the post-EBS handoff code so it
+/// scans the *actually-RAM* region instead of writing to whatever happens
+/// to live at the hardcoded `STAGED_BOOT_IMG_PA = 0x8000_0000` (which the
+/// May 2026 Ryzen test showed is not guaranteed to be conventional memory).
+///
+/// 2-MiB-aligned so the same address can be NPT-mapped via the existing
+/// `build_npt_2mib_range` helper without further alignment math.
+static mut ALLOCATED_STAGE_PA: u64 = 0;
+/// Pages actually allocated (in 4-KiB units).
+static mut ALLOCATED_STAGE_PAGES: usize = 0;
+
+/// Return the (pa, byte_size) of the UEFI-allocated boot.img staging
+/// window. (0, 0) if allocation failed and the caller should fall back
+/// to the legacy fixed PA.
+pub fn allocated_stage_region() -> (u64, u64) {
+    unsafe {
+        (ALLOCATED_STAGE_PA, (ALLOCATED_STAGE_PAGES as u64) * 4096)
+    }
+}
+
 // ── Convenience wrapper for the boot.img path ─────────────────────────────────
 
 /// Canonical AETHER boot.img path on the ESP.
@@ -260,6 +297,38 @@ pub const AETHER_BOOT_IMG_PATH: &[u8] = b"\\EFI\\AETHER\\boot.img";
 
 /// Canonical vbmeta path on the ESP.
 pub const AETHER_VBMETA_PATH: &[u8]   = b"\\EFI\\AETHER\\vbmeta.img";
+
+/// Diagnostic side channel: the last ESP read attempt's error variant, encoded
+/// as a single byte (0=none, 1=LoadedImageNotFound, 2=NoFileSystem,
+/// 3=OpenVolumeFailed, 4=OpenFileFailed, 5=ReadFailed, 6=BufferTooSmall),
+/// plus the raw EfiStatus value the firmware returned. Read by the boot
+/// pipeline AFTER ExitBootServices via `last_esp_error()` and printed so the
+/// user can tell missing-file (status 0x800…0E) apart from no-filesystem
+/// (0x800…0F) apart from permission errors etc. without re-running the
+/// boot to add another printf.
+static mut LAST_ESP_ERR_KIND:   u8        = 0;
+static mut LAST_ESP_ERR_STATUS: EfiStatus = 0;
+
+/// Read back `(kind, status)` from the most recent `try_read_*` call.
+pub fn last_esp_error() -> (u8, EfiStatus) {
+    unsafe { (LAST_ESP_ERR_KIND, LAST_ESP_ERR_STATUS) }
+}
+
+#[inline]
+fn record_esp_err(err: &EspReadError) {
+    let (kind, status) = match *err {
+        EspReadError::LoadedImageNotFound(s) => (1u8, s),
+        EspReadError::NoFileSystem(s)        => (2u8, s),
+        EspReadError::OpenVolumeFailed(s)    => (3u8, s),
+        EspReadError::OpenFileFailed(s)      => (4u8, s),
+        EspReadError::ReadFailed(s)          => (5u8, s),
+        EspReadError::BufferTooSmall { .. }  => (6u8, 0),
+    };
+    unsafe {
+        LAST_ESP_ERR_KIND   = kind;
+        LAST_ESP_ERR_STATUS = status;
+    }
+}
 
 /// Try to read `\EFI\AETHER\boot.img` into `buffer`. Returns the number of
 /// bytes read, or `Ok(0)` if the file is absent / unreadable (so the boot
@@ -272,12 +341,110 @@ pub unsafe fn try_read_boot_img(
     system_table: *const EfiSystemTable,
     buffer:       &mut [u8],
 ) -> usize {
+    unsafe {
+        LAST_ESP_ERR_KIND   = 0;
+        LAST_ESP_ERR_STATUS = 0;
+    }
     match unsafe {
         read_esp_file(image_handle, system_table, AETHER_BOOT_IMG_PATH, buffer)
     } {
-        Ok(n) => n,
-        Err(_) => 0,
+        Ok(n)  => n,
+        Err(e) => { record_esp_err(&e); 0 }
     }
+}
+
+/// AllocatePages-based reader for `\EFI\AETHER\boot.img`.
+///
+/// Asks UEFI to allocate `pages` 4-KiB pages of `EfiLoaderData` below
+/// `max_address_pa`, reads the file into the resulting region, and
+/// returns `(pa, bytes_read)`. On any failure returns `(0, 0)` and the
+/// caller should fall back to a fixed-PA write (which on some Ryzen
+/// boards lands in MMIO, the bug §2a of the May 2026 audit).
+///
+/// Padding for 2-MiB alignment: we allocate `pages + 512` (= +2 MiB)
+/// and then bump the returned base PA up to the next 2-MiB boundary
+/// so the existing `build_npt_2mib_range` NPT helper can map it with
+/// 2-MiB leaf entries directly. The unused head pages stay reserved
+/// to us until ExitBootServices but are otherwise wasted — a 2-MiB
+/// loss is cheap insurance against the firmware reserving a chunk in
+/// the middle of an otherwise-conventional band.
+///
+/// # Safety
+/// Same contract as [`read_esp_file`]. Must run BEFORE ExitBootServices.
+pub unsafe fn try_read_boot_img_alloc(
+    image_handle:   EfiHandle,
+    system_table:   *const EfiSystemTable,
+    pages:          usize,
+    max_address_pa: u64,
+) -> (u64, usize) {
+    unsafe {
+        LAST_ESP_ERR_KIND       = 0;
+        LAST_ESP_ERR_STATUS     = 0;
+        ALLOCATED_STAGE_PA      = 0;
+        ALLOCATED_STAGE_PAGES   = 0;
+    }
+    let bs: &EfiBootServices = unsafe { &*(*system_table).boot_services };
+
+    // Allocate `pages + 512` to leave 2 MiB of slack for 2-MiB alignment.
+    let total_pages = pages.saturating_add(512);
+    let mut top: u64 = max_address_pa;
+    let s = unsafe {
+        (bs.allocate_pages)(
+            EFI_ALLOCATE_MAX_ADDRESS,
+            EFI_LOADER_DATA,
+            total_pages,
+            &mut top,
+        )
+    };
+    if s != EFI_SUCCESS {
+        // Treat allocation failure as a custom err_kind so we can see it.
+        unsafe {
+            LAST_ESP_ERR_KIND   = 7;
+            LAST_ESP_ERR_STATUS = s;
+        }
+        return (0, 0);
+    }
+    // `top` now holds the PA of the lowest page UEFI gave us.
+    let raw_base = top;
+    // Round up to 2 MiB.
+    let aligned_base = (raw_base + 0x1F_FFFF) & !0x1F_FFFFu64;
+    // Verify the aligned region fits inside what we asked for.
+    let bytes_lost_to_align = aligned_base - raw_base;
+    let bytes_available    = (total_pages as u64) * 4096 - bytes_lost_to_align;
+    let bytes_wanted       = (pages       as u64) * 4096;
+    if bytes_available < bytes_wanted {
+        // Should not happen with 2 MiB of slack, but be safe.
+        unsafe {
+            LAST_ESP_ERR_KIND   = 8;
+            LAST_ESP_ERR_STATUS = 0;
+        }
+        return (0, 0);
+    }
+
+    // SAFETY: AllocatePages just gave us this PA; UEFI guarantees it's
+    // conventional memory writable by the firmware and by us. We treat
+    // the aligned subregion as `bytes_wanted` of raw memory.
+    let buffer: &mut [u8] = unsafe {
+        core::slice::from_raw_parts_mut(aligned_base as *mut u8, bytes_wanted as usize)
+    };
+
+    let n = match unsafe {
+        read_esp_file(image_handle, system_table, AETHER_BOOT_IMG_PATH, buffer)
+    } {
+        Ok(n)  => n,
+        Err(e) => { record_esp_err(&e); 0 }
+    };
+
+    if n == 0 {
+        // Read failed; don't claim a valid staged region.
+        return (0, 0);
+    }
+
+    unsafe {
+        ALLOCATED_STAGE_PA    = aligned_base;
+        ALLOCATED_STAGE_PAGES = pages;
+    }
+    (aligned_base, n)
 }
 
 /// Same shape for vbmeta. Production builds should error on absent vbmeta;

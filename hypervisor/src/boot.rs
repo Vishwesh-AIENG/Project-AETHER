@@ -253,7 +253,22 @@ pub struct EfiBootServices {
     _raise_tpl:    usize,                // offset  24
     _restore_tpl:  usize,                // offset  32
     // ── Memory Allocation Services ────────────────────────────────────────
-    _allocate_pages: usize,              // offset  40
+    /// AllocatePages — allocate physical pages.
+    ///
+    /// Signature: AllocatePages(type, mem_type, pages, &mut memory).
+    /// `type` is EfiAllocateType (0=AnyPages, 1=MaxAddress, 2=Address).
+    /// On AllocateMaxAddress/AllocateAddress, `memory` is in/out — the
+    /// caller writes the max-PA or requested-PA before the call and the
+    /// firmware overwrites with the allocated PA on success. On
+    /// AllocateAnyPages, `memory` is out-only.
+    ///
+    /// Source: UEFI Spec 2.10 Section 7.2.1
+    pub allocate_pages: unsafe extern "efiapi" fn(
+        alloc_type: u32,
+        mem_type:   u32,
+        pages:      usize,
+        memory:     *mut u64,
+    ) -> EfiStatus,                      // offset  40
     _free_pages:   usize,                // offset  48
     /// GetMemoryMap — returns the current memory map and its "key".
     ///

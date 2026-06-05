@@ -150,12 +150,14 @@ fn decode_add_sub_with_carry(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if opcode2 != 0 {
         return Err(DecodeErr::Reserved);
     }
-    // No dedicated DecodedInsn variant for ADC; fold into AddReg/SubReg with
-    // shift=Lsl, amount=0 and remember the carry intent in `set_flags`/`sub`.
-    // The lift step will treat ADC specifically. For now surface as Reserved
-    // to avoid silent semantic mismatch — AT-4 fill adds a dedicated variant.
-    let _ = (sf, sub, set_flags, rm, rn, rd);
-    Err(DecodeErr::Unimplemented)
+    // ADCS / SBCS (flag-setting) get a dedicated variant the lift maps to the
+    // carry-in IR ops. The plain ADC / SBC (S=0) forms are rare and have no
+    // non-flag-setting carry IR op yet, so they remain fail-loud (the block
+    // stops at decode rather than silently producing wrong flags).
+    if !set_flags {
+        return Err(DecodeErr::Unimplemented);
+    }
+    Ok(DecodedInsn::AdcSub { sf, rd, rn, rm, sub })
 }
 
 fn decode_conditional_compare(word: u32) -> Result<DecodedInsn, DecodeErr> {

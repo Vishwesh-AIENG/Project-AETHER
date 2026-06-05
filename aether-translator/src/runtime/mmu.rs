@@ -1,0 +1,1232 @@
+//! M4b-2: software ARM64 stage-1 MMU page-table walker for the x86 DBT.
+//!
+//! The real GKI kernel turns on the MMU at `__enable_mmu` (writes
+//! `SCTLR_EL1.M = 1`). From that instant every guest load/store/fetch carries a
+//! VIRTUAL address that must be translated through the guest's own page tables
+//! (`TTBR0_EL1` / `TTBR1_EL1` + `TCR_EL1`) before it can touch physical RAM.
+//! On real ARM hardware the CPU's hardware table-walker does this; under the
+//! x86 DBT there is no such hardware, so we walk the tables in software.
+//!
+//! Integration (later sub-milestones): the lowered Load/Store/fetch paths CALL
+//! [`aether_mmu_xlate`] to convert a guest VA into a host PA. When the MMU is
+//! off (`SCTLR_EL1.M == 0`, early boot) translation is flat (VA == PA). On a
+//! fault the walker records a pending Data/Instruction Abort in the free
+//! sysreg slots (the [pending-fault ABI](#pending-fault-abi)); the dispatcher
+//! injects it via `VBAR_EL1` after the current block returns (M4b-3).
+//!
+//! GUEST-PA == HOST-PA INVARIANT: in the Android handoff window the guest's
+//! physical address space is identity-mapped to host physical memory, so a
+//! descriptor's output address (a guest PA) is read directly as a host pointer.
+//!
+//! This module is `no_std` + no-alloc. It carries localized `#[allow(unsafe_code)]`
+//! for the raw PTE reads and the EL2-private TLB (the crate is
+//! `#![deny(unsafe_code)]`), mirroring the pattern in `dbt.rs`.
+
+use crate::runtime::context::{CTX_U64S, SYSREG_SLOT0};
+
+// ── Sysreg slot indices ─────────────────────────────────────────────────────
+// These MUST match the encoding->slot map in `backend/lower_int.rs`
+// (`sysreg_read_disp` / `sysreg_write_disp`). A mismatch means the walker reads
+// a different word than `MSR TTBR0_EL1, Xn` wrote.
+/// SCTLR_EL1 — bit 0 is the MMU enable (`M`).
+pub const SLOT_SCTLR: usize = 0;
+/// TTBR0_EL1 — low-VA (bit 55 == 0) translation base.
+pub const SLOT_TTBR0: usize = 1;
+/// TTBR1_EL1 — high-VA (bit 55 == 1) translation base.
+pub const SLOT_TTBR1: usize = 2;
+/// TCR_EL1 — translation control (granule / VA size). Read for completeness;
+/// 2a assumes the GKI default (4 KiB granule, 48-bit VA, 4-level).
+pub const SLOT_TCR: usize = 3;
+/// MAIR_EL1 — memory attributes. Not needed to compute the PA in 2a.
+pub const SLOT_MAIR: usize = 4;
+
+// ── Pending-fault ABI ───────────────────────────────────────────────────────
+// Free sysreg slots 56..62 (40..55 are RO ID regs, 63 is the write sink). The
+// dispatcher reads PEND_PENDING after every block; non-zero => inject. LOCKED
+// (this is the seam with the M4b-3 exception-injection path).
+/// 0 = no fault pending; 1 = Data/Instruction Abort pending.
+pub const SLOT_PEND_PENDING: usize = 56;
+/// Faulting virtual address -> FAR_EL1 on injection.
+pub const SLOT_PEND_FAR: usize = 57;
+/// Exception syndrome -> ESR_EL1 on injection.
+pub const SLOT_PEND_ESR: usize = 58;
+
+/// `SCTLR_EL1.M` — MMU enable bit.
+const SCTLR_M: u64 = 1 << 0;
+
+/// Descriptor / TTBR address field mask: output address bits [47:12].
+const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
+
+/// Sentinel returned by [`aether_mmu_xlate`] on a fault. Guest RAM in the
+/// handoff window starts well above 0 (`STAGED_BOOT_IMG_PA == 0x8000_0000`), so
+/// host PA 0 is never a valid translation here and is unambiguous as "faulted".
+/// (The PA-window clamp below makes this airtight: an in-window PA is provably
+/// never 0.)
+pub const XLATE_FAULT: u64 = 0;
+
+// ── Guest physical window (No-Boundary confinement) ──────────────────────────
+//
+// CRITICAL (AETHER Ch.3 No-Boundary): every table base and output address comes
+// from GUEST-CONTROLLED descriptor bits, and the x86 host-mode DBT has no
+// stage-2 / NPT backstop on the translated load/store path — so a crafted guest
+// page table could otherwise translate to ANY host PA (hypervisor .text, the
+// VMCB/HSAVE, the JIT cache) = arbitrary host read/write = total compromise; an
+// out-of-identity-map descriptor address would also fault the host (#PF) and
+// wedge it. The walker therefore confines EVERY guest PA it touches (table
+// bases AND leaf output) to the handoff window; anything outside is reflected
+// to the guest as a translation fault, never dereferenced.
+//
+// Defaults mirror `android_handoff::{STAGED_BOOT_IMG_PA, HANDOFF_REGION_SIZE}`
+// (the hypervisor cross-checks these at compile time — see android_handoff.rs).
+// Settable so the hypervisor can pin the exact mapped span and tests can scope
+// their host-allocated page tables.
+/// Default guest-PA window base (== `STAGED_BOOT_IMG_PA`).
+pub const GUEST_PA_BASE: u64 = 0x8000_0000;
+/// Default guest-PA window size (== `HANDOFF_REGION_SIZE`, 1 GiB).
+pub const GUEST_PA_SIZE: u64 = 0x4000_0000;
+
+static mut WIN_BASE: u64 = GUEST_PA_BASE;
+static mut WIN_SIZE: u64 = GUEST_PA_SIZE;
+
+/// Pin the guest physical window the walker confines all PAs to. Called once by
+/// the hypervisor at MMU bring-up with the exact mapped span.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_set_window(base: u64, size: u64) {
+    // SAFETY: EL2-private, single-vCPU; set once before any walk.
+    unsafe {
+        *core::ptr::addr_of_mut!(WIN_BASE) = base;
+        *core::ptr::addr_of_mut!(WIN_SIZE) = size;
+    }
+}
+
+/// True iff `pa` lies within the configured guest physical window.
+#[allow(unsafe_code)]
+fn in_window(pa: u64) -> bool {
+    // SAFETY: EL2-private, single-vCPU.
+    let (base, size) = unsafe {
+        (
+            *core::ptr::addr_of!(WIN_BASE),
+            *core::ptr::addr_of!(WIN_SIZE),
+        )
+    };
+    pa >= base && pa.wrapping_sub(base) < size
+}
+
+// ── MMIO device-window allow-list (M4b-5) ────────────────────────────────────
+//
+// The guest GKI kernel talks to a handful of memory-mapped devices that are NOT
+// backing RAM: the PL011 UART, the GICv3 distributor/redistributor, and the
+// virtio-mmio transport. Their physical addresses sit OUTSIDE the guest RAM
+// window, so the stage-1 walk (or a flat early-boot access) would otherwise
+// reflect them as translation faults and the kernel would die at its first
+// `writel` to the console. Instead, an access whose final PA lands in one of
+// these fixed ranges is routed to a host-registered MMIO handler
+// ([`aether_set_mmio_handler`]) that emulates the device.
+//
+// No-Boundary (Ch.3) still holds: this is a FIXED allow-list, never a
+// guest-controlled escape. The handler decides what each register does; the
+// guest can no more reach host RAM through it than through a real MMIO bus.
+// Bases/sizes mirror `hypervisor::mmio_emu` (PL011 / GICD / GICR / virtio).
+struct MmioRange {
+    base: u64,
+    size: u64,
+}
+const MMIO_RANGES: [MmioRange; 4] = [
+    MmioRange { base: 0x0900_0000, size: 0x0000_1000 }, // PL011 UART
+    MmioRange { base: 0x0800_0000, size: 0x0001_0000 }, // GICv3 GICD
+    MmioRange { base: 0x080A_0000, size: 0x00F6_0000 }, // GICv3 GICR
+    MmioRange { base: 0x0A00_0000, size: 0x0000_1000 }, // virtio-mmio
+];
+
+/// True iff `pa` is in a known emulated-device MMIO window.
+fn is_mmio(pa: u64) -> bool {
+    let mut i = 0;
+    while i < MMIO_RANGES.len() {
+        let r = &MMIO_RANGES[i];
+        if pa >= r.base && pa.wrapping_sub(r.base) < r.size {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Free sysreg slot used to stage an MMIO READ value so the existing
+/// `mov rd, [rax]` load deref can pick it up without changing the load-lowering
+/// ABI: for an MMIO load, [`aether_mmu_xlate`] performs the emulated read, parks
+/// the value here, and returns this slot's host address as the "PA". Single
+/// loads are ≤ 8 bytes so one u64 suffices; slot 60 (the next free slot) is a
+/// valid in-bounds ctx slot, so the never-real "LDP from MMIO" edge reads an
+/// adjacent free ctx word rather than out-of-bounds memory.
+pub const SLOT_MMIO_SCRATCH: usize = 59;
+
+/// Non-zero "ok" sentinel returned by [`aether_mmu_store`] on success (0 ==
+/// [`XLATE_FAULT`] keeps the lowered fault-check `test rax,rax; jz fault` valid).
+const MMIO_STORE_OK: u64 = 1;
+
+/// Signature of the host MMIO emulation callback the hypervisor registers.
+/// `is_write != 0` ⇒ write `value` (return ignored); otherwise read and return
+/// the value (zero-extended into the u64).
+pub type AetherMmioHandler =
+    unsafe extern "C" fn(addr: u64, size: u32, is_write: u32, value: u64) -> u64;
+
+static mut MMIO_HANDLER: Option<AetherMmioHandler> = None;
+
+/// Register the host MMIO emulation callback. The hypervisor calls this once at
+/// boot (before the dispatch loop) with a bridge to its `mmio_emu`. When unset
+/// (host-test default) MMIO reads return 0 and writes are dropped.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_set_mmio_handler(handler: AetherMmioHandler) {
+    // SAFETY: EL2-private, single-vCPU; set once at boot before any walk runs.
+    unsafe {
+        *core::ptr::addr_of_mut!(MMIO_HANDLER) = Some(handler);
+    }
+}
+
+/// Dispatch one MMIO access to the registered handler (no-op default if unset).
+#[allow(unsafe_code)]
+fn mmio_dispatch(addr: u64, size: u64, is_write: bool, value: u64) -> u64 {
+    // SAFETY: EL2-private, single-vCPU; MMIO_HANDLER is a plain fn pointer.
+    let h = unsafe { *core::ptr::addr_of!(MMIO_HANDLER) };
+    match h {
+        Some(f) => unsafe { f(addr, size as u32, u32::from(is_write), value) },
+        None => 0,
+    }
+}
+
+/// Derive the stage-1 start level from `TCR_EL1` for the selected regime.
+///
+/// Returns `None` for a non-4 KiB granule (unsupported in 2a — reject loudly).
+/// For 4 KiB granule, the start level follows the input VA size
+/// `64 - TxSZ` (ARM ARM D5, 4 KiB granule start-level table): TxSZ ≤ 24 →
+/// 48..40-bit VA → start L0 (4-level); 25..33 → 39..31-bit → start L1 (3-level,
+/// the Android GKI `CONFIG_ARM64_VA_BITS_39` default); 34..42 → L2; else L3.
+/// `TG1`'s encoding differs from `TG0` (TG1: 0b10 = 4 KiB; TG0: 0b00 = 4 KiB).
+fn regime_start_level(tcr: u64, va_high: bool) -> Option<u8> {
+    let (txsz, granule_4k) = if va_high {
+        ((tcr >> 16) & 0x3F, ((tcr >> 30) & 0b11) == 0b10) // T1SZ, TG1
+    } else {
+        (tcr & 0x3F, ((tcr >> 14) & 0b11) == 0b00) // T0SZ, TG0
+    };
+    if !granule_4k {
+        return None;
+    }
+    Some(if txsz <= 24 {
+        0
+    } else if txsz <= 33 {
+        1
+    } else if txsz <= 42 {
+        2
+    } else {
+        3
+    })
+}
+
+// ── Fault classification ────────────────────────────────────────────────────
+
+/// Stage-1 translation fault kind (maps to an ESR DFSC code).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FaultKind {
+    /// Descriptor invalid (bit 0 clear, or a reserved level-3 block).
+    Translation,
+    /// Access flag (bit 10) clear on the leaf.
+    AccessFlag,
+    /// Write to a read-only (`AP[2]` set) leaf.
+    Permission,
+}
+
+/// Build a Data Abort `ESR_EL1` for a same-EL (EL1->EL1) fault.
+///
+/// EC = 0b100101 (Data Abort, current EL), IL = 1 (32-bit instruction),
+/// WnR = bit 6 (1 = write), DFSC[5:0] = fault class + level.
+pub fn data_abort_esr(kind: FaultKind, level: u8, is_write: bool) -> u64 {
+    let dfsc: u64 = match kind {
+        FaultKind::Translation => 0b00_0100, // 0b0001_LL
+        FaultKind::AccessFlag => 0b00_1000,  // 0b0010_LL
+        FaultKind::Permission => 0b00_1100,  // 0b0011_LL
+    } | (level as u64 & 0b11);
+    let ec: u64 = 0x25; // Data Abort taken from the same EL
+    let il: u64 = 1;
+    let wnr: u64 = if is_write { 1 } else { 0 };
+    (ec << 26) | (il << 25) | (wnr << 6) | dfsc
+}
+
+/// Build an Instruction Abort `ESR_EL1` for a same-EL (EL1->EL1) fetch fault.
+///
+/// EC = 0b100001 (0x21, Instruction Abort taken from the same EL), IL = 1
+/// (32-bit instruction), IFSC[5:0] = fault class + level. An instruction abort
+/// has NO WnR bit (it is never a write) and reuses the same fault-class/level
+/// status codes as a data abort. This is the fetch-path counterpart to
+/// [`data_abort_esr`]: the data path records EC=0x25, the fetch path EC=0x21,
+/// so M4b-3 routes each to the correct exception vector with the right syndrome.
+pub fn inst_abort_esr(kind: FaultKind, level: u8) -> u64 {
+    let ifsc: u64 = match kind {
+        FaultKind::Translation => 0b00_0100, // 0b0001_LL
+        FaultKind::AccessFlag => 0b00_1000,  // 0b0010_LL
+        FaultKind::Permission => 0b00_1100,  // 0b0011_LL
+    } | (level as u64 & 0b11);
+    let ec: u64 = 0x21; // Instruction Abort taken from the same EL
+    let il: u64 = 1;
+    (ec << 26) | (il << 25) | ifsc
+}
+
+// ── ESR EC field helpers (shared with the fetch path) ────────────────────────
+
+/// ESR_EL1.EC for a Data Abort taken from the same EL.
+pub const ESR_EC_DATA_ABORT_SAME_EL: u64 = 0x25;
+/// ESR_EL1.EC for an Instruction Abort taken from the same EL.
+pub const ESR_EC_INST_ABORT_SAME_EL: u64 = 0x21;
+
+/// Rewrite the EC[31:26] field of an `ESR_EL1` value, preserving every other
+/// bit (IL / WnR / xFSC). Used by [`aether_mmu_fetch_pa`] to re-stamp the
+/// walker's Data-Abort ESR (EC=0x25) as an Instruction Abort (EC=0x21) without
+/// re-deriving the fault class — the class/level bits are identical between the
+/// two aborts, only the EC differs.
+fn esr_with_ec(esr: u64, ec: u64) -> u64 {
+    (esr & !(0x3F << 26)) | ((ec & 0x3F) << 26)
+}
+
+// ── The walker ──────────────────────────────────────────────────────────────
+
+/// Translate a guest VA to a guest PA via the stage-1 page tables, assuming the
+/// MMU is enabled (caller handles the `M == 0` flat case). Returns the PA and
+/// whether the leaf permits writes (`AP[2] == 0`), or the fault + level.
+///
+/// 4 KiB granule, 48-bit VA, 4-level (start level 0). Index at level L is
+/// `(va >> (12 + 9*(3-L))) & 0x1FF`. Block (huge-page) leaves are honoured at
+/// level 1 (1 GiB) and level 2 (2 MiB); level 3 is always a 4 KiB page.
+///
+/// `sysregs` is the full guest context slice (length >= `CTX_U64S`); sysreg
+/// slots live at `SYSREG_SLOT0 + idx`.
+#[allow(unsafe_code)]
+pub fn walk(sysregs: &[u64], va: u64, is_write: bool) -> Result<(u64, bool), (FaultKind, u8)> {
+    let va_high = (va >> 55) & 1 == 1;
+    let ttbr = if va_high {
+        sysregs[SYSREG_SLOT0 + SLOT_TTBR1]
+    } else {
+        sysregs[SYSREG_SLOT0 + SLOT_TTBR0]
+    };
+    let tcr = sysregs[SYSREG_SLOT0 + SLOT_TCR];
+    // Start level + granule from TCR_EL1 (must-fix #1: real GKI is 39-bit VA /
+    // 3-level / start L1, not the old hardcoded 48-bit / 4-level / start L0).
+    let start_level = match regime_start_level(tcr, va_high) {
+        Some(l) => l,
+        None => return Err((FaultKind::Translation, 0)), // non-4KiB granule: loud
+    };
+
+    let mut table = ttbr & ADDR_MASK;
+    // No-Boundary confinement (must-fix #2): the first table base is guest-
+    // controlled — refuse it (and every later table base + the leaf output) if
+    // it escapes the handoff window, BEFORE any host dereference.
+    if !in_window(table) {
+        return Err((FaultKind::Translation, start_level));
+    }
+
+    for level in start_level..4 {
+        let shift = 12 + 9 * (3 - level as u32);
+        let index = (va >> shift) & 0x1FF;
+        let desc_pa = table + index * 8;
+        // SAFETY: `table` is confirmed in-window (a 4 KiB-aligned page fully
+        // inside the mapped span), so `desc_pa = table + index*8` (index < 512)
+        // is in mapped guest RAM == host RAM. 8-byte aligned.
+        let desc = unsafe { core::ptr::read_volatile(desc_pa as *const u64) };
+
+        if desc & 1 == 0 {
+            return Err((FaultKind::Translation, level)); // invalid descriptor
+        }
+        let is_table_or_page = desc & 0b10 != 0;
+
+        if level == 3 {
+            // At level 3 bit 1 MUST be set for a page; clear = reserved/invalid.
+            if !is_table_or_page {
+                return Err((FaultKind::Translation, level));
+            }
+            return finish_leaf(desc, va, 12, level, is_write);
+        }
+        if !is_table_or_page {
+            // Block descriptor: 1 GiB at level 1, 2 MiB at level 2 (a block at
+            // level 0 (512 GiB) is architecturally invalid for 4 KiB granule).
+            if level == 0 {
+                return Err((FaultKind::Translation, level));
+            }
+            return finish_leaf(desc, va, shift, level, is_write);
+        }
+        // Table descriptor: descend, confining the next table base too.
+        table = desc & ADDR_MASK;
+        if !in_window(table) {
+            return Err((FaultKind::Translation, level));
+        }
+    }
+    // The level-3 branch above always returns; the loop cannot fall through.
+    unreachable!()
+}
+
+/// Common leaf handling: AF / permission checks + PA assembly. `block_shift` is
+/// 12 (4 KiB), 21 (2 MiB), or 30 (1 GiB).
+fn finish_leaf(
+    desc: u64,
+    va: u64,
+    block_shift: u32,
+    level: u8,
+    is_write: bool,
+) -> Result<(u64, bool), (FaultKind, u8)> {
+    // Access flag (bit 10): hardware (and we) fault if clear.
+    if desc & (1 << 10) == 0 {
+        return Err((FaultKind::AccessFlag, level));
+    }
+    // AP[2] (bit 7): 0 = read/write, 1 = read-only.
+    let writable = desc & (1 << 7) == 0;
+    if is_write && !writable {
+        return Err((FaultKind::Permission, level));
+    }
+    let block_size = 1u64 << block_shift;
+    let oa = (desc & ADDR_MASK) & !(block_size - 1);
+    let pa = oa | (va & (block_size - 1));
+    // No-Boundary confinement (must-fix #2): the leaf output is guest-
+    // controlled; never hand a consumer a host PA outside the window — EXCEPT a
+    // PA that lands in the fixed emulated-device MMIO allow-list (M4b-5), which
+    // is routed to the device emulator (never dereferenced as host RAM) by the
+    // caller. Table bases remain window-only (page tables never live in MMIO).
+    if !in_window(pa) && !is_mmio(pa) {
+        return Err((FaultKind::Translation, level));
+    }
+    Ok((pa, writable))
+}
+
+// ── EL2-private software TLB ─────────────────────────────────────────────────
+// 256-entry direct-mapped, 4 KiB granularity. Single-vCPU (matches the
+// dbt.rs global-runtime invariant). `tag == u64::MAX` marks an empty slot:
+// a tag of u64::MAX is the page number of VA 0xFFFF_FFFF_FFFF_F000 (the top
+// 4 KiB of the 64-bit space), which is never mapped, so it never collides with
+// a real page number — including TTBR1 high addresses, whose page numbers
+// approach but never reach 2^52.
+//
+// SMP NOTE: this static TLB is race-free only under the single-vCPU invariant
+// and has no ASID / TTBR-generation tag — SMP guest support must switch to
+// per-core TLBs (or atomics) + ASID tagging. The flush-on-every-TTBR/TCR/MAIR
+// write contract (M4b-2d) is load-bearing for CORRECTNESS here, not just speed.
+
+const TLB_ENTRIES: usize = 256;
+const TLB_EMPTY: u64 = u64::MAX;
+
+static mut TLB_TAG: [u64; TLB_ENTRIES] = [TLB_EMPTY; TLB_ENTRIES];
+static mut TLB_PA: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
+static mut TLB_W: [bool; TLB_ENTRIES] = [false; TLB_ENTRIES];
+
+/// Invalidate the entire software TLB. Called on MSR to TTBR0/1_EL1, TCR_EL1,
+/// MAIR_EL1 and on broad TLBI (VMALLE1/ALLE1).
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_flush_all() {
+    // SAFETY: EL2-private arrays, single-vCPU; no aliasing references exist.
+    unsafe {
+        let tag = core::ptr::addr_of_mut!(TLB_TAG);
+        for i in 0..TLB_ENTRIES {
+            (*tag)[i] = TLB_EMPTY;
+        }
+    }
+}
+
+/// Invalidate a single VA page (TLBI VAE1). Conservative: 4 KiB granularity.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_tlbi_va(va: u64) {
+    let idx = ((va >> 12) as usize) & (TLB_ENTRIES - 1);
+    // SAFETY: EL2-private, single-vCPU; in-bounds index.
+    unsafe {
+        *core::ptr::addr_of_mut!(TLB_TAG[idx]) = TLB_EMPTY;
+    }
+}
+
+/// One page's translation: a TLB-cached single-page walk. Returns the full host
+/// PA (page base | in-page offset of `va`) and writability, or the walk fault.
+/// The 256-entry direct-mapped software TLB is consulted first (a read hits any
+/// cached page; a write hits only a writable one); on a miss the page-table
+/// [`walk`] runs and its result is cached. Shared by the data path
+/// ([`aether_mmu_xlate`], including its cross-page second-page lookup) and, via
+/// that, the fetch path ([`aether_mmu_fetch_pa`]).
+#[allow(unsafe_code)]
+fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u8)> {
+    let page = va >> 12;
+    let idx = (page as usize) & (TLB_ENTRIES - 1);
+    // SAFETY: EL2-private, single-vCPU.
+    unsafe {
+        if *core::ptr::addr_of!(TLB_TAG[idx]) == page
+            && (!is_w || *core::ptr::addr_of!(TLB_W[idx]))
+        {
+            return Ok(*core::ptr::addr_of!(TLB_PA[idx]) | (va & 0xFFF));
+        }
+    }
+    let (pa, writable) = walk(sysregs, va, is_w)?;
+    // SAFETY: EL2-private, single-vCPU.
+    unsafe {
+        *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
+        *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
+        *core::ptr::addr_of_mut!(TLB_W[idx]) = writable;
+    }
+    Ok(pa)
+}
+
+/// Record a pending Data Abort (FAR = the faulting access's base VA, ESR per
+/// `kind`/`level`) in the free pending-fault sysreg slots and return the fault
+/// sentinel [`XLATE_FAULT`]. The dispatcher reads `SLOT_PEND_PENDING` after each
+/// block and injects via `VBAR_EL1` (M4b-3). Shared by the first-page,
+/// cross-page second-page, and contiguity-failure paths of [`aether_mmu_xlate`].
+#[allow(unsafe_code)]
+fn record_pending_fault(ctx: *mut u64, far: u64, kind: FaultKind, level: u8, is_w: bool) -> u64 {
+    let esr = data_abort_esr(kind, level, is_w);
+    // SAFETY: caller's contract — `ctx` has ≥ CTX_U64S slots; these indices are
+    // within the free pending-fault sysreg range.
+    unsafe {
+        *ctx.add(SYSREG_SLOT0 + SLOT_PEND_PENDING) = 1;
+        *ctx.add(SYSREG_SLOT0 + SLOT_PEND_FAR) = far;
+        *ctx.add(SYSREG_SLOT0 + SLOT_PEND_ESR) = esr;
+    }
+    XLATE_FAULT
+}
+
+/// Translate a guest VA to a host PA for a load/store of `size` bytes.
+///
+/// `ctx` is the live guest register-file base (x86 R15), at least `CTX_U64S`
+/// u64s long. Returns the host PA, or [`XLATE_FAULT`] (0) after recording a
+/// pending Data Abort in the pending-fault sysreg slots. When the MMU is off
+/// (`SCTLR_EL1.M == 0`) translation is flat (VA == PA).
+///
+/// # Safety
+/// `ctx` must point at a valid context buffer of >= `CTX_U64S` u64s; the guest
+/// page tables it references must lie in mapped (host-readable) RAM.
+#[allow(unsafe_code)]
+pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64, size: u64) -> u64 {
+    // SAFETY: caller's contract — ctx is the register-file base.
+    let sysregs = unsafe { core::slice::from_raw_parts(ctx, CTX_U64S) };
+    let is_w = is_write != 0;
+    let mmu_on = sysregs[SYSREG_SLOT0 + SLOT_SCTLR] & SCTLR_M != 0;
+
+    // Resolve the guest PA of the first byte: flat when the MMU is off, else a
+    // TLB-cached single-page walk.
+    let pa = if !mmu_on {
+        va
+    } else {
+        match xlate_page(sysregs, va, is_w) {
+            Ok(pa) => pa,
+            Err((kind, level)) => return record_pending_fault(ctx, va, kind, level, is_w),
+        }
+    };
+
+    // ── MMIO device window (M4b-5) ───────────────────────────────────────────
+    // An access whose PA lands in the emulated-device allow-list is routed to
+    // the device emulator, never dereferenced as host RAM.
+    if is_mmio(pa) {
+        if is_w {
+            // A WRITE reaching the xlate path is a PAIR/EXCLUSIVE store to a
+            // device register (single `STR` uses `aether_mmu_store`, which
+            // forwards the value). Pair/exclusive MMIO is not a real guest
+            // pattern — fail loud (pending Data Abort) rather than corrupt RAM
+            // or silently drop the write.
+            return record_pending_fault(ctx, va, FaultKind::Translation, 3, true);
+        }
+        // READ: emulate now and park the value in the MMIO scratch slot; return
+        // its host address so the caller's `mov rd, [rax]` picks it up (the
+        // load-deref ABI is unchanged). Single loads are ≤ 8 bytes.
+        let val = mmio_dispatch(pa, size.max(1), false, 0);
+        // SAFETY: SLOT_MMIO_SCRATCH is an in-bounds free sysreg slot of ctx.
+        unsafe {
+            *ctx.add(SYSREG_SLOT0 + SLOT_MMIO_SCRATCH) = val;
+            return ctx.add(SYSREG_SLOT0 + SLOT_MMIO_SCRATCH) as u64;
+        }
+    }
+
+    // ── RAM ──
+    if !mmu_on {
+        // FLAT (MMU off): pa == va. The walked path confines every leaf PA via
+        // `finish_leaf`'s `in_window` clamp, but the flat path performs no walk.
+        // Without this clamp a guest LDR whose base register holds any host
+        // address (hypervisor .text, the JIT cache, VMCB/HSAVE, the page tables)
+        // is an arbitrary host READ in VMX-root / SVM-host mode — a No-Boundary
+        // breach (Ch.3 invariants 1 & 2). The GKI kernel runs all of early boot
+        // (head.S, page-table setup) flat before `__enable_mmu`, so this is the
+        // common first path, not an edge. MMIO was already handled+returned
+        // above. Confine the WHOLE span to the pinned guest window; the window
+        // is a single contiguous range, so checking both endpoints suffices
+        // (a flat access is PA-contiguous by construction).
+        let last = va.wrapping_add(size.max(1) - 1);
+        if !in_window(va) || !in_window(last) {
+            return record_pending_fault(ctx, va, FaultKind::Translation, 0, is_w);
+        }
+        return pa; // flat (== va): contiguous by construction, no span check.
+    }
+
+    // CROSS-PAGE SPAN (M4b-2b): a multi-byte access whose last byte lands on a
+    // different page must have THAT page mapped too AND physically contiguous
+    // with the first. The guest's two consecutive VA pages can map to
+    // non-adjacent PAs, so a single host access of `size` bytes based at `pa`
+    // would otherwise read/write the wrong second page — silent corruption, and
+    // a No-Boundary escape if that stray page is one the access never intended.
+    // Confirm contiguity; reflect a Translation fault if the span is mapped but
+    // discontiguous, or if the second page is MMIO while the first is RAM (a
+    // single host access cannot serve a split RAM/MMIO span). `size` is clamped
+    // to ≥ 1 so a zero-size probe never underflows. Page-granular fetches
+    // (4-byte, 4-aligned) never span, so this path is data-only.
+    let span = size.max(1) - 1;
+    let last = va.wrapping_add(span);
+    if (va >> 12) != (last >> 12) {
+        let pa_last = match xlate_page(sysregs, last, is_w) {
+            Ok(pa) => pa,
+            Err((kind, level)) => return record_pending_fault(ctx, va, kind, level, is_w),
+        };
+        if is_mmio(pa_last) || pa_last != pa.wrapping_add(span) {
+            // Mapped but PA-discontiguous (or split RAM/MMIO): a single host
+            // access cannot serve it.
+            return record_pending_fault(ctx, va, FaultKind::Translation, 3, is_w);
+        }
+    }
+    pa
+}
+
+/// Store `value` (`size` bytes) to guest VA `va`, routing the emulated-device
+/// MMIO allow-list to the registered handler and RAM to host memory. Returns a
+/// non-zero "ok" sentinel ([`MMIO_STORE_OK`]) on success, or [`XLATE_FAULT`] (0)
+/// after recording a pending Data Abort.
+///
+/// This is the single-`STR` counterpart to [`aether_mmu_xlate`]: it BOTH
+/// translates AND performs the store, because an MMIO target's value is only
+/// known at store time — a translate-then-`mov [pa],rs` split (as loads use)
+/// would write the value to a scratch cell that never reaches the device. RAM
+/// semantics are bit-identical to the old `mov [pa], rs` (a sized
+/// `write_volatile`).
+///
+/// # Safety
+/// Same contract as [`aether_mmu_xlate`].
+#[allow(unsafe_code)]
+pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, value: u64) -> u64 {
+    // SAFETY: caller's contract — ctx is the register-file base.
+    let sysregs = unsafe { core::slice::from_raw_parts(ctx, CTX_U64S) };
+    let mmu_on = sysregs[SYSREG_SLOT0 + SLOT_SCTLR] & SCTLR_M != 0;
+
+    let pa = if !mmu_on {
+        va
+    } else {
+        match xlate_page(sysregs, va, true) {
+            Ok(pa) => pa,
+            Err((kind, level)) => return record_pending_fault(ctx, va, kind, level, true),
+        }
+    };
+
+    if is_mmio(pa) {
+        let _ = mmio_dispatch(pa, size.max(1), true, value);
+        return MMIO_STORE_OK;
+    }
+
+    // RAM: cross-page contiguity (walked path only) then a sized write.
+    let sz = size.max(1);
+    if mmu_on {
+        let span = sz - 1;
+        let last = va.wrapping_add(span);
+        if (va >> 12) != (last >> 12) {
+            let pa_last = match xlate_page(sysregs, last, true) {
+                Ok(pa) => pa,
+                Err((kind, level)) => return record_pending_fault(ctx, va, kind, level, true),
+            };
+            if is_mmio(pa_last) || pa_last != pa.wrapping_add(span) {
+                return record_pending_fault(ctx, va, FaultKind::Translation, 3, true);
+            }
+        }
+    } else {
+        // FLAT (MMU off): No-Boundary clamp on the WRITE primitive — the whole
+        // span must lie in the pinned guest window (MMIO already handled+
+        // returned above). Without it a flat STR to a host address (hypervisor
+        // .text, the JIT cache, VMCB/HSAVE, NPT/EPT tables) is an arbitrary host
+        // WRITE in VMX-root / SVM-host mode = total compromise (Ch.3). The
+        // window is a single contiguous range so both-endpoints suffices.
+        let last = va.wrapping_add(sz - 1);
+        if !in_window(va) || !in_window(last) {
+            return record_pending_fault(ctx, va, FaultKind::Translation, 0, true);
+        }
+    }
+    // SAFETY: `pa` is an in-window guest PA == identity host RAM (the walk /
+    // flat path established it is not MMIO and, when walked, is in-window).
+    unsafe {
+        match sz {
+            1 => core::ptr::write_volatile(pa as *mut u8, value as u8),
+            2 => core::ptr::write_volatile(pa as *mut u16, value as u16),
+            4 => core::ptr::write_volatile(pa as *mut u32, value as u32),
+            _ => core::ptr::write_volatile(pa as *mut u64, value),
+        }
+    }
+    MMIO_STORE_OK
+}
+
+/// Translate a guest VA `pc` to a host PA for an INSTRUCTION FETCH.
+///
+/// This is the fetch-path counterpart to [`aether_mmu_xlate`] (the data path).
+/// M4b-2c: once the guest enables its MMU (`SCTLR_EL1.M == 1`) the PC at an NPF
+/// is a VIRTUAL address, so the instruction bytes to translate must be read
+/// from the WALKED physical address, not the raw PC. The DBT dispatcher calls
+/// this to obtain the PA, then reads the guest instruction stream from the host
+/// window at that PA. The JIT block-cache key stays the VA `pc` — ONLY the byte
+/// source changes here.
+///
+/// Behaviour:
+///   * `SCTLR_EL1.M == 0` (early boot, MMU off): returns `pc` unchanged (flat).
+///   * `M == 1`, walk succeeds: returns the host PA (== guest PA in the handoff
+///     identity window), reusing the same 256-entry software TLB as the data
+///     path. The walk is page-granular, so a 4-byte instruction never spans the
+///     page boundary the PA encodes.
+///   * `M == 1`, walk faults: returns [`XLATE_FAULT`] (0) after recording a
+///     pending abort in the pending-fault slots — but re-stamped as an
+///     INSTRUCTION Abort (`ESR_EL1.EC = 0x21`) rather than the Data Abort
+///     (`EC = 0x25`) the underlying [`aether_mmu_xlate`] writes, so M4b-3 routes
+///     it to the instruction-abort handling with the correct syndrome. FAR_EL1
+///     still carries the faulting VA (`pc`).
+///
+/// NOTE (deferred, documented follow-up): this reuses the data-side walk, which
+/// checks the access flag and `AP[2]` (write permission) but NOT the execute
+/// permissions (`PXN`/`UXN`). A fetch from an XN page would therefore translate
+/// rather than fault here. A stricter exec-permission check is a follow-up; for
+/// the GKI bring-up path (text pages are executable) this is correct.
+///
+/// # Safety
+/// Same contract as [`aether_mmu_xlate`]: `ctx` must point at a valid context
+/// buffer of `>= CTX_U64S` u64s whose page tables lie in host-readable RAM.
+#[allow(unsafe_code)]
+pub unsafe extern "C" fn aether_mmu_fetch_pa(ctx: *mut u64, pc: u64) -> u64 {
+    // Delegate the actual walk/TLB to the proven data path (is_write = 0,
+    // size = 4 — one ARM64 instruction).
+    // SAFETY: caller's contract is forwarded verbatim.
+    let pa = unsafe { aether_mmu_xlate(ctx, pc, 0, 4) };
+    if pa != XLATE_FAULT {
+        return pa;
+    }
+    // Fault: aether_mmu_xlate has already set PEND_PENDING/FAR and an ESR with
+    // EC = Data Abort. Re-stamp the EC to Instruction Abort, leaving the fault
+    // class / level (xFSC) and IL bits intact. FAR already holds `pc`.
+    // SAFETY: the data path established the pending slots are populated and the
+    // ctx has the free pending-fault sysreg slots; we only rewrite the ESR slot.
+    unsafe {
+        let esr_slot = ctx.add(SYSREG_SLOT0 + SLOT_PEND_ESR);
+        let esr = *esr_slot;
+        *esr_slot = esr_with_ec(esr, ESR_EC_INST_ABORT_SAME_EL);
+    }
+    XLATE_FAULT
+}
+
+#[cfg(test)]
+#[allow(unsafe_code)] // tests build real page tables in host memory + call the FFI entry
+mod tests {
+    use super::*;
+    use crate::runtime::context::CTX_U64S;
+    use std::alloc::{alloc_zeroed, Layout};
+    use std::sync::Mutex;
+
+    // The walker uses process-global state (the software TLB + the configured
+    // window), so the tests must run serially. This mutex serializes them and
+    // recovers from poison (a panicking test must not wedge the rest).
+    static MMU_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the serialization lock, flush the TLB, and open the window wide
+    /// so geometry tests can use host-allocated tables (whose addresses are not
+    /// in the production guest window). Clamp tests re-narrow the window after.
+    fn setup() -> std::sync::MutexGuard<'static, ()> {
+        let g = MMU_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Flush the process-global software TLB so a prior test's cached
+        // translations cannot leak into this one. (This line previously read
+        // `let _g = setup();` — an unconditional self-recursive call that
+        // dead-locked/overflowed every MMU test before it could run.)
+        aether_mmu_flush_all();
+        aether_mmu_set_window(0, u64::MAX); // clamp effectively disabled
+        g
+    }
+
+    /// A 4 KiB-aligned page of 512 u64 descriptors whose host address doubles
+    /// as the "guest PA" (the handoff-window identity invariant). Leaked for
+    /// the test's lifetime so the pointer stays valid.
+    fn alloc_table() -> (u64, &'static mut [u64]) {
+        let layout = Layout::from_size_align(4096, 4096).unwrap();
+        // SAFETY: non-zero layout; we leak the allocation for the test run.
+        let p = unsafe { alloc_zeroed(layout) } as *mut u64;
+        assert!(!p.is_null());
+        let slice = unsafe { core::slice::from_raw_parts_mut(p, 512) };
+        (p as u64, slice)
+    }
+
+    /// A contiguous, 4 KiB-aligned arena of `pages` descriptor pages, returned
+    /// as (base_pa, [page0, page1, ...]). Used by the clamp tests so all tables
+    /// fit inside a narrow window the test then pins.
+    fn alloc_arena(pages: usize) -> (u64, Vec<&'static mut [u64]>) {
+        let layout = Layout::from_size_align(4096 * pages, 4096).unwrap();
+        // SAFETY: non-zero layout; leaked for the test run.
+        let base = unsafe { alloc_zeroed(layout) } as u64;
+        assert!(base != 0);
+        let mut tables = Vec::with_capacity(pages);
+        for i in 0..pages {
+            let p = (base + (i as u64) * 4096) as *mut u64;
+            // SAFETY: in-bounds page of the arena.
+            tables.push(unsafe { core::slice::from_raw_parts_mut(p, 512) });
+        }
+        (base, tables)
+    }
+
+    fn table_desc(next_pa: u64) -> u64 {
+        (next_pa & ADDR_MASK) | 0b11 // valid + table
+    }
+    /// Leaf page/block: valid + (page bit at L3) + AF, optional read-only.
+    fn leaf_desc(oa: u64, page_bit: bool, read_only: bool) -> u64 {
+        let mut d = (oa & ADDR_MASK) | 0b01 | (1 << 10); // valid + AF
+        if page_bit {
+            d |= 0b10; // level-3 page (bit1=1)
+        }
+        if read_only {
+            d |= 1 << 7; // AP[2]
+        }
+        d
+    }
+
+    fn ctx_with_ttbr0(ttbr0: u64, mmu_on: bool) -> Vec<u64> {
+        let mut ctx = vec![0u64; CTX_U64S];
+        ctx[SYSREG_SLOT0 + SLOT_TTBR0] = ttbr0;
+        ctx[SYSREG_SLOT0 + SLOT_SCTLR] = if mmu_on { SCTLR_M } else { 0 };
+        ctx
+    }
+
+    /// Build a 4-level table chain mapping `va` to a 4 KiB page at `pa`.
+    /// Returns (ttbr0, ctx). `read_only` sets AP[2] on the leaf.
+    fn map_4k(va: u64, pa: u64, read_only: bool) -> (u64, Vec<u64>) {
+        let (l0_pa, l0) = alloc_table();
+        let (l1_pa, l1) = alloc_table();
+        let (l2_pa, l2) = alloc_table();
+        let (l3_pa, l3) = alloc_table();
+        l0[((va >> 39) & 0x1FF) as usize] = table_desc(l1_pa);
+        l1[((va >> 30) & 0x1FF) as usize] = table_desc(l2_pa);
+        l2[((va >> 21) & 0x1FF) as usize] = table_desc(l3_pa);
+        l3[((va >> 12) & 0x1FF) as usize] = leaf_desc(pa, true, read_only);
+        (l0_pa, ctx_with_ttbr0(l0_pa, true))
+    }
+
+    /// Build a 4-level chain mapping `va` AND `va + 0x1000` to PHYSICALLY
+    /// CONTIGUOUS pages `pa` and `pa + 0x1000`, sharing L0/L1/L2/L3 (so `va`
+    /// must not be the last 4 KiB page of its L3 table). Used by the cross-page
+    /// span tests. Returns (ttbr0, ctx) with the MMU on.
+    fn map_4k_2pages(va: u64, pa: u64) -> (u64, Vec<u64>) {
+        let (l0_pa, l0) = alloc_table();
+        let (l1_pa, l1) = alloc_table();
+        let (l2_pa, l2) = alloc_table();
+        let (l3_pa, l3) = alloc_table();
+        l0[((va >> 39) & 0x1FF) as usize] = table_desc(l1_pa);
+        l1[((va >> 30) & 0x1FF) as usize] = table_desc(l2_pa);
+        l2[((va >> 21) & 0x1FF) as usize] = table_desc(l3_pa);
+        l3[((va >> 12) & 0x1FF) as usize] = leaf_desc(pa, true, false);
+        l3[(((va + 0x1000) >> 12) & 0x1FF) as usize] = leaf_desc(pa + 0x1000, true, false);
+        (l0_pa, ctx_with_ttbr0(l0_pa, true))
+    }
+
+    #[test]
+    fn walk_4k_page() {
+        let _g = setup();
+        let va = 0x1234_5678_9000;
+        let pa = 0x8042_3000;
+        let (_ttbr, ctx) = map_4k(va, pa, false);
+        let (got, w) = walk(&ctx, va, false).expect("4K walk");
+        assert_eq!(got, pa | 0x000, "page base");
+        assert!(w, "RW leaf");
+        // offset preserved within the page
+        let (got2, _) = walk(&ctx, va | 0xABC, false).expect("4K walk off");
+        assert_eq!(got2, pa | 0xABC, "page offset preserved");
+    }
+
+    #[test]
+    fn walk_2m_block() {
+        let _g = setup();
+        let va = 0x0000_0040_0000_0000 | (3 << 21); // some 2M-aligned-ish VA
+        let block_pa = 0x8060_0000; // 2 MiB aligned
+        let (l0_pa, l0) = alloc_table();
+        let (l1_pa, l1) = alloc_table();
+        let (l2_pa, l2) = alloc_table();
+        l0[((va >> 39) & 0x1FF) as usize] = table_desc(l1_pa);
+        l1[((va >> 30) & 0x1FF) as usize] = table_desc(l2_pa);
+        // level-2 BLOCK descriptor (bit1 == 0).
+        l2[((va >> 21) & 0x1FF) as usize] = leaf_desc(block_pa, false, false);
+        let ctx = ctx_with_ttbr0(l0_pa, true);
+        let off = 0x1_5000u64; // within the 2 MiB block
+        let (got, _) = walk(&ctx, va | off, false).expect("2M walk");
+        assert_eq!(got, block_pa | off, "2 MiB block PA + offset");
+    }
+
+    #[test]
+    fn walk_1g_block() {
+        let _g = setup();
+        // VA aligned to 1 GiB region 5 — no bits below bit 30 so the only block
+        // offset comes from `off` (a VA with sub-1GB bits would, correctly,
+        // carry them into the PA: that earlier mistake was the test's, not the
+        // walker's).
+        let va = 5u64 << 30;
+        let block_pa = 0x4000_0000; // 1 GiB aligned
+        let (l0_pa, l0) = alloc_table();
+        let (l1_pa, l1) = alloc_table();
+        l0[((va >> 39) & 0x1FF) as usize] = table_desc(l1_pa);
+        // level-1 BLOCK descriptor (bit1 == 0) -> 1 GiB.
+        l1[((va >> 30) & 0x1FF) as usize] = leaf_desc(block_pa, false, false);
+        let ctx = ctx_with_ttbr0(l0_pa, true);
+        let off = 0x0123_4000u64;
+        let (got, _) = walk(&ctx, va | off, false).expect("1G walk");
+        assert_eq!(got, block_pa | off, "1 GiB block PA + offset");
+    }
+
+    #[test]
+    fn fault_invalid_descriptor() {
+        let _g = setup();
+        let (l0_pa, _l0) = alloc_table(); // all-zero -> level-0 entry invalid
+        let ctx = ctx_with_ttbr0(l0_pa, true);
+        let err = walk(&ctx, 0x4000, false).unwrap_err();
+        assert_eq!(err, (FaultKind::Translation, 0), "invalid L0 desc -> xlation L0");
+    }
+
+    #[test]
+    fn fault_access_flag() {
+        let _g = setup();
+        let va = 0x9_0000u64;
+        let (l0_pa, l0) = alloc_table();
+        let (l1_pa, l1) = alloc_table();
+        let (l2_pa, l2) = alloc_table();
+        let (l3_pa, l3) = alloc_table();
+        l0[((va >> 39) & 0x1FF) as usize] = table_desc(l1_pa);
+        l1[((va >> 30) & 0x1FF) as usize] = table_desc(l2_pa);
+        l2[((va >> 21) & 0x1FF) as usize] = table_desc(l3_pa);
+        // leaf valid+page but AF (bit10) cleared.
+        l3[((va >> 12) & 0x1FF) as usize] = (0x8055_0000 & ADDR_MASK) | 0b11;
+        let ctx = ctx_with_ttbr0(l0_pa, true);
+        let err = walk(&ctx, va, false).unwrap_err();
+        assert_eq!(err, (FaultKind::AccessFlag, 3), "AF clear -> access-flag L3");
+    }
+
+    #[test]
+    fn fault_permission_on_write() {
+        let _g = setup();
+        let va = 0xA_0000u64;
+        let pa = 0x8077_0000;
+        let (_ttbr, ctx) = map_4k(va, pa, true); // read-only leaf
+        // read OK
+        assert!(walk(&ctx, va, false).is_ok(), "RO page readable");
+        // write faults
+        let err = walk(&ctx, va, true).unwrap_err();
+        assert_eq!(err, (FaultKind::Permission, 3), "write to RO -> permission L3");
+    }
+
+    #[test]
+    fn ttbr1_selected_by_va55() {
+        let _g = setup();
+        // high VA (bit55 set) must use TTBR1.
+        let va = (1u64 << 55) | 0xB_0000;
+        let pa = 0x8088_0000;
+        let (l0_pa, l0) = alloc_table();
+        let (l1_pa, l1) = alloc_table();
+        let (l2_pa, l2) = alloc_table();
+        let (l3_pa, l3) = alloc_table();
+        l0[((va >> 39) & 0x1FF) as usize] = table_desc(l1_pa);
+        l1[((va >> 30) & 0x1FF) as usize] = table_desc(l2_pa);
+        l2[((va >> 21) & 0x1FF) as usize] = table_desc(l3_pa);
+        l3[((va >> 12) & 0x1FF) as usize] = leaf_desc(pa, true, false);
+        let mut ctx = vec![0u64; CTX_U64S];
+        ctx[SYSREG_SLOT0 + SLOT_SCTLR] = SCTLR_M;
+        ctx[SYSREG_SLOT0 + SLOT_TTBR1] = l0_pa; // only TTBR1 set
+        // TCR_EL1 for the TTBR1 regime: TG1=0b10 (4 KiB — note TG1's 4 KiB code
+        // is 0b10, NOT TG0's 0b00) at bits[31:30], and T1SZ=16 at bits[21:16]
+        // (<=24 -> start level 0, the 4-level walk this test's tables assume).
+        // A zero TCR would encode TG1=0b00 (a reserved/non-4-KiB granule for the
+        // high regime) and correctly fault out before the walk.
+        ctx[SYSREG_SLOT0 + SLOT_TCR] = (0b10u64 << 30) | (16u64 << 16);
+        let (got, _) = walk(&ctx, va, false).expect("TTBR1 walk");
+        assert_eq!(got, pa, "VA[55]=1 selects TTBR1");
+    }
+
+    #[test]
+    fn xlate_flat_when_mmu_off() {
+        let _g = setup();
+        let ctx = ctx_with_ttbr0(0, false); // M=0
+        let va = 0x8123_4567u64;
+        // SAFETY: ctx is CTX_U64S long.
+        let pa = unsafe { aether_mmu_xlate(ctx.as_ptr() as *mut u64, va, 0, 8) };
+        assert_eq!(pa, va, "MMU off -> flat VA==PA");
+    }
+
+    #[test]
+    fn xlate_walks_and_caches_then_faults_pending() {
+        let _g = setup();
+        let va = 0xC_3000u64;
+        let pa = 0x8099_0000;
+        let (_ttbr, mut ctx) = map_4k(va, pa, false);
+        let p = ctx.as_mut_ptr();
+        // first access walks
+        let got = unsafe { aether_mmu_xlate(p, va | 0x10, 0, 8) };
+        assert_eq!(got, pa | 0x10, "xlate returns PA+offset");
+        // second access (same page) is a TLB hit -> same answer
+        let got2 = unsafe { aether_mmu_xlate(p, va | 0x20, 0, 8) };
+        assert_eq!(got2, pa | 0x20, "TLB hit");
+        // an unmapped VA faults: returns sentinel + sets pending ABI
+        let bad = unsafe { aether_mmu_xlate(p, 0x5555_0000, 0, 8) };
+        assert_eq!(bad, XLATE_FAULT, "unmapped -> fault sentinel");
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 1, "pending set");
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_FAR], 0x5555_0000, "FAR = faulting VA");
+        // ESR: Data Abort EC=0x25, translation fault.
+        let esr = ctx[SYSREG_SLOT0 + SLOT_PEND_ESR];
+        assert_eq!((esr >> 26) & 0x3F, 0x25, "ESR.EC = Data Abort (same EL)");
+    }
+
+    /// 2b cross-page (CONTIGUOUS): an 8-byte access straddling a page boundary
+    /// where the two pages map to PHYSICALLY CONTIGUOUS PAs resolves to the
+    /// first page's PA — a single host access of 8 bytes spans both correctly.
+    #[test]
+    fn xlate_spanning_contiguous_pages_ok() {
+        let _g = setup();
+        let va = 0x20_0000u64; // 2 MiB-aligned: L3 indices 0 and 1 share a table
+        let pa = 0x80AA_0000u64;
+        let (_ttbr, mut ctx) = map_4k_2pages(va, pa);
+        let acc = va | 0xFFC; // 8-byte access starting 4 bytes before the page end
+        // SAFETY: ctx is CTX_U64S long.
+        let got = unsafe { aether_mmu_xlate(ctx.as_mut_ptr(), acc, 0, 8) };
+        assert_eq!(got, pa | 0xFFC, "contiguous cross-page span -> first-page PA");
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "no fault for a contiguous span");
+    }
+
+    /// 2b cross-page (DISCONTIGUOUS): the same straddling access but the second
+    /// page maps to a NON-adjacent PA must fault loudly (pending Data Abort,
+    /// FAR = the access base VA) rather than touch the wrong second page.
+    #[test]
+    fn xlate_spanning_discontiguous_pages_faults() {
+        let _g = setup();
+        let va = 0x22_0000u64;
+        let pa = 0x80BB_0000u64;
+        let (l0_pa, l0) = alloc_table();
+        let (l1_pa, l1) = alloc_table();
+        let (l2_pa, l2) = alloc_table();
+        let (l3_pa, l3) = alloc_table();
+        l0[((va >> 39) & 0x1FF) as usize] = table_desc(l1_pa);
+        l1[((va >> 30) & 0x1FF) as usize] = table_desc(l2_pa);
+        l2[((va >> 21) & 0x1FF) as usize] = table_desc(l3_pa);
+        l3[((va >> 12) & 0x1FF) as usize] = leaf_desc(pa, true, false);
+        // Second page -> pa + 0x5000 (NOT pa + 0x1000): physically discontiguous.
+        l3[(((va + 0x1000) >> 12) & 0x1FF) as usize] = leaf_desc(pa + 0x5000, true, false);
+        let mut ctx = ctx_with_ttbr0(l0_pa, true);
+        let acc = va | 0xFFC;
+        // SAFETY: ctx is CTX_U64S long.
+        let got = unsafe { aether_mmu_xlate(ctx.as_mut_ptr(), acc, 0, 8) };
+        assert_eq!(got, XLATE_FAULT, "discontiguous cross-page span -> fault sentinel");
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 1, "pending Data Abort recorded");
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_FAR], acc, "FAR = the access base VA");
+    }
+
+    /// must-fix #1: a 39-bit-VA / 3-level / start-L1 regime (the Android GKI
+    /// `CONFIG_ARM64_VA_BITS_39` default) must walk correctly. Only L1/L2/L3
+    /// tables exist — a walker that still started at L0 would read a bogus
+    /// descriptor and the kernel would die at `__enable_mmu`.
+    #[test]
+    fn walk_39bit_3level_start_l1() {
+        let _g = setup();
+        let va = 0x12_3456_7000u64 & 0x7F_FFFF_FFFF; // within 39 bits
+        let pa = 0x80AB_C000;
+        let (l1_pa, l1) = alloc_table();
+        let (l2_pa, l2) = alloc_table();
+        let (l3_pa, l3) = alloc_table();
+        // NO L0 table — start level is 1 for a 39-bit VA.
+        l1[((va >> 30) & 0x1FF) as usize] = table_desc(l2_pa);
+        l2[((va >> 21) & 0x1FF) as usize] = table_desc(l3_pa);
+        l3[((va >> 12) & 0x1FF) as usize] = leaf_desc(pa, true, false);
+        let mut ctx = vec![0u64; CTX_U64S];
+        ctx[SYSREG_SLOT0 + SLOT_SCTLR] = SCTLR_M;
+        ctx[SYSREG_SLOT0 + SLOT_TTBR0] = l1_pa;
+        // TCR_EL1.T0SZ = 25 (64-25 = 39-bit), TG0 = 0b00 (4 KiB).
+        ctx[SYSREG_SLOT0 + SLOT_TCR] = 25;
+        assert_eq!(regime_start_level(25, false), Some(1), "T0SZ=25 -> start L1");
+        let (got, _) = walk(&ctx, va, false).expect("39-bit 3-level walk");
+        assert_eq!(got, pa | (va & 0xFFF), "3-level walk resolves the page");
+    }
+
+    /// must-fix #1: a non-4 KiB granule (TG0 = 0b01 = 64 KiB) is unsupported and
+    /// must be rejected loudly rather than mis-walked.
+    #[test]
+    fn fault_unsupported_granule() {
+        let _g = setup();
+        assert_eq!(regime_start_level(16, false), Some(0), "4 KiB ok");
+        assert_eq!(regime_start_level((0b01 << 14) | 16, false), None, "64 KiB TG0 rejected");
+        // TG1 uses a different encoding: 0b10 = 4 KiB.
+        assert_eq!(regime_start_level((0b10 << 30) | (16 << 16), true), Some(0), "TG1=4KiB ok");
+        assert_eq!(regime_start_level((0b11 << 30) | (16 << 16), true), None, "TG1=64KiB rejected");
+    }
+
+    /// must-fix #2 (No-Boundary): a TTBR pointing OUTSIDE the guest window must
+    /// fault before any host dereference — never read host memory.
+    #[test]
+    fn clamp_rejects_out_of_window_table_base() {
+        let _g = setup();
+        aether_mmu_set_window(GUEST_PA_BASE, GUEST_PA_SIZE); // production window
+        let mut ctx = vec![0u64; CTX_U64S];
+        ctx[SYSREG_SLOT0 + SLOT_SCTLR] = SCTLR_M;
+        // TTBR0 below the window — must not be dereferenced.
+        ctx[SYSREG_SLOT0 + SLOT_TTBR0] = 0x1000;
+        let err = walk(&ctx, 0x4000, false).unwrap_err();
+        assert_eq!(err.0, FaultKind::Translation, "out-of-window TTBR -> fault, no host read");
+    }
+
+    /// must-fix #2 (No-Boundary): a leaf whose output address escapes the window
+    /// must fault — the consumer never gets an out-of-window host PA.
+    #[test]
+    fn clamp_rejects_out_of_window_leaf() {
+        let _g = setup();
+        // Arena of 3 pages for L1/L2/L3; pin the window to exactly the arena.
+        let (base, mut t) = alloc_arena(3);
+        aether_mmu_set_window(base, 3 * 4096);
+        let va = 0x40_0000u64;
+        // 39-bit regime (start L1) so we only need L1/L2/L3 (arena pages 0/1/2).
+        let l2_pa = base + 4096;
+        let l3_pa = base + 8192;
+        t[0][((va >> 30) & 0x1FF) as usize] = table_desc(l2_pa);
+        t[1][((va >> 21) & 0x1FF) as usize] = table_desc(l3_pa);
+        // leaf OA points 1 MiB above the arena — OUTSIDE the pinned window.
+        let bad_oa = base + 0x10_0000;
+        t[2][((va >> 12) & 0x1FF) as usize] = leaf_desc(bad_oa, true, false);
+        let mut ctx = vec![0u64; CTX_U64S];
+        ctx[SYSREG_SLOT0 + SLOT_SCTLR] = SCTLR_M;
+        ctx[SYSREG_SLOT0 + SLOT_TTBR0] = base; // L1 table at arena base (in window)
+        ctx[SYSREG_SLOT0 + SLOT_TCR] = 25; // T0SZ=25 -> start L1
+        let err = walk(&ctx, va, false).unwrap_err();
+        assert_eq!(err, (FaultKind::Translation, 3), "out-of-window leaf -> fault at L3");
+    }
+
+    // ── M4b-2c: instruction fetch through the walker ─────────────────────────
+
+    /// MMU off (`SCTLR.M == 0`, early boot): the fetch PA is the flat PC, so the
+    /// dispatcher reads instruction bytes straight out of the NPT window — the
+    /// behaviour the live boot path had before the walker was wired in.
+    #[test]
+    fn fetch_flat_when_mmu_off() {
+        let _g = setup();
+        let ctx = ctx_with_ttbr0(0, false); // M = 0
+        let pc = 0x8040_1234u64;
+        // SAFETY: ctx is CTX_U64S long.
+        let pa = unsafe { aether_mmu_fetch_pa(ctx.as_ptr() as *mut u64, pc) };
+        assert_eq!(pa, pc, "MMU off -> flat fetch PA == PC");
+    }
+
+    /// MMU on, valid mapping: walk the PC to a host PA, then assert the
+    /// instruction bytes PLACED at the mapped PA are exactly what a reader at the
+    /// fetch PA sees. This is the core M4b-2c property — once SCTLR.M==1 the PC
+    /// is virtual and the bytes must come from the WALKED physical address.
+    #[test]
+    fn fetch_walks_va_to_pa_and_reads_mapped_bytes() {
+        let _g = setup();
+        // Map a virtual text page to a host-allocated physical page; treat the
+        // host allocation's address as the "guest PA" (handoff identity window).
+        let (phys_pa, phys) = alloc_table(); // a 4 KiB page we control
+        let va = 0x12_3456_7000u64; // virtual text address (page-aligned)
+        let (l0_pa, l0) = alloc_table();
+        let (l1_pa, l1) = alloc_table();
+        let (l2_pa, l2) = alloc_table();
+        let (l3_pa, l3) = alloc_table();
+        l0[((va >> 39) & 0x1FF) as usize] = table_desc(l1_pa);
+        l1[((va >> 30) & 0x1FF) as usize] = table_desc(l2_pa);
+        l2[((va >> 21) & 0x1FF) as usize] = table_desc(l3_pa);
+        l3[((va >> 12) & 0x1FF) as usize] = leaf_desc(phys_pa, true, false);
+
+        // Place a known ARM64 instruction word at offset 0x10 of the phys page.
+        // 0xD2800540 = MOVZ X0, #0x2A — a recognisable, non-trivial pattern.
+        const FETCH_OFF: u64 = 0x10;
+        const INSN: u32 = 0xD280_0540;
+        phys[(FETCH_OFF / 8) as usize] = INSN as u64; // low 4 bytes of slot
+
+        let mut ctx = ctx_with_ttbr0(l0_pa, true);
+        let pc = va | FETCH_OFF;
+        let fetch_pa = unsafe { aether_mmu_fetch_pa(ctx.as_mut_ptr(), pc) };
+        assert_ne!(fetch_pa, XLATE_FAULT, "valid mapping must not fault");
+        assert_eq!(fetch_pa, phys_pa | FETCH_OFF, "fetch PA = walked phys + page offset");
+
+        // Read the instruction word back from the FETCH PA (what the dispatcher
+        // would hand the translator) and assert it equals the placed bytes.
+        // SAFETY: fetch_pa is the host address of our own leaked page.
+        let read = unsafe { core::ptr::read_volatile(fetch_pa as *const u32) };
+        assert_eq!(read, INSN, "bytes at walked PA match bytes placed at the mapped PA");
+
+        // No fault was recorded.
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "no pending fault on success");
+    }
+
+    /// MMU on, unmapped PC: the fetch faults and records an INSTRUCTION Abort
+    /// (`ESR_EL1.EC == 0x21`), NOT the Data Abort (0x25) the data path records —
+    /// proving the fetch helper re-stamps the EC. FAR_EL1 carries the PC.
+    #[test]
+    fn fetch_fault_records_instruction_abort_esr() {
+        let _g = setup();
+        // A table chain that maps some OTHER va; the fetch PC is unmapped.
+        let mapped_va = 0x40_0000u64;
+        let pa = 0x8033_0000;
+        let (_ttbr, mut ctx) = map_4k(mapped_va, pa, false);
+        let unmapped_pc = 0x7777_0000u64;
+        let r = unsafe { aether_mmu_fetch_pa(ctx.as_mut_ptr(), unmapped_pc) };
+        assert_eq!(r, XLATE_FAULT, "unmapped fetch -> fault sentinel");
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 1, "pending set");
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_FAR], unmapped_pc, "FAR = faulting PC");
+        let esr = ctx[SYSREG_SLOT0 + SLOT_PEND_ESR];
+        assert_eq!(
+            (esr >> 26) & 0x3F,
+            ESR_EC_INST_ABORT_SAME_EL,
+            "fetch fault -> ESR.EC = Instruction Abort (0x21), not Data Abort (0x25)"
+        );
+        // The xFSC (low 6 bits) must still describe a translation fault, and IL
+        // (bit 25) must survive the EC re-stamp.
+        assert_eq!(esr & 0b11_1100, 0b00_0100, "IFSC = translation fault class");
+        assert_eq!((esr >> 25) & 1, 1, "IL bit preserved across EC re-stamp");
+    }
+
+    /// `esr_with_ec` rewrites ONLY the EC field, leaving every other bit intact.
+    #[test]
+    fn esr_with_ec_rewrites_only_ec() {
+        // Start from a data abort (write, permission fault at L3).
+        let data = data_abort_esr(FaultKind::Permission, 3, true);
+        assert_eq!((data >> 26) & 0x3F, ESR_EC_DATA_ABORT_SAME_EL);
+        let inst = esr_with_ec(data, ESR_EC_INST_ABORT_SAME_EL);
+        assert_eq!((inst >> 26) & 0x3F, ESR_EC_INST_ABORT_SAME_EL, "EC swapped");
+        // Every NON-EC bit identical.
+        assert_eq!(inst & !(0x3F << 26), data & !(0x3F << 26), "non-EC bits unchanged");
+    }
+
+    /// M4b-5 No-Boundary fix: with the MMU OFF (flat path, pa == va), a store or
+    /// load to an address OUTSIDE the pinned guest window must FAULT, not perform
+    /// a wild host write/read. Before the fix the flat path returned `va` / wrote
+    /// `va` with no `in_window` clamp = an arbitrary host R/W primitive during
+    /// early boot.
+    #[test]
+    fn flat_mmu_off_access_outside_window_faults_not_wild_rw() {
+        let _g = setup();
+        // Two distinct, host-writable, 4 KiB-aligned pages. Their host address
+        // doubles as the "guest PA" (handoff identity invariant). Pin the window
+        // to ONLY the first.
+        let (in_pa, _t0) = alloc_table();
+        let (out_pa, out_slice) = alloc_table();
+        assert_ne!(in_pa, out_pa);
+        aether_mmu_set_window(in_pa, 4096);
+
+        let mut ctx = ctx_with_ttbr0(0, /*mmu_on=*/ false); // SCTLR.M = 0 → flat
+        let ctxp = ctx.as_mut_ptr();
+
+        // In-window flat store SUCCEEDS and actually writes host memory.
+        let ok = unsafe { aether_mmu_store(ctxp, in_pa, 8, 0xABCD_1234_5678_9ABC) };
+        assert_eq!(ok, MMIO_STORE_OK, "in-window flat store should succeed");
+        assert_eq!(
+            unsafe { core::ptr::read_volatile(in_pa as *const u64) },
+            0xABCD_1234_5678_9ABC,
+            "in-window flat store must land in host RAM"
+        );
+
+        // Out-of-window flat store is CLAMPED: returns XLATE_FAULT, does NOT
+        // touch the (real, but out-of-window) page, and records a Data Abort.
+        out_slice[0] = 0;
+        let r = unsafe { aether_mmu_store(ctxp, out_pa, 8, 0xDEAD_BEEF_DEAD_BEEF) };
+        assert_eq!(r, XLATE_FAULT, "out-of-window flat store must fault, not write");
+        assert_eq!(out_slice[0], 0, "out-of-window page must be untouched (no wild write)");
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 1, "pending Data Abort recorded");
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_FAR], out_pa, "FAR = faulting VA");
+
+        // The load primitive (aether_mmu_xlate) shares the same flat-path clamp.
+        let x = unsafe { aether_mmu_xlate(ctxp, out_pa, 0, 8) };
+        assert_eq!(x, XLATE_FAULT, "out-of-window flat load must fault, not read");
+        // In-window load returns the (identity) host PA so the deref reads RAM.
+        let p = unsafe { aether_mmu_xlate(ctxp, in_pa, 0, 8) };
+        assert_eq!(p, in_pa, "in-window flat load returns identity host PA");
+    }
+}

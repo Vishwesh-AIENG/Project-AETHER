@@ -13,6 +13,7 @@ pub mod encode;
 pub mod lower_atomic;
 pub mod lower_int;
 pub mod lower_simd;
+pub mod lower_simd_ctx;
 
 pub use code_buf::{CodeBlock, CodeBuf, CodeBufError, Protection};
 pub use encode::X86Encoder;

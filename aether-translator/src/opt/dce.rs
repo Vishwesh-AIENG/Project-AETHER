@@ -115,6 +115,7 @@ fn is_side_effecting(op: &IrOp) -> bool {
         | IrOp::Dsb { .. }
         | IrOp::Isb
         | IrOp::Sb
+        | IrOp::TlbInval { .. }
         | IrOp::WriteGpr { .. }
         | IrOp::WriteSp { .. }
         | IrOp::WriteFpr { .. }

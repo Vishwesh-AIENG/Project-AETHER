@@ -86,7 +86,7 @@ fn at8_flags_kept_when_consumed() {
         let b1 = aether_translator::ir::BlockId(1);
         blk.push_op(IrOp::ConstI64 { dst: v0, val: 1 });
         blk.push_op(IrOp::ConstI64 { dst: v1, val: 2 });
-        blk.push_op(IrOp::Cmp { flags: f0, a: v0, b: v1 });
+        blk.push_op(IrOp::Cmp { flags: f0, a: v0, b: v1, sf: true });
         blk.push_op(IrOp::CondBranch {
             cond: aether_translator::decoder::Cond::Eq,
             flags: f0,

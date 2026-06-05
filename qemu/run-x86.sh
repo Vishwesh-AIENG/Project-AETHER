@@ -37,8 +37,12 @@ SERIAL_LOG="$SCRIPT_DIR/com1.log"
 if [[ "${1:-}" != "--no-build" ]]; then
     echo "==> Building hypervisor.efi (x86_64-unknown-uefi)..."
     cd "$REPO_DIR"
+    # `alloc` is required in build-std: the embedded aether-translator uses
+    # Vec/BTreeMap, so omitting it makes cargo pull the sysroot's precompiled
+    # `alloc` against a rebuilt `core` -> E0152 duplicate `sized` lang item.
+    # The hypervisor supplies a #[global_allocator] so alloc links cleanly.
     cargo +nightly build \
-        -Z build-std=core,compiler_builtins \
+        -Z build-std=core,alloc,compiler_builtins \
         -Z build-std-features=compiler-builtins-mem \
         --release \
         --target x86_64-unknown-uefi \

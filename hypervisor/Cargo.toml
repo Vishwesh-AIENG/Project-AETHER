@@ -26,6 +26,11 @@ default = []
 # Legacy ch52 name; preserved so external scripts don't break. Now an alias
 # for routing FFI calls through the translator's dbt_linked surface.
 fex_linked = ["aether-translator/dbt_linked"]
+# QEMU/TCG dev-loop build: collapses the PC-speaker beep busy-waits (200M+
+# `pause` iterations each — calibrated for ~3 GHz silicon, but tens of seconds
+# under software emulation). Port I/O is still issued; only the hold duration
+# shrinks, so real-HW diagnostics are unaffected when this feature is OFF.
+qemu = []
 
 [dependencies]
 # AT-24: AETHER ARM64 -> x86_64 dynamic binary translator. Pure Rust, no_std

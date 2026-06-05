@@ -815,11 +815,21 @@ pub unsafe fn ept_lookup_host_pa(pml4_pa: u64, guest_pa: u64) -> Option<u64> {
     let pdpt = (pml4e & !0xFFFu64) as *mut u64;
     let pdpte = unsafe { core::ptr::read_volatile(pdpt.add(i3)) };
     if pdpte & EPT_READ == 0 { return None; }
-    if pdpte & EPT_PAGE_SIZE_BIT != 0 { return None; }
+    // 1 GiB leaf (PDPE.PS=1): the live Intel handoff map uses large leaves
+    // (boot_x86 build_ept_2mib_range), so the fetch path MUST resolve them or it
+    // fails closed -> Terminate. EPT leaf address is bits [51:12] like NPT; a
+    // 1 GiB leaf is bits [51:30] + the 30-bit page offset.
+    if pdpte & EPT_PAGE_SIZE_BIT != 0 {
+        return Some((pdpte & 0x000F_FFFF_C000_0000) | (guest_pa & 0x3FFF_FFFF));
+    }
     let pd = (pdpte & !0xFFFu64) as *mut u64;
     let pde = unsafe { core::ptr::read_volatile(pd.add(i2)) };
     if pde & EPT_READ == 0 { return None; }
-    if pde & EPT_PAGE_SIZE_BIT != 0 { return None; }
+    // 2 MiB leaf (PDE.PS=1): the handoff window is mapped with 2 MiB leaves on
+    // the Intel path. Address bits [51:21] + the 21-bit page offset.
+    if pde & EPT_PAGE_SIZE_BIT != 0 {
+        return Some((pde & 0x000F_FFFF_FFE0_0000) | (guest_pa & 0x001F_FFFF));
+    }
     let pt = (pde & !0xFFFu64) as *mut u64;
     let leaf = unsafe { core::ptr::read_volatile(pt.add(i1)) };
     if leaf & EPT_READ == 0 { return None; }

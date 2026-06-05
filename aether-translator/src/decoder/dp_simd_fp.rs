@@ -66,7 +66,12 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     // ===== Advanced SIMD =====
     // For all vector AdvSIMD families, bit 29 (U) is variable (signed/unsigned
     // form selector) so it stays OUT of the mask — use 0x9F top-byte mask.
-    if (word & 0x9F20_8400) == 0x0E20_0400 {
+    // 3-same: bit21=1 (0x0020_0000) distinguishes from 3-same-extra (bit21=0);
+    // bit10=1 (0x0000_0400) distinguishes from 3-diff/2reg-misc (bit10=0). bit15
+    // (opcode[4]) must NOT be in the mask — it is the high/low opcode selector,
+    // so pinning it (the old 0x9F20_8400) silently dropped ADD/SUB/MUL/MLA/
+    // CMEQ/ADDP and the whole FP 3-same block (opcodes >= 0b10000).
+    if (word & 0x9F20_0400) == 0x0E20_0400 {
         return decode_simd_3same(word);
     }
     if (word & 0x9F20_0400) == 0x0E00_8400 {
@@ -343,7 +348,55 @@ fn decode_simd_3same(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if opcode == 0b01101 && size == 0b11 {
         return Err(DecodeErr::Reserved);
     }
-    Ok(DecodedInsn::AdvSimd { raw: word })
+
+    // ── M4b-6 capstone-fidelity rejects for the now-reachable high opcodes ──
+    // (Before M4b-6 the dispatch mask dropped all opcodes >= 0b10000; broadening
+    // it surfaced reserved sub-encodings the AT-1 no-false-positive gate flags.)
+    //
+    // FP 3-same (opcode 0b11xxx): bit23 + opcode select FADD/FMUL/FCMxx/... with
+    // FP16-vs-reserved rules that depend on bit23. They are Tier-1 (lift routes
+    // them to a Hint), so stay conservative and leave the whole block Reserved —
+    // exactly the pre-M4b-6 behavior — until the FP family lands.
+    if opcode >= 0b11000 {
+        return Err(DecodeErr::Reserved);
+    }
+    // Integer opcodes with NO 64-bit (D) form — reserved at size=11.
+    let no_d_form = matches!(
+        opcode,
+        0b00000 // SHADD/UHADD
+            | 0b00010 // SRHADD/URHADD
+            | 0b00100 // SHSUB/UHSUB
+            | 0b01100 // SMAX/UMAX
+            | 0b01101 // SMIN/UMIN
+            | 0b01110 // SABD/UABD
+            | 0b01111 // SABA/UABA
+            | 0b10010 // MLA/MLS
+            | 0b10011 // MUL/PMUL
+            | 0b10100 // SMAXP/UMAXP
+            | 0b10101 // SMINP/UMINP
+            | 0b10110 // SQDMULH/SQRDMULH
+    );
+    if size == 0b11 && no_d_form {
+        return Err(DecodeErr::Reserved);
+    }
+    // PMUL (U=1, opcode 10011) exists only for the 8-bit (size=00) form.
+    if ((word >> 29) & 1) == 1 && opcode == 0b10011 && size != 0b00 {
+        return Err(DecodeErr::Reserved);
+    }
+    // SQDMULH/SQRDMULH (opcode 10110) only for size in {01,10}.
+    if opcode == 0b10110 && (size == 0b00 || size == 0b11) {
+        return Err(DecodeErr::Reserved);
+    }
+
+    Ok(DecodedInsn::SimdThreeSame {
+        q: ((word >> 30) & 1) != 0,
+        u: ((word >> 29) & 1) != 0,
+        size: size as u8,
+        opcode: opcode as u8,
+        rm: VReg(((word >> 16) & 0x1F) as u8),
+        rn: VReg(((word >> 5) & 0x1F) as u8),
+        rd: VReg((word & 0x1F) as u8),
+    })
 }
 
 fn decode_simd_3same_extra(word: u32) -> Result<DecodedInsn, DecodeErr> {

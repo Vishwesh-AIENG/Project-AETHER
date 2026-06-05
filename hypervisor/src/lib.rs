@@ -97,11 +97,22 @@ pub mod boot;        // ch07: UEFI handoff, ExitBootServices, ACPI discovery, gu
 pub mod boot_x86;     // x86_64 boot pipeline: ExitBootServices -> EPT/NPT build ->
                       //       init_vtx/svm_foundation -> VMLAUNCH/VMRUN -> first VMEXIT.
 #[cfg(target_arch = "x86_64")]
+pub mod host_idt;     // minimal host IDT: turns a fault during the host-mode JIT
+                      //       CALL (M2 proof) into a readable post-mortem on the
+                      //       framebuffer instead of a silent triple-fault reset.
+#[cfg(target_arch = "x86_64")]
 pub mod boot_x86_esp; // UEFI File-Protocol shim: reads files from the ESP at
                       //       boot time. Chains LoadedImage → SimpleFileSystem
                       //       → root → Open → Read. Used by boot_x86 to load
                       //       \EFI\AETHER\boot.img before ExitBootServices,
                       //       feeds boot_x86_avb::load_boot_img.
+pub mod inflate; // gzip (RFC 1952) + DEFLATE (RFC 1951) decompressor — no_std,
+                 //       allocation-free, no deps. AETHER is the bootloader on
+                 //       the x86 tier (No-Boundary): boot.img kernels ship
+                 //       gzip-compressed (Image.gz / Image.gz-dtb) and must be
+                 //       inflated before the DBT dispatcher fetches the entry,
+                 //       else the first block lifts the gzip magic 1f 8b 08 00
+                 //       instead of ARM64 code. Used by boot_x86_avb.
 #[cfg(target_arch = "x86_64")]
 pub mod boot_x86_avb; // Step B of the AT integration plan: Android boot.img
                       //       loader for the x86 tier. Parses v3/v4 header,

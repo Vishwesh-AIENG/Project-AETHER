@@ -40,10 +40,14 @@ impl AllocResult {
         }
     }
 
-    /// Returns true if gate passes: every interval received an assignment AND
-    /// spill ratio < 8 %.
+    /// Returns true if gate passes: every interval received an assignment,
+    /// spill ratio < 8 %, AND the spill-slot count fits the bounded spill area
+    /// (M4a — exceeding it would mean an out-of-bounds store past the R15
+    /// register-file buffer; `translate_block` rejects such blocks).
     pub fn gate_passes(&self) -> bool {
-        self.assignments.len() == self.n_intervals && self.spill_ratio() < 0.08
+        self.assignments.len() == self.n_intervals
+            && self.spill_ratio() < 0.08
+            && (self.n_spill_slots as usize) <= crate::runtime::context::SPILL_SLOTS
     }
 }
 
@@ -51,8 +55,16 @@ pub struct LinearScanAlloc;
 
 impl LinearScanAlloc {
     pub fn allocate(intervals: &[LiveInterval]) -> AllocResult {
-        let mut gpr_alloc = ClassAlloc::new(ALLOCATABLE_GPRS.len());
-        let mut xmm_alloc = ClassAlloc::new(ALLOCATABLE_XMMS.len());
+        let mut gpr_alloc =
+            ClassAlloc::new(ALLOCATABLE_GPRS.len(), crate::regalloc::x86_regs::GPR_ALLOC_FIRST_INDEX);
+        // XMM 0..=3 are reserved as SIMD/FP ctx-template scratch (VS0..VS3) and
+        // XMM15 (VFP) as the LDR/STR-Q transfer register; the allocator may only
+        // assign XMM4..=14 to IR values. (Defensive: the live path lowers vector
+        // ops via ctx templates and does not allocate XMMs.)
+        let mut xmm_alloc = ClassAlloc::new(
+            crate::regalloc::x86_regs::XMM_ALLOC_COUNT,
+            crate::regalloc::x86_regs::XMM_ALLOC_FIRST_INDEX,
+        );
         let mut assignments: BTreeMap<u32, Assignment> = BTreeMap::new();
         let mut n_spill_slots = 0u32;
         let mut n_spilled = 0usize;
@@ -76,7 +88,11 @@ impl LinearScanAlloc {
                                 n_spilled += 1;
                                 assignments.insert(spilled_vid, Assignment::Spill(slot));
                                 // Use the freed register for the current interval.
-                                let reg = gpr_alloc.alloc_reg().unwrap_or(0);
+                                // Fallback to the first ALLOCATABLE index (never
+                                // RAX/RCX) if somehow empty — keeps scratch safe.
+                                let reg = gpr_alloc
+                                    .alloc_reg()
+                                    .unwrap_or(crate::regalloc::x86_regs::GPR_ALLOC_FIRST_INDEX);
                                 gpr_alloc.active.push(ActiveInterval { end: interval.end, reg, vid: interval.value.0 });
                                 gpr_alloc.active.sort_by_key(|a| a.end);
                                 assignments.insert(interval.value.0, Assignment::Gpr(reg as u8));
@@ -143,8 +159,10 @@ struct ClassAlloc {
 }
 
 impl ClassAlloc {
-    fn new(n_regs: usize) -> Self {
-        let free: Vec<usize> = (0..n_regs).collect();
+    /// `n_regs` total registers; `reserved_low` indices [0, reserved_low) are
+    /// withheld from allocation (M4a: GPR reserves RAX(0)/RCX(1) as scratch).
+    fn new(n_regs: usize, reserved_low: usize) -> Self {
+        let free: Vec<usize> = (reserved_low..n_regs).collect();
         Self { n_regs, active: Vec::new(), free }
     }
 
