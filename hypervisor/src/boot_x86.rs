@@ -3262,6 +3262,45 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puts(b"\n");
                     }
                 }
+                // C.1: GPR dump at the fault-entry block PC. The kernel
+                // loaded x0=9 here and the LDRB triggers the spurious abort.
+                // Dump x0..x30 + sp + sysreg snapshot so the upstream block
+                // that wrote x0 wrong becomes traceable.
+                {
+                    static mut FAULT_GPR_FIRED: bool = false;
+                    // Match BOTH the PA (kernel pre-MMU, what the heartbeat
+                    // showed) AND the VA (post-MMU mapped through TTBR1).
+                    if !*ptr::addr_of!(FAULT_GPR_FIRED)
+                        && (pc == 0x7D9E_88BC || pc == 0xFFFF_FFC0_099E_88BC) {
+                        *ptr::addr_of_mut!(FAULT_GPR_FIRED) = true;
+                        let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                        const SR0: usize =
+                            aether_translator::runtime::context::SYSREG_SLOT0;
+                        dual_puts(b"[dbg] FAULT BLOCK ENTRY pc=0xffffffc0099e88bc iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n");
+                        let mut r = 0usize;
+                        while r < 31 {
+                            dual_puts(b"[dbg]   x");
+                            dual_puthex64(r as u64);
+                            dual_puts(b"=");
+                            dual_puthex64(g[r]);
+                            dual_puts(b"\n");
+                            r += 1;
+                        }
+                        dual_puts(b"[dbg]   sp=");
+                        dual_puthex64(g[0xF8 / 8]);
+                        dual_puts(b" sctlr=");
+                        dual_puthex64(g[SR0 + 0]);
+                        dual_puts(b" vbar=");
+                        dual_puthex64(g[SR0 + 6]);
+                        dual_puts(b" ttbr0=");
+                        dual_puthex64(g[SR0 + 1]);
+                        dual_puts(b" ttbr1=");
+                        dual_puthex64(g[SR0 + 2]);
+                        dual_puts(b"\n");
+                    }
+                }
                 if !fired && pc == 0xFFFF_FFC0_099E_5824 {
                     *ptr::addr_of_mut!(PHASE_B_HOOK_FIRED) = true;
                     let g = &*ptr::addr_of!(NPF_GUEST_CTX);
@@ -3311,9 +3350,27 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                             let g = &*ptr::addr_of!(NPF_GUEST_CTX);
                             const SR0: usize =
                                 aether_translator::runtime::context::SYSREG_SLOT0;
+                            let cur_vbar = g[SR0 + 6];
                             dual_puts(b" vbar=");
-                            dual_puthex64(g[SR0 + 6]);
+                            dual_puthex64(cur_vbar);
                             dual_puts(b"\n");
+                            // C.3 MANDATORY: short-circuit fetch-abort loops
+                            // when VBAR_EL1 is still 0. Without VBAR set the
+                            // dispatcher will spin to FETCH_ABORT_STREAK_MAX
+                            // (16) for no diagnostic value; fail fast at 4 so
+                            // the upstream cause is more visible in the log.
+                            if cur_vbar == 0 && fetch_abort_streak >= 4 {
+                                dual_puts(b"[exc] *** FETCH-ABORT LOOP WITH VBAR_EL1=0 ***\n");
+                                dual_puts(b"[exc]   Cause: a sync exception fired before the\n");
+                                dual_puts(b"[exc]   kernel reached its earliest `msr vbar_el1,x5`\n");
+                                dual_puts(b"[exc]   (image+0xf762e0). The fault that triggered the\n");
+                                dual_puts(b"[exc]   vector is the real bug -- likely a translator\n");
+                                dual_puts(b"[exc]   mistranslation upstream of the faulting block.\n");
+                                exit_code = 3;
+                                sum_pc = pc;
+                                sum_iter = iter;
+                                break;
+                            }
                             if fetch_abort_streak >= FETCH_ABORT_STREAK_MAX {
                                 dual_puts(b"[dbt] repeated fetch aborts (handler vector unfetchable / VBAR unset?) -- halting\n");
                                 exit_code = 3;
