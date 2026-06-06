@@ -3059,12 +3059,22 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         // Widen to the WHOLE TTBR1 kernel-VA half (bit-55 set region) so we
         // catch the first high-VA walks the kernel does — fixmap might be at
         // any offset, and the previous narrow top-256-MiB window caught zero.
-        // Trace ALL VAs (TTBR0 + TTBR1) — the kernel's fdt_check_header may
-        // read the DTB through the boot-time TTBR0 identity map (low VA ==
-        // PA) rather than via TTBR1 fixmap. Ring keeps the freshest 16.
+        // Phase B step 2/3: narrow trace to the FIXMAP VA region (top of
+        // TTBR1 — for VA_BITS=39, FIXADDR_TOP is near 0xffff_fffe_ff800000).
+        // Capture only walks targeting that area so the ring shows exactly
+        // what the kernel sees when fixmap_remap_fdt reads dt_virt. A PASS
+        // walk with PA in [0x7be00000, 0x7c000000) means fixmap is wired
+        // correctly and the bug is elsewhere; a FAULT (st with high bit set)
+        // means the kernel's create_mapping_noalloc didn't install the PTE
+        // our walker expects.
+        // Phase B step 3 (refined): the actual FIX_FDT slot lives at
+        // dt_virt = 0xFFFF_FFFD_FDC0_0000 (proven by disasm of
+        // fixmap_remap_fdt at image+0x19ebbc4: mov x19,#0xfdc00000 +
+        // movk #0xfffd,lsl 32 + movk #0xffff,lsl 48). Cover a comfortable
+        // slab around it to also catch surrounding fixmap pages.
         aether_translator::runtime::mmu::aether_mmu_trace_range(
-            0x0000_0000_0000_1000,
-            0xFFFF_FFFF_FFFF_F000,
+            0xFFFF_FFFD_F000_0000,
+            0xFFFF_FFFE_0000_0000,
         );
         // Ring-buffer mode: kernel reaches its DTB fixmap read LATE; one-shot
         // capacity-16 trace fills up with early kernel-text walks long before
@@ -3159,6 +3169,123 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
             }
             let pc = (*ptr::addr_of!(NPF_GUEST_CTX))[NPF_PC_SLOT];
             last_pc = pc;
+
+            // Phase B step 1: panic-site PC hook. When the block PC reaches
+            // setup_machine_fdt's panic call (image+0x19e5824 ==
+            // 0xffffffc0099e5824), inspect x20 to tell which arm of the
+            // `if (!dt_virt || !early_init_dt_scan(dt_virt))` failed.
+            //   x20 holds dt_virt (set at image+0x19e57ac after fixmap_remap_fdt
+            //   returned, before either of the two panic branches).
+            //   x20 == 0  => PATH A: fixmap_remap_fdt returned NULL.
+            //   x20 != 0  => PATH B: early_init_dt_scan returned false.
+            // Latches once so the dispatcher's stuck-in-park loop doesn't
+            // spam the log.
+            {
+                static mut PHASE_B_HOOK_FIRED: bool = false;
+                let fired = *ptr::addr_of!(PHASE_B_HOOK_FIRED);
+                // Phase B step 3b: magic-check hook. Right after the
+                // `cmp w8, w9` inside fixmap_remap_fdt (image+0x19ebbf4):
+                //   x8 should hold rev(ldr w8, [x19]) — the byte-reversed
+                //   first 4 bytes of the DTB at PA 0x7be00000 = 0xd00dfeed.
+                //   x9 should hold MOVZ #0xfeed + MOVK #0xd00d lsl 16 =
+                //   0xd00dfeed.
+                // If x8 == 0xd00dfeed and the kernel still takes b.ne, then
+                // CMP/NZCV is broken in our lifter. If x8 != 0xd00dfeed, then
+                // LDR/REV is wrong (or the walker handed back wrong PA).
+                // Hook at fixmap_remap_fdt entry to confirm it's reached.
+                {
+                    static mut ENTRY_HOOK_FIRED: bool = false;
+                    if !*ptr::addr_of!(ENTRY_HOOK_FIRED) && pc == 0xFFFF_FFC0_099E_BB74 {
+                        *ptr::addr_of_mut!(ENTRY_HOOK_FIRED) = true;
+                        let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                        dual_puts(b"[dbg] fixmap_remap_fdt ENTERED x0(dt_phys)=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n");
+                    }
+                }
+                // Hook right after the `bl __create_pgd_mapping` returns
+                // (image+0x19ebbe4 = the LDR). If this fires, the mapping
+                // call returned and we're about to read the magic.
+                {
+                    static mut LDR_HOOK_FIRED: bool = false;
+                    if !*ptr::addr_of!(LDR_HOOK_FIRED) && pc == 0xFFFF_FFC0_099E_BBE4 {
+                        *ptr::addr_of_mut!(LDR_HOOK_FIRED) = true;
+                        let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                        dual_puts(b"[dbg] LDR-MAGIC about to fire, x19(dt_virt)=");
+                        dual_puthex64(g[19]);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n");
+                        // Direct host read of the 16 bytes at the DTB PA the
+                        // walker resolves to. If these are 0xd00dfeed etc.,
+                        // the LDR/walker is the bug. If zero, something
+                        // overwrote our DTB.
+                        let dtb_pa = 0x7be0_0000u64 as *const u8;
+                        dual_puts(b"[dbg]   host-direct read PA 0x7be00000 first16:");
+                        let mut i = 0usize;
+                        while i < 16 {
+                            let b = *dtb_pa.add(i);
+                            dual_puts(b" ");
+                            let hi = (b >> 4) & 0xF;
+                            let lo = b & 0xF;
+                            let h_ch = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                            let l_ch = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                            dual_puts(&[h_ch, l_ch]);
+                            i += 1;
+                        }
+                        dual_puts(b"\n");
+                    }
+                }
+                // Post-cmp outcome hooks (block starts). Magic check has just
+                // resolved — these tell us which branch was taken and what x8
+                // ended up as.
+                {
+                    static mut MATCH_HOOK_FIRED: bool = false;
+                    static mut FAIL_HOOK_FIRED:  bool = false;
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    if !*ptr::addr_of!(MATCH_HOOK_FIRED) && pc == 0xFFFF_FFC0_099E_BBFC {
+                        *ptr::addr_of_mut!(MATCH_HOOK_FIRED) = true;
+                        dual_puts(b"[dbg] MAGIC OK -> totalsize load. x8=");
+                        dual_puthex64(g[8] & 0xFFFF_FFFF);
+                        dual_puts(b"\n");
+                    }
+                    if !*ptr::addr_of!(FAIL_HOOK_FIRED) && pc == 0xFFFF_FFC0_099E_BC10 {
+                        *ptr::addr_of_mut!(FAIL_HOOK_FIRED) = true;
+                        dual_puts(b"[dbg] MAGIC FAIL -> NULL path. x8(rev)=");
+                        dual_puthex64(g[8] & 0xFFFF_FFFF);
+                        dual_puts(b" x9(expected)=");
+                        dual_puthex64(g[9] & 0xFFFF_FFFF);
+                        dual_puts(b" x19(dt_virt)=");
+                        dual_puthex64(g[19]);
+                        dual_puts(b"\n");
+                    }
+                }
+                if !fired && pc == 0xFFFF_FFC0_099E_5824 {
+                    *ptr::addr_of_mut!(PHASE_B_HOOK_FIRED) = true;
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    let x20 = g[20];
+                    let x19 = g[19];   // = dt_phys (saved at 0x19e578c: mov x19, x0)
+                    let x0  = g[0];    // = fmt-string pointer for the panic
+                    dual_puts(b"[dbg] PANIC HOOK reached image+0x19e5824 (setup_machine_fdt)\n");
+                    dual_puts(b"[dbg]   x19(dt_phys)=");
+                    dual_puthex64(x19);
+                    dual_puts(b" x20(dt_virt)=");
+                    dual_puthex64(x20);
+                    dual_puts(b" x0(fmt)=");
+                    dual_puthex64(x0);
+                    dual_puts(b"\n");
+                    if x20 == 0 {
+                        dual_puts(b"[dbg]   => PATH A: fixmap_remap_fdt returned NULL\n");
+                    } else {
+                        dual_puts(b"[dbg]   => PATH B: early_init_dt_scan returned false\n");
+                    }
+                    dual_puts(b"[dbg]   iter=");
+                    dual_puthex64(iter);
+                    dual_puts(b"\n");
+                }
+            }
 
             // 1. Fetch: translate the (possibly virtual) PC to a guest PA.
             let fetch_pa = match npf_fetch_guest_pa(pc) {
@@ -3498,6 +3625,24 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
             ) as usize;
             let max = aether_translator::runtime::mmu::MMU_TRACE_MAX;
             let take = if n < max { n } else { max };
+            // Phase B step 2: TLBI / flush counters.
+            dual_puts(b"[mmu] tlbi_va_total=");
+            dual_puthex64(*ptr::addr_of!(
+                aether_translator::runtime::mmu::MMU_TLBI_VA_TOTAL
+            ) as u64);
+            dual_puts(b" tlbi_va_fixmap=");
+            dual_puthex64(*ptr::addr_of!(
+                aether_translator::runtime::mmu::MMU_TLBI_VA_FIXMAP
+            ) as u64);
+            dual_puts(b" first_fixmap_va=");
+            dual_puthex64(*ptr::addr_of!(
+                aether_translator::runtime::mmu::MMU_TLBI_VA_FIRST_FIXMAP
+            ));
+            dual_puts(b" flush_all_total=");
+            dual_puthex64(*ptr::addr_of!(
+                aether_translator::runtime::mmu::MMU_TLBI_FLUSH_ALL_TOTAL
+            ) as u64);
+            dual_puts(b"\n");
             dual_puts(b"[mmu] DTB-PA hits=");
             dual_puthex64(*ptr::addr_of!(
                 aether_translator::runtime::mmu::MMU_PA_HIT_COUNT

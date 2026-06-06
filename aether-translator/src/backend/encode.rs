@@ -662,6 +662,20 @@ impl X86Encoder {
         self.buf.push(0xC8 | (reg & 7));
     }
 
+    /// BSWAP r32 — byte-reverse the low 32 bits and zero-extend to 64. This is
+    /// the correct lowering for ARM64 `REV Wd, Wn` (4-byte reverse): BSWAP r64
+    /// would reverse all 8 bytes and shift the original low 32 into the high
+    /// half, leaving zero in the low — which is exactly the kernel-DTB-magic
+    /// bug we found at Phase B step 3b.
+    pub fn emit_bswap_r32(&mut self, reg: u8) {
+        // REX.B for R8..R15 (no REX.W; R32 operand size is the default).
+        if reg >= 8 {
+            self.buf.push(0x41);
+        }
+        self.buf.push(0x0F);
+        self.buf.push(0xC8 | (reg & 7));
+    }
+
     /// LZCNT r64, r/m64 (requires LZCNT feature; falls back to BSR for AT-12).
     pub fn emit_lzcnt_r64(&mut self, dst: u8, src: u8) {
         self.buf.push(0xF3); // mandatory F3 prefix

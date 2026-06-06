@@ -1019,7 +1019,13 @@ impl IntLower {
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 match *bytes {
                     2 => { /* XCHG ah,al equivalent; use ROL r16,8 */ enc.emit_nop(); }
-                    4 => enc.emit_bswap_r64(rd), // BSWAP r32 + zero-extend suffices
+                    // ARM64 REV Wd,Wn reverses the low 32 bits and the W-write
+                    // zero-extends bits 63:32. x86 BSWAP r32 has both properties
+                    // (default 32-bit op size zero-extends). BSWAP r64 would
+                    // move the original low 32 bits into the high half and zero
+                    // the low — observed at Phase B step 3b as `rev w8,w8`
+                    // turning 0xedfe0dd0 into 0 instead of 0xd00dfeed.
+                    4 => enc.emit_bswap_r32(rd),
                     8 => enc.emit_bswap_r64(rd),
                     _ => enc.emit_nop(),
                 }
@@ -1034,8 +1040,10 @@ impl IntLower {
                 let rd = Self::gpr(alloc, *dst);
                 let ra = Self::gpr(alloc, *a);
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
-                enc.emit_bswap_r64(rd);
-                // Zero upper 32 bits by moving through r32 (implicit in BSWAP r32).
+                // Same bug class as REV-4: BSWAP r64 reverses 8 bytes (and
+                // moves the original low 32 into the high half). Use BSWAP r32
+                // so the low 32 reverse and bits 63:32 zero-extend.
+                enc.emit_bswap_r32(rd);
             }
             Bswap64 { dst, a } => {
                 let rd = Self::gpr(alloc, *dst);

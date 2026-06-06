@@ -484,16 +484,40 @@ pub extern "C" fn aether_mmu_flush_all() {
         for i in 0..TLB_ENTRIES {
             (*tag)[i] = TLB_EMPTY;
         }
+        let t = core::ptr::addr_of_mut!(MMU_TLBI_FLUSH_ALL_TOTAL);
+        *t = (*t).saturating_add(1);
     }
 }
+
+/// Counts of TLBI VAE1 calls observed. `MMU_TLBI_VA_FIXMAP` increments only
+/// when the invalidated VA lies in `[MMU_TRACE_LO, MMU_TRACE_HI)` — pinned to
+/// the fixmap region by the hypervisor (Phase B step 2). `MMU_TLBI_VA_TOTAL`
+/// counts every call so we can tell "kernel never invalidates" vs "kernel
+/// invalidates but not the fixmap slot".
+pub static mut MMU_TLBI_VA_TOTAL: u32 = 0;
+pub static mut MMU_TLBI_VA_FIXMAP: u32 = 0;
+pub static mut MMU_TLBI_FLUSH_ALL_TOTAL: u32 = 0;
+pub static mut MMU_TLBI_VA_FIRST_FIXMAP: u64 = 0;
 
 /// Invalidate a single VA page (TLBI VAE1). Conservative: 4 KiB granularity.
 #[allow(unsafe_code)]
 pub extern "C" fn aether_mmu_tlbi_va(va: u64) {
     let idx = ((va >> 12) as usize) & (TLB_ENTRIES - 1);
-    // SAFETY: EL2-private, single-vCPU; in-bounds index.
+    // SAFETY: EL2-private, single-vCPU; in-bounds index + diagnostic counters.
     unsafe {
         *core::ptr::addr_of_mut!(TLB_TAG[idx]) = TLB_EMPTY;
+        let t = core::ptr::addr_of_mut!(MMU_TLBI_VA_TOTAL);
+        *t = (*t).saturating_add(1);
+        let lo = *core::ptr::addr_of!(MMU_TRACE_LO);
+        let hi = *core::ptr::addr_of!(MMU_TRACE_HI);
+        if lo < hi && va >= lo && va < hi {
+            let f = core::ptr::addr_of_mut!(MMU_TLBI_VA_FIXMAP);
+            let prev = *f;
+            *f = prev.saturating_add(1);
+            if prev == 0 {
+                *core::ptr::addr_of_mut!(MMU_TLBI_VA_FIRST_FIXMAP) = va;
+            }
+        }
     }
 }
 
