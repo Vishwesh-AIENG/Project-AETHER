@@ -3305,6 +3305,14 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                             dual_puthex64(pc);
                             dual_puts(b" streak=");
                             dual_puthex64(fetch_abort_streak as u64);
+                            // Also print current VBAR_EL1 to distinguish
+                            // "kernel never set VBAR" from "kernel set it
+                            // but vector page is unmapped".
+                            let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                            const SR0: usize =
+                                aether_translator::runtime::context::SYSREG_SLOT0;
+                            dual_puts(b" vbar=");
+                            dual_puthex64(g[SR0 + 6]);
                             dual_puts(b"\n");
                             if fetch_abort_streak >= FETCH_ABORT_STREAK_MAX {
                                 dual_puts(b"[dbt] repeated fetch aborts (handler vector unfetchable / VBAR unset?) -- halting\n");
@@ -3399,6 +3407,16 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_FAR));
                         dual_puts(b" esr=");
                         dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_ESR));
+                        // Live VBAR_EL1 / SCTLR / TTBR1 snapshot — slot 6/0/2
+                        // in the sysreg pool (SYSREG_SLOT0 == 101).
+                        let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                        const SR0: usize = aether_translator::runtime::context::SYSREG_SLOT0;
+                        dual_puts(b" vbar=");
+                        dual_puthex64(g[SR0 + 6]);
+                        dual_puts(b" sctlr=");
+                        dual_puthex64(g[SR0 + 0]);
+                        dual_puts(b" ttbr1=");
+                        dual_puthex64(g[SR0 + 2]);
                         dual_puts(b" 1st_far=");
                         dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_FIRST_FAR));
                         dual_puts(b" 1st_esr=");
