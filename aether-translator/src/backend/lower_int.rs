@@ -883,39 +883,51 @@ impl IntLower {
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 enc.emit_not_r64(rd);
             }
+            // Phase C find: variable-amount shifts (Shl/LShr/AShr) had a
+            // latent spill bug. Bare Self::gpr(alloc, *vid) returns SCRATCH0
+            // (RAX) for a SPILLED value, NOT the spilled value itself. Under
+            // spill pressure (e.g. the kernel's pre-relocation jump-table
+            // dispatch at image+0x19e887c) the prior lowering shifted by
+            // garbage, x10 landed at the wrong case, BR x10 reached the
+            // wrong PC, ldrb [x0=9] faulted with VBAR=0 -> fetch-abort loop.
+            // Route every operand through src_in/dest_work so spilled values
+            // materialize via the scratch path. SCRATCH0=RAX, SCRATCH1=RCX;
+            // x86 shifts use CL so the shift amount must be in RCX.
             Shl { dst, a, b } => {
-                // x86 shift uses CL; move b→RCX if not already there.
-                let rd = Self::gpr(alloc, *dst);
-                let ra = Self::gpr(alloc, *a);
-                let rb = Self::gpr(alloc, *b);
-                // Save RCX if needed.
-                if rb != 1 { enc.emit_mov_rr64(1, rb); } // RCX=1
+                let rb = Self::src_in(alloc, enc, *b, SCRATCH1);
+                if rb != SCRATCH1 { enc.emit_mov_rr64(SCRATCH1, rb); }
+                let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
+                let (rd, sp) = Self::dest_work(alloc, *dst, SCRATCH0);
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 enc.emit_shl_r64_cl(rd);
+                Self::store_dest(alloc, enc, *dst, rd, sp);
             }
             LShr { dst, a, b } => {
-                let rd = Self::gpr(alloc, *dst);
-                let ra = Self::gpr(alloc, *a);
-                let rb = Self::gpr(alloc, *b);
-                if rb != 1 { enc.emit_mov_rr64(1, rb); }
+                let rb = Self::src_in(alloc, enc, *b, SCRATCH1);
+                if rb != SCRATCH1 { enc.emit_mov_rr64(SCRATCH1, rb); }
+                let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
+                let (rd, sp) = Self::dest_work(alloc, *dst, SCRATCH0);
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 enc.emit_shr_r64_cl(rd);
+                Self::store_dest(alloc, enc, *dst, rd, sp);
             }
             AShr { dst, a, b } => {
-                let rd = Self::gpr(alloc, *dst);
-                let ra = Self::gpr(alloc, *a);
-                let rb = Self::gpr(alloc, *b);
-                if rb != 1 { enc.emit_mov_rr64(1, rb); }
+                let rb = Self::src_in(alloc, enc, *b, SCRATCH1);
+                if rb != SCRATCH1 { enc.emit_mov_rr64(SCRATCH1, rb); }
+                let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
+                let (rd, sp) = Self::dest_work(alloc, *dst, SCRATCH0);
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 enc.emit_sar_r64_cl(rd);
+                Self::store_dest(alloc, enc, *dst, rd, sp);
             }
             Ror { dst, a, b } => {
-                let rd = Self::gpr(alloc, *dst);
-                let ra = Self::gpr(alloc, *a);
-                let rb = Self::gpr(alloc, *b);
-                if rb != 1 { enc.emit_mov_rr64(1, rb); }
+                let rb = Self::src_in(alloc, enc, *b, SCRATCH1);
+                if rb != SCRATCH1 { enc.emit_mov_rr64(SCRATCH1, rb); }
+                let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
+                let (rd, sp) = Self::dest_work(alloc, *dst, SCRATCH0);
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 enc.emit_ror_r64_cl(rd);
+                Self::store_dest(alloc, enc, *dst, rd, sp);
             }
             Mul { dst, a, b } => {
                 let rd = Self::gpr(alloc, *dst);

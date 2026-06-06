@@ -3262,6 +3262,38 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puts(b"\n");
                     }
                 }
+                // Phase C Bug C: SCTLR.M transition detector and high-VA
+                // jump (br x8) reach detector.
+                {
+                    static mut MMU_ON_LOGGED: bool = false;
+                    static mut BR_X8_LOGGED: bool = false;
+                    const SR0: usize =
+                        aether_translator::runtime::context::SYSREG_SLOT0;
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    let sctlr_m_now = g[SR0 + 0] & 1;
+                    if !*ptr::addr_of!(MMU_ON_LOGGED) && sctlr_m_now == 1 {
+                        *ptr::addr_of_mut!(MMU_ON_LOGGED) = true;
+                        dual_puts(b"[dbg] MMU ENABLED first observed at block_pc=");
+                        dual_puthex64(pc);
+                        dual_puts(b" sctlr=");
+                        dual_puthex64(g[SR0 + 0]);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n");
+                    }
+                    // The high-VA relocation jump in __primary_switch
+                    // (image+0xf76510 = PA 0x7cf76510). If this block ever
+                    // runs, the kernel reached the post-MMU-enable BR x8;
+                    // we can then check x8 to see the target VA.
+                    if !*ptr::addr_of!(BR_X8_LOGGED) && pc == 0x7CF7_6510 {
+                        *ptr::addr_of_mut!(BR_X8_LOGGED) = true;
+                        dual_puts(b"[dbg] HIGH-VA JUMP reached: br x8 at 0x7cf76510 x8=");
+                        dual_puthex64(g[8]);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n");
+                    }
+                }
                 // C.1: GPR dump at the fault-entry block PC. The kernel
                 // loaded x0=9 here and the LDRB triggers the spurious abort.
                 // Dump x0..x30 + sp + sysreg snapshot so the upstream block
