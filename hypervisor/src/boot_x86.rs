@@ -1175,6 +1175,15 @@ pub unsafe fn boot_x86_hypervisor(
         dual_puts(b"\n[x86] ExitBootServices: OK\n");
         beep_once(900);
 
+        // Phase-D: ensure the handoff RAM range is host-writable. OVMF's
+        // identity map sometimes leaves staged-RAM ranges as W=0 leaves
+        // (or maps large pages with W=0 covering ranges we need to write
+        // into via lifted ARM64 stores). Walk the host CR3 and OR-in
+        // PTE.W on every leaf covering the staged boot.img + handoff
+        // window. Safer than clearing CR0.WP (which would let buggy lifted
+        // stores corrupt hypervisor .text).
+        host_pt_make_handoff_rw();
+
         // Surface the pre-EBS boot.img read result. Kinds:
         //   0=ok, 1=LoadedImage missing, 2=no FS on device, 3=OpenVolume failed,
         //   4=Open file failed (path wrong / file missing on FAT32),
@@ -2839,6 +2848,10 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
         // take_pending_abort consumes them, so the log shows the real fault.
         let pend_far = ctx_slice[SYSREG_SLOT0 + 57];
         let pend_esr = ctx_slice[SYSREG_SLOT0 + 58];
+
+        // (Phase-D linear-map fault handling has moved into the walker's
+        // kernel-image fallback path — see aether_mmu_set_kimg_fallback.)
+
         if exceptions::take_pending_abort(ctx_slice) {
             if dbt_event_log_ok() {
                 dual_puts(b"[exc] DATA ABORT -> EL1 vector=");
@@ -2954,6 +2967,90 @@ fn host_virtual_count() -> u64 {
 /// 4 KiB page mask for the guest instruction-window read.
 const GUEST_PAGE_BYTES: u64 = 0x1000;
 
+/// Walk the host CR3 page tables and OR-in PTE.W on every leaf covering
+/// the staged handoff RAM range, so lifted ARM64 stores (which translate
+/// to host writes via aether_mmu_store) don't trip a host #PF on pages
+/// OVMF marked W=0. Safer than clearing CR0.WP. Idempotent.
+///
+/// PML4[i] -> PDPT -> PD -> PT, 4 KiB granularity. Large pages (PS=1 at
+/// PDPT/PD) are NOT split; instead we OR-in W on the large-page entry
+/// itself, which makes the whole 1 GiB / 2 MiB region writable. Since the
+/// handoff region is contiguous and OVMF's identity-map is well-formed,
+/// this fully covers our needs.
+///
+/// # Safety
+/// Single-core EL2/VMX-root context; runs post-ExitBootServices when we
+/// own CR3 fully. Modifies present PTEs only — never adds new mappings.
+unsafe fn host_pt_make_handoff_rw() {
+    unsafe {
+        // Bootstrap: the host PT pages themselves may be mapped W=0 by OVMF
+        // (to prevent the kernel from modifying its own page tables). To
+        // OR-in W on PT entries, we must transiently allow writes to W=0
+        // pages — clear CR0.WP for the duration of the walk, then restore
+        // the original CR0 (with WP intact).
+        let saved_cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) saved_cr0, options(nomem, nostack));
+        core::arch::asm!("mov cr0, {}", in(reg) saved_cr0 & !(1u64 << 16),
+                         options(nomem, nostack));
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+        let pml4 = (cr3 & 0x0000_FFFF_FFFF_F000) as *mut u64;
+        // The dispatch window may not be pinned yet at EBS time (it's set
+        // post-handoff). Use a fixed-wide sweep covering ALL of low RAM
+        // (0..4 GiB) — the entire conventional-RAM range the guest could
+        // touch via lifted stores. UEFI identity-maps low 4 GiB so PML4[0]
+        // walking from VA==PA gives us every host-backed page.
+        let win_base: u64 = 0;
+        let win_size: u64 = 4 * 1024 * 1024 * 1024;
+        let win_end = win_base.saturating_add(win_size);
+        // Cover the entire window in 4 KiB-granularity, but stop early when a
+        // PDPT/PD entry has PS=1 (large page) — we OR-in W on the large entry.
+        let mut va = win_base & !0xFFFu64;
+        while va < win_end {
+            let pml4_idx = ((va >> 39) & 0x1FF) as isize;
+            let pml4e = core::ptr::read_volatile(pml4.offset(pml4_idx));
+            if pml4e & 1 == 0 { va = (va + (1u64 << 39)) & !((1u64 << 39) - 1); continue; }
+            core::ptr::write_volatile(pml4.offset(pml4_idx), pml4e | 2);
+            let pdpt = (pml4e & 0x0000_FFFF_FFFF_F000) as *mut u64;
+            let pdpt_idx = ((va >> 30) & 0x1FF) as isize;
+            let pdpte = core::ptr::read_volatile(pdpt.offset(pdpt_idx));
+            if pdpte & 1 == 0 { va = (va + (1u64 << 30)) & !((1u64 << 30) - 1); continue; }
+            core::ptr::write_volatile(pdpt.offset(pdpt_idx), pdpte | 2);
+            if pdpte & (1 << 7) != 0 {
+                // 1 GiB large page — OR W is enough; advance by 1 GiB.
+                va = (va + (1u64 << 30)) & !((1u64 << 30) - 1);
+                continue;
+            }
+            let pd = (pdpte & 0x0000_FFFF_FFFF_F000) as *mut u64;
+            let pd_idx = ((va >> 21) & 0x1FF) as isize;
+            let pde = core::ptr::read_volatile(pd.offset(pd_idx));
+            if pde & 1 == 0 { va = (va + (1u64 << 21)) & !((1u64 << 21) - 1); continue; }
+            core::ptr::write_volatile(pd.offset(pd_idx), pde | 2);
+            if pde & (1 << 7) != 0 {
+                // 2 MiB large page — OR W on this PDE; advance 2 MiB.
+                va = (va + (1u64 << 21)) & !((1u64 << 21) - 1);
+                continue;
+            }
+            let pt = (pde & 0x0000_FFFF_FFFF_F000) as *mut u64;
+            let pt_idx = ((va >> 12) & 0x1FF) as isize;
+            let pte = core::ptr::read_volatile(pt.offset(pt_idx));
+            if pte & 1 != 0 {
+                core::ptr::write_volatile(pt.offset(pt_idx), pte | 2);
+            }
+            va = va + 0x1000;
+        }
+        // Flush global TLB so the new W bits take effect.
+        let cr3_v: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3_v, options(nomem, nostack));
+        core::arch::asm!("mov cr3, {}", in(reg) cr3_v, options(nomem, nostack));
+        // Restore CR0.WP. Now WP=1 protects hypervisor .text from buggy
+        // lifted stores while the OR-W we just applied keeps the handoff
+        // RAM pages writable via PTE.W=1.
+        core::arch::asm!("mov cr0, {}", in(reg) saved_cr0, options(nomem, nostack));
+        dual_puts(b"[x86] host PT: handoff window forced RW\n");
+    }
+}
+
 /// Return a host pointer + length for reading the guest instruction stream at
 /// guest PA `guest_pa`, clamped to the pinned handoff window AND a single 4 KiB
 /// page (a translated block never spans a page — the walker is page-granular and
@@ -3045,6 +3142,32 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         );
         // Clear any software-TLB residue left by the boot proof programs.
         aether_translator::runtime::mmu::aether_mmu_flush_all();
+
+        // Phase-D kernel-image VA->PA fallback. Linux's __create_page_tables in
+        // head.S maps `[_text, ALIGN(_end, 2 MiB))`, but the kernel later
+        // accesses some VAs just past that (e.g. memblock initdata arrays).
+        // It hits a translation fault, calls is_spurious_el1_translation_fault
+        // which does `AT S1E1R + read PAR_EL1`; our software MMU doesn't model
+        // AT, PAR stays 0, kernel decides "spurious" and ERETs back. Walker
+        // refaults forever.
+        // Register a fallback that resolves kernel-image VAs (the full kimg
+        // VA region in 0xFFFFFFC0_xxxxxxxx) by VA-offset translation to the
+        // matching PA in the handoff window. The walker only consults this
+        // when the regular TTBR1 walk fails; if both fail, the abort is
+        // injected normally.
+        //
+        // Kernel image VA base for VA_BITS=39 GKI is 0xFFFFFFC0_08000000 (the
+        // kernel's _text). The PA base is `regs.pc` — the seeded kernel entry
+        // PC, which IS the kernel image's _text PA.
+        let kimg_va_base: u64 = 0xFFFF_FFC0_0800_0000;
+        let kimg_pa_base: u64 = regs.pc;
+        // Cover the entire 1 GiB region of L1[256] in TTBR1 (the kernel-image
+        // area). Initial Linux mapping only covers _text..ALIGN(_end,2MiB);
+        // anything past that hits this fallback.
+        let kimg_span: u64 = 1024 * 1024 * 1024;
+        aether_translator::runtime::mmu::aether_mmu_set_kimg_fallback(
+            kimg_va_base, kimg_pa_base, kimg_span,
+        );
 
         // ── M4b-6 fixmap probe ──────────────────────────────────────────────
         // Arm the walk tracer over the top 256 MiB of the TTBR1 kernel-VA
@@ -3885,17 +4008,82 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                     let _ = live_flt_baseline;
                     if !first_live_flt_logged && post_flt > pre_flt {
                         first_live_flt_logged = true;
+                        let far_now = *ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_FAR);
+                        let esr_now = *ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_ESR);
                         dual_puts(b"[mmu] FIRST LIVE FAULT block_pc=");
                         dual_puthex64(pc);
                         dual_puts(b" first_insn=");
                         dual_puthex64(insn0 as u64);
                         dual_puts(b" far=");
-                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_FAR));
+                        dual_puthex64(far_now);
                         dual_puts(b" esr=");
-                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_ESR));
+                        dual_puthex64(esr_now);
                         dual_puts(b" iter=");
                         dual_puthex64(iter);
                         dual_puts(b"\n");
+                        // PAGE TABLE DUMP for the failing VA. Walk TTBR1
+                        // 3-level (4KiB granule, VA_BITS=39) and print L1/
+                        // L2/L3 descriptor bytes so we can tell which level
+                        // the walker is failing at (and why).
+                        let ctx = &*ptr::addr_of!(NPF_GUEST_CTX);
+                        const SR0: usize = aether_translator::runtime::context::SYSREG_SLOT0;
+                        const SLOT_TTBR1: usize = 2;
+                        let ttbr1 = ctx[SR0 + SLOT_TTBR1] & 0x0000_FFFF_FFFF_F000;
+                        let l1_idx = (far_now >> 30) & 0x1FF;
+                        let l2_idx = (far_now >> 21) & 0x1FF;
+                        let l3_idx = (far_now >> 12) & 0x1FF;
+                        dual_puts(b"[mmu]   TTBR1(masked)=");
+                        dual_puthex64(ttbr1);
+                        dual_puts(b" L1idx=");
+                        dual_puthex64(l1_idx);
+                        dual_puts(b" L2idx=");
+                        dual_puthex64(l2_idx);
+                        dual_puts(b" L3idx=");
+                        dual_puthex64(l3_idx);
+                        dual_puts(b"\n");
+                        // Read L1 descriptor (8 bytes at ttbr1 + l1_idx*8).
+                        if ttbr1 != 0 {
+                            let l1_desc_pa = ttbr1 + l1_idx * 8;
+                            let l1_desc = core::ptr::read_volatile(l1_desc_pa as *const u64);
+                            dual_puts(b"[mmu]   L1 desc @ 0x");
+                            dual_puthex64(l1_desc_pa);
+                            dual_puts(b" = 0x");
+                            dual_puthex64(l1_desc);
+                            dual_puts(b"\n");
+                            if l1_desc & 0b11 == 0b11 {
+                                let l2_base = l1_desc & 0x0000_FFFF_FFFF_F000;
+                                // Survey neighborhood: which L2 entries near
+                                // l2_idx are populated? Find the upper edge of
+                                // kernel mapping.
+                                let lo = if l2_idx >= 4 { l2_idx - 4 } else { 0 };
+                                let hi = core::cmp::min(l2_idx + 4, 511);
+                                let mut i = lo;
+                                while i <= hi {
+                                    let p = l2_base + i * 8;
+                                    let d = core::ptr::read_volatile(p as *const u64);
+                                    dual_puts(b"[mmu]   L2[");
+                                    dual_puthex64(i);
+                                    dual_puts(b"]@0x");
+                                    dual_puthex64(p);
+                                    dual_puts(b"=0x");
+                                    dual_puthex64(d);
+                                    dual_puts(b"\n");
+                                    i += 1;
+                                }
+                                let l2_desc_pa = l2_base + l2_idx * 8;
+                                let l2_desc = core::ptr::read_volatile(l2_desc_pa as *const u64);
+                                if l2_desc & 0b11 == 0b11 {
+                                    let l3_base = l2_desc & 0x0000_FFFF_FFFF_F000;
+                                    let l3_desc_pa = l3_base + l3_idx * 8;
+                                    let l3_desc = core::ptr::read_volatile(l3_desc_pa as *const u64);
+                                    dual_puts(b"[mmu]   L3 desc @ 0x");
+                                    dual_puthex64(l3_desc_pa);
+                                    dual_puts(b" = 0x");
+                                    dual_puthex64(l3_desc);
+                                    dual_puts(b"\n");
+                                }
+                            }
+                        }
                     }
                     // NO-PROGRESS watchdog: next-PC == the PC just run, repeated
                     // NO_PROGRESS_LIMIT times (with no abort/IRQ/PSCI), is a stuck

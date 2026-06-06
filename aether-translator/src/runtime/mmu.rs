@@ -540,14 +540,78 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
             return Ok(*core::ptr::addr_of!(TLB_PA[idx]) | (va & 0xFFF));
         }
     }
-    let (pa, writable) = walk(sysregs, va, is_w)?;
-    // SAFETY: EL2-private, single-vCPU.
-    unsafe {
-        *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
-        *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
-        *core::ptr::addr_of_mut!(TLB_W[idx]) = writable;
+    match walk(sysregs, va, is_w) {
+        Ok((pa, writable)) => {
+            // SAFETY: EL2-private, single-vCPU.
+            unsafe {
+                *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
+                *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
+                *core::ptr::addr_of_mut!(TLB_W[idx]) = writable;
+            }
+            Ok(pa)
+        }
+        Err(e) => {
+            // Phase-D kernel-image fallback. The kernel's __create_page_tables
+            // in head.S maps `[_text, ALIGN(_end, 2 MiB))` but Linux ARM64 sometimes
+            // accesses VAs JUST PAST this boundary (e.g. memblock arrays placed
+            // in .meminit.data — see phase-d-printk-live-android15 notes). The
+            // kernel WARNs "Ignoring spurious kernel translation fault" then
+            // ERETs back, expecting the retry to succeed (its AT-probe says
+            // valid). With no real AT modeling + no TLB races on our software
+            // MMU, the retry just refaults forever.
+            //
+            // When the walk fails AND the VA is inside the kernel image area
+            // (the dispatcher pins KIMG_VA_BASE/KIMG_PA_BASE on bring-up),
+            // fall back to the obvious PA-from-VA-offset translation. PA must
+            // still be in our handoff window; if not, propagate the fault.
+            //
+            // No-Boundary: the fallback uses ONLY the pinned base values and
+            // computes a single PA; it never dereferences guest-controlled
+            // input or trusts the guest's tables. Output is window-confined.
+            let kimg_va = unsafe { *core::ptr::addr_of!(KIMG_VA_BASE) };
+            let kimg_pa = unsafe { *core::ptr::addr_of!(KIMG_PA_BASE) };
+            let kimg_sz = unsafe { *core::ptr::addr_of!(KIMG_SPAN_SIZE) };
+            if kimg_va != 0 && kimg_pa != 0 && kimg_sz != 0
+               && va >= kimg_va && va.wrapping_sub(kimg_va) < kimg_sz
+            {
+                let pa = kimg_pa.wrapping_add(va - kimg_va);
+                if in_window(pa) {
+                    // SAFETY: EL2-private, single-vCPU.
+                    unsafe {
+                        *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
+                        *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
+                        *core::ptr::addr_of_mut!(TLB_W[idx]) = true;
+                        *core::ptr::addr_of_mut!(MMU_KIMG_FALLBACK_HITS) =
+                            (*core::ptr::addr_of!(MMU_KIMG_FALLBACK_HITS))
+                                .saturating_add(1);
+                    }
+                    return Ok(pa);
+                }
+            }
+            Err(e)
+        }
     }
-    Ok(pa)
+}
+
+/// Kernel-image VA→PA fallback (Phase-D). Set once by the dispatcher before
+/// the kernel starts running so the walker can satisfy accesses past
+/// `_end + 2 MiB` (where memblock arrays may live). Default 0 = disabled.
+pub static mut KIMG_VA_BASE: u64 = 0;
+pub static mut KIMG_PA_BASE: u64 = 0;
+pub static mut KIMG_SPAN_SIZE: u64 = 0;
+pub static mut MMU_KIMG_FALLBACK_HITS: u64 = 0;
+
+/// Configure the kernel-image fallback range. `va_base..va_base+span` will be
+/// mapped to `pa_base..pa_base+span` when the regular page-table walk fails
+/// (and the resulting PA is in the handoff window).
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_set_kimg_fallback(va_base: u64, pa_base: u64, span: u64) {
+    // SAFETY: EL2-private, single-vCPU; set once before any walk.
+    unsafe {
+        *core::ptr::addr_of_mut!(KIMG_VA_BASE) = va_base;
+        *core::ptr::addr_of_mut!(KIMG_PA_BASE) = pa_base;
+        *core::ptr::addr_of_mut!(KIMG_SPAN_SIZE) = span;
+    }
 }
 
 // ── Diagnostic: targeted walk tracer (M4b-6 fixmap probe) ──────────────────
