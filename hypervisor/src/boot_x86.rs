@@ -3001,6 +3001,24 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         // Clear any software-TLB residue left by the boot proof programs.
         aether_translator::runtime::mmu::aether_mmu_flush_all();
 
+        // ── M4b-6 fixmap probe ──────────────────────────────────────────────
+        // Arm the walk tracer over the top 256 MiB of the TTBR1 kernel-VA
+        // space. For CONFIG_ARM64_VA_BITS_39 (the GKI default) FIXADDR_TOP and
+        // the FIX_FDT slot sit near the very top of kernel VA, so any walk
+        // here is overwhelmingly likely to be the kernel's fdt fixmap install
+        // / fdt header read. Captures up to MMU_TRACE_MAX walks: per-level
+        // descriptors + final PA, surfaced below in the dbt heartbeat. If the
+        // walker rejects or returns the wrong PA, the trace prints the exact
+        // descriptor chain so we can compare against the expected mapping
+        // (dt_virt -> 0x7be00000 + page-offset).
+        // Widen to the WHOLE TTBR1 kernel-VA half (bit-55 set region) so we
+        // catch the first high-VA walks the kernel does — fixmap might be at
+        // any offset, and the previous narrow top-256-MiB window caught zero.
+        aether_translator::runtime::mmu::aether_mmu_trace_range(
+            0xFFFF_FF80_0000_0000,
+            0xFFFF_FFFF_FFFF_F000,
+        );
+
         // Seed the live guest register file: x0..x30 (slots 0..30), SP (slot
         // 0xF8/8 = 31), PC (slot 0x100/8 = 32). npf_ctx_ptr() seeds the RO ID
         // sysregs on first touch.
@@ -3049,6 +3067,9 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         let live_flt_baseline: u32 =
             *ptr::addr_of!(aether_translator::runtime::mmu::MMU_FAULT_COUNT);
         let mut first_live_flt_logged = false;
+        // One-shot trace-dump latch: emit the captured fixmap-probe walks the
+        // first heartbeat after at least one walk is captured.
+        let mut fixmap_trace_dumped = false;
 
         // ── Final-summary capture ────────────────────────────────────────────
         // The inline [dbt]/[exc] trace above streams to BOTH the framebuffer and
@@ -3192,8 +3213,73 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_FAR));
                         dual_puts(b" esr=");
                         dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_LAST_ESR));
+                        dual_puts(b" 1st_far=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_FIRST_FAR));
+                        dual_puts(b" 1st_esr=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_FIRST_ESR));
                     }
                     dual_puts(b"\n");
+
+                    // Fixmap-probe trace dump (one-shot). Fires on the first
+                    // heartbeat after the walker has captured at least one
+                    // high-VA walk. Prints per-level descriptors + status so
+                    // we can compare against the kernel's expected
+                    // dt_virt -> dt_phys mapping (status: 0x01 = ok,
+                    // 0x80|kind<<4|level on fault; kind 1=Translation
+                    // 2=AccessFlag 3=Permission).
+                    if !fixmap_trace_dumped {
+                        let n = *ptr::addr_of!(
+                            aether_translator::runtime::mmu::MMU_TRACE_COUNT
+                        ) as usize;
+                        if n > 0 {
+                            fixmap_trace_dumped = true;
+                            let max = aether_translator::runtime::mmu::MMU_TRACE_MAX;
+                            let take = if n < max { n } else { max };
+                            let mut i = 0usize;
+                            while i < take {
+                                dual_puts(b"[mmu] FIXMAP-TRACE #");
+                                dual_puthex64(i as u64);
+                                dual_puts(b" va=");
+                                dual_puthex64((*ptr::addr_of!(
+                                    aether_translator::runtime::mmu::MMU_TRACE_VA
+                                ))[i]);
+                                dual_puts(b" ttbr=");
+                                dual_puthex64((*ptr::addr_of!(
+                                    aether_translator::runtime::mmu::MMU_TRACE_TTBR
+                                ))[i]);
+                                dual_puts(b" sl=");
+                                dual_puthex64((*ptr::addr_of!(
+                                    aether_translator::runtime::mmu::MMU_TRACE_START
+                                ))[i] as u64);
+                                dual_puts(b" d0=");
+                                dual_puthex64((*ptr::addr_of!(
+                                    aether_translator::runtime::mmu::MMU_TRACE_DESC0
+                                ))[i]);
+                                dual_puts(b" d1=");
+                                dual_puthex64((*ptr::addr_of!(
+                                    aether_translator::runtime::mmu::MMU_TRACE_DESC1
+                                ))[i]);
+                                dual_puts(b" d2=");
+                                dual_puthex64((*ptr::addr_of!(
+                                    aether_translator::runtime::mmu::MMU_TRACE_DESC2
+                                ))[i]);
+                                dual_puts(b" d3=");
+                                dual_puthex64((*ptr::addr_of!(
+                                    aether_translator::runtime::mmu::MMU_TRACE_DESC3
+                                ))[i]);
+                                dual_puts(b" pa=");
+                                dual_puthex64((*ptr::addr_of!(
+                                    aether_translator::runtime::mmu::MMU_TRACE_PA
+                                ))[i]);
+                                dual_puts(b" st=");
+                                dual_puthex64((*ptr::addr_of!(
+                                    aether_translator::runtime::mmu::MMU_TRACE_STATUS
+                                ))[i] as u64);
+                                dual_puts(b"\n");
+                                i += 1;
+                            }
+                        }
+                    }
                 }
                 prev_traced_pc = pc;
             } else {

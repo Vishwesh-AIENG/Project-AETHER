@@ -311,14 +311,27 @@ pub fn walk(sysregs: &[u64], va: u64, is_write: bool) -> Result<(u64, bool), (Fa
     // 3-level / start L1, not the old hardcoded 48-bit / 4-level / start L0).
     let start_level = match regime_start_level(tcr, va_high) {
         Some(l) => l,
-        None => return Err((FaultKind::Translation, 0)), // non-4KiB granule: loud
+        None => {
+            if let Some(s) = trace_alloc(va) {
+                trace_commit(s, va, ttbr, 0xFF, 0, trace_status(FaultKind::Translation, 0));
+            }
+            return Err((FaultKind::Translation, 0)); // non-4KiB granule: loud
+        }
     };
+
+    // Targeted walk tracer: capture this walk if the VA is in the configured
+    // probe range and capacity remains (e.g. the kernel's fixmap mapping of the
+    // DTB at boot — see M4b-6 notes).
+    let trace = trace_alloc(va);
 
     let mut table = ttbr & ADDR_MASK;
     // No-Boundary confinement (must-fix #2): the first table base is guest-
     // controlled — refuse it (and every later table base + the leaf output) if
     // it escapes the handoff window, BEFORE any host dereference.
     if !in_window(table) {
+        if let Some(s) = trace {
+            trace_commit(s, va, ttbr, start_level, 0, trace_status(FaultKind::Translation, start_level));
+        }
         return Err((FaultKind::Translation, start_level));
     }
 
@@ -330,8 +343,14 @@ pub fn walk(sysregs: &[u64], va: u64, is_write: bool) -> Result<(u64, bool), (Fa
         // inside the mapped span), so `desc_pa = table + index*8` (index < 512)
         // is in mapped guest RAM == host RAM. 8-byte aligned.
         let desc = unsafe { core::ptr::read_volatile(desc_pa as *const u64) };
+        if let Some(s) = trace {
+            trace_desc(s, level, desc);
+        }
 
         if desc & 1 == 0 {
+            if let Some(s) = trace {
+                trace_commit(s, va, ttbr, start_level, 0, trace_status(FaultKind::Translation, level));
+            }
             return Err((FaultKind::Translation, level)); // invalid descriptor
         }
         let is_table_or_page = desc & 0b10 != 0;
@@ -339,21 +358,44 @@ pub fn walk(sysregs: &[u64], va: u64, is_write: bool) -> Result<(u64, bool), (Fa
         if level == 3 {
             // At level 3 bit 1 MUST be set for a page; clear = reserved/invalid.
             if !is_table_or_page {
+                if let Some(s) = trace {
+                    trace_commit(s, va, ttbr, start_level, 0, trace_status(FaultKind::Translation, level));
+                }
                 return Err((FaultKind::Translation, level));
             }
-            return finish_leaf(desc, va, 12, level, is_write);
+            let r = finish_leaf(desc, va, 12, level, is_write);
+            if let Some(s) = trace {
+                match r {
+                    Ok((pa, _)) => trace_commit(s, va, ttbr, start_level, pa, 1),
+                    Err((k, l)) => trace_commit(s, va, ttbr, start_level, 0, trace_status(k, l)),
+                }
+            }
+            return r;
         }
         if !is_table_or_page {
             // Block descriptor: 1 GiB at level 1, 2 MiB at level 2 (a block at
             // level 0 (512 GiB) is architecturally invalid for 4 KiB granule).
             if level == 0 {
+                if let Some(s) = trace {
+                    trace_commit(s, va, ttbr, start_level, 0, trace_status(FaultKind::Translation, level));
+                }
                 return Err((FaultKind::Translation, level));
             }
-            return finish_leaf(desc, va, shift, level, is_write);
+            let r = finish_leaf(desc, va, shift, level, is_write);
+            if let Some(s) = trace {
+                match r {
+                    Ok((pa, _)) => trace_commit(s, va, ttbr, start_level, pa, 1),
+                    Err((k, l)) => trace_commit(s, va, ttbr, start_level, 0, trace_status(k, l)),
+                }
+            }
+            return r;
         }
         // Table descriptor: descend, confining the next table base too.
         table = desc & ADDR_MASK;
         if !in_window(table) {
+            if let Some(s) = trace {
+                trace_commit(s, va, ttbr, start_level, 0, trace_status(FaultKind::Translation, level));
+            }
             return Err((FaultKind::Translation, level));
         }
     }
@@ -463,6 +505,94 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
         *core::ptr::addr_of_mut!(TLB_W[idx]) = writable;
     }
     Ok(pa)
+}
+
+// ── Diagnostic: targeted walk tracer (M4b-6 fixmap probe) ──────────────────
+// Captures up to MMU_TRACE_MAX walks whose VA falls inside [TRACE_LO, TRACE_HI)
+// (inclusive low, exclusive high). Each slot records VA, the TTBR picked, the
+// start level, the per-level descriptors read (DESC0..DESC3 — unused tail = 0),
+// the final PA on success, and a STATUS byte: 0 = empty slot, 1 = ok, else
+// `0x80 | (kind<<4) | level` where kind 1=Translation, 2=AccessFlag, 3=Permission.
+// Zero overhead when TRACE_LO >= TRACE_HI (the default — tracing off). Set
+// the range with `aether_mmu_trace_range(lo, hi)` BEFORE the dispatch loop.
+pub const MMU_TRACE_MAX: usize = 16;
+pub static mut MMU_TRACE_LO: u64 = u64::MAX;
+pub static mut MMU_TRACE_HI: u64 = 0;
+pub static mut MMU_TRACE_COUNT: u32 = 0;
+pub static mut MMU_TRACE_VA: [u64; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
+pub static mut MMU_TRACE_TTBR: [u64; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
+pub static mut MMU_TRACE_START: [u8; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
+pub static mut MMU_TRACE_DESC0: [u64; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
+pub static mut MMU_TRACE_DESC1: [u64; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
+pub static mut MMU_TRACE_DESC2: [u64; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
+pub static mut MMU_TRACE_DESC3: [u64; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
+pub static mut MMU_TRACE_PA: [u64; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
+pub static mut MMU_TRACE_STATUS: [u8; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
+
+/// Configure the VA range whose walks should be captured into the
+/// `MMU_TRACE_*` statics. Pass `(u64::MAX, 0)` to disable.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_trace_range(lo: u64, hi: u64) {
+    // SAFETY: EL2-private, single-vCPU; set once before dispatch starts.
+    unsafe {
+        *core::ptr::addr_of_mut!(MMU_TRACE_LO) = lo;
+        *core::ptr::addr_of_mut!(MMU_TRACE_HI) = hi;
+        *core::ptr::addr_of_mut!(MMU_TRACE_COUNT) = 0;
+    }
+}
+
+/// Return the next free trace slot if `va` is in-range and capacity remains.
+#[allow(unsafe_code)]
+fn trace_alloc(va: u64) -> Option<usize> {
+    // SAFETY: EL2-private, single-vCPU.
+    unsafe {
+        let lo = *core::ptr::addr_of!(MMU_TRACE_LO);
+        let hi = *core::ptr::addr_of!(MMU_TRACE_HI);
+        if lo >= hi || va < lo || va >= hi {
+            return None;
+        }
+        let n = *core::ptr::addr_of!(MMU_TRACE_COUNT) as usize;
+        if n >= MMU_TRACE_MAX {
+            return None;
+        }
+        Some(n)
+    }
+}
+
+#[allow(unsafe_code)]
+fn trace_desc(slot: usize, level: u8, desc: u64) {
+    // SAFETY: caller ensures slot < MMU_TRACE_MAX.
+    unsafe {
+        match level {
+            0 => *core::ptr::addr_of_mut!(MMU_TRACE_DESC0[slot]) = desc,
+            1 => *core::ptr::addr_of_mut!(MMU_TRACE_DESC1[slot]) = desc,
+            2 => *core::ptr::addr_of_mut!(MMU_TRACE_DESC2[slot]) = desc,
+            _ => *core::ptr::addr_of_mut!(MMU_TRACE_DESC3[slot]) = desc,
+        }
+    }
+}
+
+#[allow(unsafe_code)]
+fn trace_commit(slot: usize, va: u64, ttbr: u64, start: u8, pa: u64, status: u8) {
+    // SAFETY: caller ensures slot < MMU_TRACE_MAX.
+    unsafe {
+        *core::ptr::addr_of_mut!(MMU_TRACE_VA[slot]) = va;
+        *core::ptr::addr_of_mut!(MMU_TRACE_TTBR[slot]) = ttbr;
+        *core::ptr::addr_of_mut!(MMU_TRACE_START[slot]) = start;
+        *core::ptr::addr_of_mut!(MMU_TRACE_PA[slot]) = pa;
+        *core::ptr::addr_of_mut!(MMU_TRACE_STATUS[slot]) = status;
+        let c = core::ptr::addr_of_mut!(MMU_TRACE_COUNT);
+        *c = (*c).saturating_add(1);
+    }
+}
+
+fn trace_status(kind: FaultKind, level: u8) -> u8 {
+    let k: u8 = match kind {
+        FaultKind::Translation => 1,
+        FaultKind::AccessFlag => 2,
+        FaultKind::Permission => 3,
+    };
+    0x80 | (k << 4) | (level & 0x0F)
 }
 
 // Diagnostic: how many translation faults we've recorded since boot. A silent
