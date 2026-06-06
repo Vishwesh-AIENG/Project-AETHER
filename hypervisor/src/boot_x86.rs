@@ -3333,6 +3333,141 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puts(b"\n");
                     }
                 }
+                // Phase-C step 2: helper fdt_offset_ptr_ + jump-table dispatch
+                // chain hooks. Multi-fire (counter, max 8 prints each) so the
+                // SECOND helper invocation from path-0 (0x7d9e88c8 path =
+                // FDT_BEGIN_NODE handler) is captured. Site layout:
+                //   0x7d9e8780  helper entry
+                //   0x7d9e87f4  helper fail (mov x8,xzr)
+                //   0x7d9e87f8  helper return (mov x0,x8; ret)
+                //   0x7d9e8800  helper success block
+                //   0x7d9e8884  ADR X10,#+0x10 (jump-table base setup)
+                //   0x7d9e8888  LDRB W11,[X9,X8] (table fetch)
+                //   0x7d9e888c  ADD X10,X10,X11,LSL#2 (compute target)
+                //   0x7d9e8890  BR X10
+                //   0x7d9e88c8  jump-target #13 (FDT_BEGIN_NODE path)
+                //   0x7d9e88d4  BL 0x7d9e8780 (second helper call)
+                //   0x7d9e88d8  CBNZ X0,0x7d9e88bc (post-helper branch)
+                {
+                    static mut HELP_HITS: u32 = 0;
+                    static mut RET_HITS: u32 = 0;
+                    static mut OK_HITS: u32 = 0;
+                    static mut FAIL_HITS: u32 = 0;
+                    static mut JT_HITS: u32 = 0;
+                    static mut PATH13_HITS: u32 = 0;
+                    static mut BL2_HITS: u32 = 0;
+                    static mut CBNZ_HITS: u32 = 0;
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    if *ptr::addr_of!(HELP_HITS) < 8 && pc == 0x7D9E_8780 {
+                        *ptr::addr_of_mut!(HELP_HITS) += 1;
+                        dual_puts(b"[dbg] HELPER ENTRY hit=");
+                        dual_puthex64(*ptr::addr_of!(HELP_HITS) as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" x0=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b" w1=");
+                        dual_puthex64(g[1] & 0xFFFF_FFFF);
+                        dual_puts(b" w2=");
+                        dual_puthex64(g[2] & 0xFFFF_FFFF);
+                        dual_puts(b" lr=");
+                        dual_puthex64(g[30]);
+                        dual_puts(b"\n");
+                    }
+                    if *ptr::addr_of!(FAIL_HITS) < 4 && pc == 0x7D9E_87F4 {
+                        *ptr::addr_of_mut!(FAIL_HITS) += 1;
+                        dual_puts(b"[dbg] HELPER FAIL hit=");
+                        dual_puthex64(*ptr::addr_of!(FAIL_HITS) as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n");
+                    }
+                    if *ptr::addr_of!(OK_HITS) < 8 && pc == 0x7D9E_8800 {
+                        *ptr::addr_of_mut!(OK_HITS) += 1;
+                        dual_puts(b"[dbg] HELPER OK hit=");
+                        dual_puthex64(*ptr::addr_of!(OK_HITS) as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" x0=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b" x8=");
+                        dual_puthex64(g[8]);
+                        dual_puts(b" x1=");
+                        dual_puthex64(g[1]);
+                        dual_puts(b"\n");
+                    }
+                    if *ptr::addr_of!(RET_HITS) < 8 && pc == 0x7D9E_87F8 {
+                        *ptr::addr_of_mut!(RET_HITS) += 1;
+                        dual_puts(b"[dbg] HELPER RET hit=");
+                        dual_puthex64(*ptr::addr_of!(RET_HITS) as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" x8(ret)=");
+                        dual_puthex64(g[8]);
+                        dual_puts(b"\n");
+                    }
+                    // JUMP-TABLE BR x10 site: ADR x10 at 0x7d9e8884 is a
+                    // block-start (post ADRP/ADD/ADD chain). The dispatcher
+                    // may or may not start a block exactly here, but it's
+                    // safe to hook -- if it's mid-block, no fire. Then the
+                    // BR x10 lands at jump target; we also hook 0x7d9e88c8.
+                    if *ptr::addr_of!(JT_HITS) < 8 && pc == 0x7D9E_8884 {
+                        *ptr::addr_of_mut!(JT_HITS) += 1;
+                        dual_puts(b"[dbg] JT-BASE hit=");
+                        dual_puthex64(*ptr::addr_of!(JT_HITS) as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" x8=");
+                        dual_puthex64(g[8]);
+                        dual_puts(b" x9=");
+                        dual_puthex64(g[9]);
+                        dual_puts(b" w20=");
+                        dual_puthex64(g[20] & 0xFFFF_FFFF);
+                        dual_puts(b" w23=");
+                        dual_puthex64(g[23] & 0xFFFF_FFFF);
+                        dual_puts(b"\n");
+                    }
+                    if *ptr::addr_of!(PATH13_HITS) < 8 && pc == 0x7D9E_88C8 {
+                        *ptr::addr_of_mut!(PATH13_HITS) += 1;
+                        dual_puts(b"[dbg] JT-PATH#13 (FDT_BEGIN_NODE) hit=");
+                        dual_puthex64(*ptr::addr_of!(PATH13_HITS) as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" x10=");
+                        dual_puthex64(g[10]);
+                        dual_puts(b" x11=");
+                        dual_puthex64(g[11]);
+                        dual_puts(b" x21=");
+                        dual_puthex64(g[21]);
+                        dual_puts(b" x22=");
+                        dual_puthex64(g[22]);
+                        dual_puts(b"\n");
+                    }
+                    if *ptr::addr_of!(BL2_HITS) < 8 && pc == 0x7D9E_88D4 {
+                        *ptr::addr_of_mut!(BL2_HITS) += 1;
+                        dual_puts(b"[dbg] BL2-PRE hit=");
+                        dual_puthex64(*ptr::addr_of!(BL2_HITS) as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" x0=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b" w1=");
+                        dual_puthex64(g[1] & 0xFFFF_FFFF);
+                        dual_puts(b" w2=");
+                        dual_puthex64(g[2] & 0xFFFF_FFFF);
+                        dual_puts(b"\n");
+                    }
+                    if *ptr::addr_of!(CBNZ_HITS) < 8 && pc == 0x7D9E_88D8 {
+                        *ptr::addr_of_mut!(CBNZ_HITS) += 1;
+                        dual_puts(b"[dbg] CBNZ-POST hit=");
+                        dual_puthex64(*ptr::addr_of!(CBNZ_HITS) as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" x0(helper ret)=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b"\n");
+                    }
+                }
                 if !fired && pc == 0xFFFF_FFC0_099E_5824 {
                     *ptr::addr_of_mut!(PHASE_B_HOOK_FIRED) = true;
                     let g = &*ptr::addr_of!(NPF_GUEST_CTX);

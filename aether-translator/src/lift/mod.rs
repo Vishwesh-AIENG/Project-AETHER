@@ -172,11 +172,11 @@ impl<'a> LiftCtx<'a> {
                 v_addr
             }
             AddrMode::Pcrel { offset } => {
-                let v_pc = self.read_pc();
-                let v_off = self.const_i64(offset as i64);
-                let v_addr = self.val(IrValueKind::I64);
-                self.push(IrOp::Add { dst: v_addr, a: v_pc, b: v_off });
-                v_addr
+                // CRITICAL: use the PER-INSTRUCTION PC (self.pc), not
+                // read_pc() (which loads ctx.pc — only updated at block
+                // boundaries; off by (insn_offset_in_block) for any insn
+                // past the block start).
+                self.const_i64((self.pc as i64).wrapping_add(offset as i64))
             }
         }
     }
@@ -231,21 +231,24 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
     match *insn {
         // ===== PC-rel =====
         Adr { rd, imm } => {
-            let v_pc = cx.read_pc();
-            let v_off = cx.const_i64(imm as i64);
-            let v_res = cx.val(IrValueKind::I64);
-            cx.push(IrOp::Add { dst: v_res, a: v_pc, b: v_off });
+            // CRITICAL: ADR is PC-relative to the ADR instruction's PC.
+            // The IR ReadPc op loads ctx.pc which is only updated at block
+            // boundaries — within a block it stays at the block-start PC,
+            // so reading it for ADR at insn_offset_in_block past 0 gives an
+            // address off by insn_offset_in_block. Fold the constant target
+            // at lift time using the per-insn cx.pc (truth).
+            let target = (cx.pc as i64).wrapping_add(imm as i64);
+            let v_res = cx.const_i64(target);
             cx.write_reg(rd, v_res, true);
         }
         Adrp { rd, imm } => {
-            // PC[63:12]:0..0 + (imm << 12)
-            let v_pc = cx.read_pc();
-            let v_mask = cx.const_i64(!0xFFFi64);
-            let v_page = cx.val(IrValueKind::I64);
-            cx.push(IrOp::And { dst: v_page, a: v_pc, b: v_mask });
-            let v_off = cx.const_i64((imm as i64) << 12);
-            let v_res = cx.val(IrValueKind::I64);
-            cx.push(IrOp::Add { dst: v_res, a: v_page, b: v_off });
+            // ADRP: PC[63:12]:0..0 + (imm << 12) -- same per-insn-PC fix
+            // as ADR. Pre-fix this worked by coincidence when block_start
+            // and the ADRP shared a 4 KiB page (both round down to the same
+            // PC_PAGE), but breaks at any 4 KiB boundary inside a block.
+            let pc_page = (cx.pc as i64) & !0xFFFi64;
+            let target = pc_page.wrapping_add((imm as i64) << 12);
+            let v_res = cx.const_i64(target);
             cx.write_reg(rd, v_res, true);
         }
 

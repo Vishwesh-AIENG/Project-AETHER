@@ -1589,17 +1589,25 @@ impl IntLower {
                 branch_patches.insert(patch, *taken);
             }
             IndirectBranch { target } => {
-                enc.emit_jmp_r64(Self::gpr(alloc, *target));
+                // CRITICAL: target may be SPILLED (high reg pressure in
+                // jump-table dispatch blocks: ADRP+ADD+ADD+ADR+LDRB+ADD-shifted
+                // before the BR). Bare gpr() returns SCRATCH0=RAX for spills,
+                // so JMP would go to whatever RAX last contained. Route through
+                // src_in so a spilled target gets loaded from its slot first.
+                let r = Self::src_in(alloc, enc, *target, SCRATCH0);
+                enc.emit_jmp_r64(r);
             }
             Call { target, .. } => {
-                enc.emit_call_r64(Self::gpr(alloc, *target));
+                let r = Self::src_in(alloc, enc, *target, SCRATCH0);
+                enc.emit_call_r64(r);
             }
             Return { target } => {
                 // In the ARM→x86 JIT, Return means "jump to the link register
                 // value" — which after AT-19 context restore becomes JMP to
                 // x30's assigned register.  For AT-12 gate the simplest correct
-                // emit is JMP r (indirect return).
-                enc.emit_jmp_r64(Self::gpr(alloc, *target));
+                // emit is JMP r (indirect return). Same spill-safety as above.
+                let r = Self::src_in(alloc, enc, *target, SCRATCH0);
+                enc.emit_jmp_r64(r);
             }
 
             // ── x86 TSO lowered barrier ops (from AT-10) ──────────────────

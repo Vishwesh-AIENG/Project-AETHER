@@ -2056,3 +2056,76 @@ fn m4b2_unmapped_va_after_enable_mmu_faults() {
     );
     let _ = _data_pa;
 }
+
+/// Phase C debug: dump the emitted x86 for MOVZ+MOVK AND run it + report ctx[10].
+#[test]
+fn phase_c_dump_movk_emitted_x86() {
+    const MOVZ_X10: u32 = 0xD291128A;
+    const MOVK_X10: u32 = 0xF2AFB3CA;
+    let words = [MOVZ_X10, MOVK_X10];
+    let code = translate_straight_line(&words, 0x15000);
+    let mut s = String::new();
+    for b in &code {
+        s.push_str(&format!("{:02X} ", b));
+    }
+    let exec = winexec::make_executable(&code);
+    let mut ctx = vec![0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    panic!(
+        "emitted x86 ({} bytes): {}\n  ctx[10]=0x{:016x}",
+        code.len(), s, ctx[10]
+    );
+}
+
+/// Phase C bisect 0a: MOVZ X10 alone.
+#[test]
+fn phase_c_movz_x10_alone() {
+    const MOVZ_X10: u32 = 0xD291128A; // movz x10, #0x8894
+    let words = [MOVZ_X10];
+    let code = translate_straight_line(&words, 0x15000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = vec![0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[10], 0x8894, "MOVZ X10 #0x8894 → 0x8894 (got 0x{:x})", ctx[10]);
+}
+
+/// Phase C bisect 0b: prove MOVK preserves the unrelated 16-bit slot.
+/// MOVZ X10, #0x8894 ; MOVK X10, #0x7d9e, LSL #16 → expect X10 = 0x7d9e_8894.
+#[test]
+fn phase_c_movk_preserves_low_bits() {
+    const MOVZ_X10: u32 = 0xD291128A;
+    const MOVK_X10: u32 = 0xF2AFB3CA;
+    let words = [MOVZ_X10, MOVK_X10];
+    let code = translate_straight_line(&words, 0x15000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = vec![0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(
+        ctx[10], 0x7D9E_8894,
+        "MOVZ #0x8894 then MOVK #0x7d9e LSL16 must give 0x7d9e8894 (got 0x{:x})",
+        ctx[10]
+    );
+}
+
+/// Phase C bisect 2: full sequence — MOVK + ADD shifted-reg.
+///
+///   MOVZ X10, #0x8894 ; MOVK X10, #0x7d9e, LSL #16  ; X10 = 0x7d9e8894
+///   MOVZ X11, #13                                   ; X11 = 13
+///   ADD  X10, X10, X11, LSL #2                       ; X10 = 0x7d9e88c8
+#[test]
+fn phase_c_jump_table_dispatch_shifted_add() {
+    const MOVZ_X10: u32 = 0xD291128A;
+    const MOVK_X10: u32 = 0xF2AFB3CA;
+    const MOVZ_X11: u32 = 0xD28001AB;
+    const ADD_X10_X10_X11_LSL2: u32 = 0x8B0B094A;
+    let words = [MOVZ_X10, MOVK_X10, MOVZ_X11, ADD_X10_X10_X11_LSL2];
+    let code = translate_straight_line(&words, 0x15000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = vec![0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[11], 13, "X11 = 13");
+    assert_eq!(
+        ctx[10], 0x7D9E_88C8,
+        "X10 = base + 13*4 = 0x7d9e88c8 (got 0x{:x})", ctx[10]
+    );
+}
