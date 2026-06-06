@@ -273,6 +273,8 @@ mod arm64_entry {
             uart_irq_spi: UART_SPI_INTID,
             cmdline: cmdline_buf,
             cmdline_len,
+            initrd_start: 0,
+            initrd_end:   0,
         };
 
         puts(&uart, "  ch36: Building Android DTB (4-core SMP + IRQ forwarding)...\r\n");

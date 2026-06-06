@@ -1310,24 +1310,69 @@ pub unsafe fn boot_x86_hypervisor(
                 dual_puts(b" FEX x0=");
                 dual_puthex64(h.dbt_regs.x[0]);
                 dual_puts(b"\n");
-                // Dump first 32 bytes of the DTB so we can verify the FDT
-                // header (magic 0xd00dfeed BE at off 0, totalsize BE at off 4,
-                // version BE at off 20). The kernel panics with "invalid
-                // device tree blob" if any of these are wrong.
+                // A.1: dump the full 40-byte FDT v17 header with per-field
+                // decoding so we can diff against libfdt's fdt_check_header
+                // requirements. Linux rejects the DTB silently (no earlycon
+                // yet) if any of: magic != 0xD00DFEED, version not in
+                // [16,17], last_comp_version > 17, off_dt_struct +
+                // size_dt_struct > totalsize, off_dt_strings + size_dt_strings
+                // > totalsize, off_mem_rsvmap + 16 > off_dt_struct, or any
+                // offset not 8-byte aligned.
                 {
                     let dtb = h.dtb_pa as *const u8;
-                    dual_puts(b"[android] DTB hdr:");
-                    let mut i = 0usize;
-                    while i < 32 {
-                        let b = *dtb.add(i);
-                        dual_puts(b" ");
-                        let hi = (b >> 4) & 0xF;
-                        let lo = b & 0xF;
-                        let h_ch = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
-                        let l_ch = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
-                        dual_puts(&[h_ch, l_ch]);
-                        i += 1;
-                    }
+                    let r32 = |off: usize| -> u32 {
+                        let b0 = *dtb.add(off) as u32;
+                        let b1 = *dtb.add(off + 1) as u32;
+                        let b2 = *dtb.add(off + 2) as u32;
+                        let b3 = *dtb.add(off + 3) as u32;
+                        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+                    };
+                    let magic = r32(0);
+                    let totalsize = r32(4);
+                    let off_struct = r32(8);
+                    let off_strings = r32(12);
+                    let off_rsvmap = r32(16);
+                    let version = r32(20);
+                    let last_comp = r32(24);
+                    let boot_cpu = r32(28);
+                    let sz_strings = r32(32);
+                    let sz_struct = r32(36);
+                    dual_puts(b"[fdt] magic=");
+                    dual_puthex64(magic as u64);
+                    dual_puts(b" totalsize=");
+                    dual_puthex64(totalsize as u64);
+                    dual_puts(b" off_struct=");
+                    dual_puthex64(off_struct as u64);
+                    dual_puts(b" off_strings=");
+                    dual_puthex64(off_strings as u64);
+                    dual_puts(b"\n[fdt] off_rsvmap=");
+                    dual_puthex64(off_rsvmap as u64);
+                    dual_puts(b" version=");
+                    dual_puthex64(version as u64);
+                    dual_puts(b" last_comp=");
+                    dual_puthex64(last_comp as u64);
+                    dual_puts(b" boot_cpu=");
+                    dual_puthex64(boot_cpu as u64);
+                    dual_puts(b" sz_strings=");
+                    dual_puthex64(sz_strings as u64);
+                    dual_puts(b" sz_struct=");
+                    dual_puthex64(sz_struct as u64);
+                    dual_puts(b"\n[fdt] checks:");
+                    let mut ok = true;
+                    if magic != 0xD00D_FEED { dual_puts(b" BAD_MAGIC"); ok = false; }
+                    if !(16..=17).contains(&version) { dual_puts(b" BAD_VERSION"); ok = false; }
+                    if last_comp > 17 { dual_puts(b" BAD_LASTCOMP"); ok = false; }
+                    if off_rsvmap + 16 > off_struct { dual_puts(b" RSVMAP_OVERLAPS_STRUCT"); ok = false; }
+                    if off_struct + sz_struct > totalsize { dual_puts(b" STRUCT_OOB"); ok = false; }
+                    if off_strings + sz_strings > totalsize { dual_puts(b" STRINGS_OOB"); ok = false; }
+                    if off_struct % 4 != 0 { dual_puts(b" STRUCT_UNALIGNED"); ok = false; }
+                    if off_rsvmap % 8 != 0 { dual_puts(b" RSVMAP_UNALIGNED"); ok = false; }
+                    if (totalsize as usize) != h.dtb_len { dual_puts(b" TOTALSIZE_NE_DTB_LEN"); ok = false; }
+                    if ok { dual_puts(b" PASS"); }
+                    dual_puts(b"\n[android] initrd: start=");
+                    dual_puthex64(h.layout.ramdisk_pa);
+                    dual_puts(b" size=");
+                    dual_puthex64(h.layout.ramdisk_size as u64);
                     dual_puts(b"\n");
                 }
                 if h.kernel_decompressed {

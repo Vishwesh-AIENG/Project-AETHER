@@ -255,6 +255,8 @@ mod tests {
             uart_irq_spi: 33,
             cmdline: [0u8; MAX_KERNEL_CMDLINE_LEN],
             cmdline_len: 0,
+            initrd_start: 0,
+            initrd_end:   0,
         };
         cfg.cpu_mpidr[0] = 0;
         cfg

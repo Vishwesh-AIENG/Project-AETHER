@@ -204,6 +204,10 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
         uart_irq_spi: 33,
         cmdline:    [0u8; MAX_KERNEL_CMDLINE_LEN],
         cmdline_len: 0,
+        // Default: no initrd. prepare_android_handoff_at populates these from
+        // the boot.img scan's ramdisk_pa/ramdisk_size when a ramdisk exists.
+        initrd_start: 0,
+        initrd_end:   0,
     };
     // Default kernel cmdline — same string AETHER's BoardConfig.mk emits.
     // `earlycon=pl011,mmio32,0x9000000` enables Linux's earlycon PL011 driver
@@ -277,6 +281,19 @@ pub unsafe fn prepare_android_handoff_at(
     let mut dtb_cfg = default_dtb_config();
     dtb_cfg.memory_base = stage_pa;
     dtb_cfg.memory_size = region_size_out;
+    // A.3: wire the boot.img-staged ramdisk into /chosen so the kernel's
+    // populate_rootfs() finds and unpacks the cpio. layout.ramdisk_pa points
+    // INSIDE the boot.img window (header_pa + 4 KiB + page_round_up(kernel_size)),
+    // which is part of [stage_pa, stage_pa+region_size_out) — the same span the
+    // EPT/NPT identity-maps and the DTB advertises as /memory — so the kernel
+    // sees these PAs as plain conventional RAM and can read the ramdisk in
+    // place (no copy needed). When the kernel was gzip-decompressed above the
+    // DTB, layout.kernel_pa moves but ramdisk_pa stays in the boot.img window;
+    // we deliberately do NOT re-derive ramdisk position from the new kernel_pa.
+    if layout.ramdisk_size > 0 {
+        dtb_cfg.initrd_start = layout.ramdisk_pa;
+        dtb_cfg.initrd_end   = layout.ramdisk_pa + layout.ramdisk_size as u64;
+    }
     let dtb_buf: &mut [u8] = unsafe {
         core::slice::from_raw_parts_mut(dtb_pa as *mut u8, dtb_size as usize)
     };

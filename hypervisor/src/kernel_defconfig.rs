@@ -1191,6 +1191,8 @@ mod tests {
             uart_irq_spi: 33,
             cmdline:      [0u8; MAX_KERNEL_CMDLINE_LEN],
             cmdline_len:  0,
+            initrd_start: 0,
+            initrd_end:   0,
         };
         // Minimal cmdline.
         let cl = b"console=ttyAMA0 androidboot.hardware=aether";

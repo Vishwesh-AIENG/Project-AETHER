@@ -718,6 +718,15 @@ pub struct AndroidDtbConfig {
     pub cmdline: [u8; MAX_KERNEL_CMDLINE_LEN],
     /// Length of the valid portion of cmdline (not including null terminator).
     pub cmdline_len: usize,
+    /// Physical address of the initial ramdisk (initrd). 0 = no initrd.
+    /// When non-zero, build_android_dtb emits `linux,initrd-start` +
+    /// `linux,initrd-end` in /chosen so the kernel's initramfs loader picks
+    /// up the bootloader-staged ramdisk (CONFIG_BLK_DEV_INITRD path).
+    /// Without these properties the kernel boots without an initramfs and
+    /// fails to find /init unless a real rootfs block device is mounted.
+    pub initrd_start: u64,
+    /// Exclusive end PA of the ramdisk (= initrd_start + ramdisk_size).
+    pub initrd_end: u64,
 }
 
 impl AndroidDtbConfig {
@@ -904,6 +913,19 @@ pub fn build_android_dtb(
     b.begin_node(b"chosen")?;
     // bootargs: kernel command line (null-terminated string property).
     b.prop_str(b"bootargs", &cfg.cmdline[..cfg.cmdline_len])?;
+
+    // linux,initrd-{start,end}: tells the kernel where the bootloader staged
+    // the ramdisk. Without these, drivers/of/fdt.c::early_init_dt_check_for_initrd
+    // returns silently and free_initrd_mem() leaves initrd_start/end zero, so
+    // populate_rootfs() can't unpack the cpio and /init is never extracted —
+    // the kernel then panics "No working init found" trying to mount a real
+    // root from /dev. Emit two big-endian cells (u64) — Linux's of_read_number
+    // picks the cell count from the property length. (Modern arm64 GKI ignores
+    // /chosen #address-cells for these specifically and treats len as cell width.)
+    if cfg.initrd_start != 0 && cfg.initrd_end > cfg.initrd_start {
+        b.prop_u64(b"linux,initrd-start", cfg.initrd_start)?;
+        b.prop_u64(b"linux,initrd-end",   cfg.initrd_end)?;
+    }
 
     // stdout-path: points to the serial node.
     {
