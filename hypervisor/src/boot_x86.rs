@@ -3424,7 +3424,15 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
             match enter_translated_block_from_npf(pc) {
                 Some(_next) => {
                     let post_flt = *ptr::addr_of!(aether_translator::runtime::mmu::MMU_FAULT_COUNT);
-                    if !first_live_flt_logged && post_flt > pre_flt && pre_flt >= live_flt_baseline {
+                    // Phase B: drop the baseline filter so the FIRST block whose
+                    // fault count climbs is logged unconditionally. The proofs
+                    // (M3 etc.) intentionally trigger faults and raise the
+                    // baseline above 0, suppressing this print on the live
+                    // path. To find what kernel code writes to PA 0x140040000
+                    // we need the block PC regardless of how many proof
+                    // faults preceded it.
+                    let _ = live_flt_baseline;
+                    if !first_live_flt_logged && post_flt > pre_flt {
                         first_live_flt_logged = true;
                         dual_puts(b"[mmu] FIRST LIVE FAULT block_pc=");
                         dual_puthex64(pc);
