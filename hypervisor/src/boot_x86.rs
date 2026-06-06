@@ -3773,6 +3773,41 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                 }
             };
             if !block_is_safe_to_enter(bva, blen) {
+                // BRK (ARMv8 BRK imm16 = 0xD4_20_xx_xx) — kernel BUG_BRK_IMM
+                // class (0x800-0x8FF), KASAN traps, etc. Lifter lowers BRK to
+                // UD2 (correct per spec — it must trap), but UD2 halts the
+                // dispatcher. Instead inject a synchronous EL1 exception
+                // (EC = 0x3C, BRK from current EL) so the kernel's BUG()
+                // handler runs and tells us what assertion fired. Lets the
+                // boot continue past kernel asserts of survivable severity.
+                //
+                // Encoding: 0xD4_20_iiii_LL00 -> mask 0xFFE0_001F == 0xD420_0000.
+                let is_brk = (insn0 & 0xFFE0_001F) == 0xD420_0000;
+                if is_brk {
+                    let imm16 = ((insn0 >> 5) & 0xFFFF) as u64;
+                    let esr = (0x3Cu64 << 26) | imm16;
+                    dual_puts(b"[exc] BRK -> sync EL1 inject pc=");
+                    dual_puthex64(pc);
+                    dual_puts(b" imm16=");
+                    dual_puthex64(imm16);
+                    dual_puts(b" iter=");
+                    dual_puthex64(iter);
+                    dual_puts(b"\n");
+                    // Manually inject. The runtime exceptions::inject() wants
+                    // a &mut [u64] ctx slice; NPF_GUEST_CTX is a sized array,
+                    // turn it into a mutable slice.
+                    let ctx_slice: &mut [u64] = &mut *ptr::addr_of_mut!(NPF_GUEST_CTX);
+                    aether_translator::runtime::exceptions::inject(
+                        ctx_slice,
+                        aether_translator::runtime::exceptions::ExceptionKind::Sync,
+                        esr,
+                        0, // FAR_EL1 not architecturally set by BRK
+                        false,
+                    );
+                    // Don't enter the UD2'd block; the dispatcher will pick
+                    // up the new PC (VBAR + 0x200 for EL1h sync) next iter.
+                    continue;
+                }
                 dual_puts(b"[dbt] block UNSAFE (UD2 / unsupported op) pc=");
                 dual_puthex64(pc);
                 dual_puts(b" iter=");
