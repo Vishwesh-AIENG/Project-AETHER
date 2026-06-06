@@ -3014,9 +3014,23 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         // Widen to the WHOLE TTBR1 kernel-VA half (bit-55 set region) so we
         // catch the first high-VA walks the kernel does — fixmap might be at
         // any offset, and the previous narrow top-256-MiB window caught zero.
+        // Trace ALL VAs (TTBR0 + TTBR1) — the kernel's fdt_check_header may
+        // read the DTB through the boot-time TTBR0 identity map (low VA ==
+        // PA) rather than via TTBR1 fixmap. Ring keeps the freshest 16.
         aether_translator::runtime::mmu::aether_mmu_trace_range(
-            0xFFFF_FF80_0000_0000,
+            0x0000_0000_0000_1000,
             0xFFFF_FFFF_FFFF_F000,
+        );
+        // Ring-buffer mode: kernel reaches its DTB fixmap read LATE; one-shot
+        // capacity-16 trace fills up with early kernel-text walks long before
+        // the interesting fixmap walk. Ring keeps the LAST 16 high-VA walks
+        // so the dump at exit contains the freshest traffic, which should
+        // include the DTB read (fdt_check_header) that triggers the panic.
+        aether_translator::runtime::mmu::aether_mmu_trace_set_ring(true);
+        // Also probe the DTB PA region directly — any walk whose final PA
+        // lands here is the kernel reading the device tree.
+        aether_translator::runtime::mmu::aether_mmu_trace_pa_range(
+            0x7BE0_0000, 0x7C00_0000,
         );
 
         // Seed the live guest register file: x0..x30 (slots 0..30), SP (slot
@@ -3422,6 +3436,61 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
             }
         }
 
+        // Final FIXMAP-TRACE dump before halt: ring-mode keeps the LAST 16
+        // high-VA walks; on a silent-panic exit the freshest 16 walks should
+        // include the fdt_check_header read whose result triggers the panic.
+        {
+            let n = *ptr::addr_of!(
+                aether_translator::runtime::mmu::MMU_TRACE_COUNT
+            ) as usize;
+            let max = aether_translator::runtime::mmu::MMU_TRACE_MAX;
+            let take = if n < max { n } else { max };
+            dual_puts(b"[mmu] DTB-PA hits=");
+            dual_puthex64(*ptr::addr_of!(
+                aether_translator::runtime::mmu::MMU_PA_HIT_COUNT
+            ) as u64);
+            dual_puts(b" first_va=");
+            dual_puthex64(*ptr::addr_of!(
+                aether_translator::runtime::mmu::MMU_PA_HIT_FIRST_VA
+            ));
+            dual_puts(b"\n");
+            dual_puts(b"[mmu] FINAL FIXMAP-TRACE (last ");
+            dual_puthex64(take as u64);
+            dual_puts(b" of ");
+            dual_puthex64(n as u64);
+            dual_puts(b" total)\n");
+            let mut i = 0usize;
+            while i < take {
+                dual_puts(b"[mmu]   #");
+                dual_puthex64(i as u64);
+                dual_puts(b" va=");
+                dual_puthex64((*ptr::addr_of!(
+                    aether_translator::runtime::mmu::MMU_TRACE_VA
+                ))[i]);
+                dual_puts(b" pa=");
+                dual_puthex64((*ptr::addr_of!(
+                    aether_translator::runtime::mmu::MMU_TRACE_PA
+                ))[i]);
+                dual_puts(b" d1=");
+                dual_puthex64((*ptr::addr_of!(
+                    aether_translator::runtime::mmu::MMU_TRACE_DESC1
+                ))[i]);
+                dual_puts(b" d2=");
+                dual_puthex64((*ptr::addr_of!(
+                    aether_translator::runtime::mmu::MMU_TRACE_DESC2
+                ))[i]);
+                dual_puts(b" d3=");
+                dual_puthex64((*ptr::addr_of!(
+                    aether_translator::runtime::mmu::MMU_TRACE_DESC3
+                ))[i]);
+                dual_puts(b" st=");
+                dual_puthex64((*ptr::addr_of!(
+                    aether_translator::runtime::mmu::MMU_TRACE_STATUS
+                ))[i] as u64);
+                dual_puts(b"\n");
+                i += 1;
+            }
+        }
         dual_puts(b"[x86] host-mode dispatch loop exited. Halting.\n");
         // Guaranteed-readable post-mortem: clear the framebuffer (which may have
         // scrolled the decisive line off-screen) and paint one concise box. COM1

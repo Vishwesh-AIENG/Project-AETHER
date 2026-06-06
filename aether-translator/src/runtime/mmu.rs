@@ -299,6 +299,24 @@ fn esr_with_ec(esr: u64, ec: u64) -> u64 {
 /// `sysregs` is the full guest context slice (length >= `CTX_U64S`); sysreg
 /// slots live at `SYSREG_SLOT0 + idx`.
 #[allow(unsafe_code)]
+#[allow(unsafe_code)]
+fn pa_hit_check(va: u64, pa: u64) {
+    // SAFETY: EL2-private, single-vCPU diagnostic counters.
+    unsafe {
+        let lo = *core::ptr::addr_of!(MMU_TRACE_PA_LO);
+        let hi = *core::ptr::addr_of!(MMU_TRACE_PA_HI);
+        if lo < hi && pa >= lo && pa < hi {
+            let c = core::ptr::addr_of_mut!(MMU_PA_HIT_COUNT);
+            let prev = *c;
+            *c = prev.saturating_add(1);
+            if prev == 0 {
+                *core::ptr::addr_of_mut!(MMU_PA_HIT_FIRST_VA) = va;
+            }
+        }
+    }
+}
+
+#[allow(unsafe_code)]
 pub fn walk(sysregs: &[u64], va: u64, is_write: bool) -> Result<(u64, bool), (FaultKind, u8)> {
     let va_high = (va >> 55) & 1 == 1;
     let ttbr = if va_high {
@@ -432,6 +450,7 @@ fn finish_leaf(
     if !in_window(pa) && !is_mmio(pa) {
         return Err((FaultKind::Translation, level));
     }
+    pa_hit_check(va, pa);
     Ok((pa, writable))
 }
 
@@ -519,6 +538,24 @@ pub const MMU_TRACE_MAX: usize = 16;
 pub static mut MMU_TRACE_LO: u64 = u64::MAX;
 pub static mut MMU_TRACE_HI: u64 = 0;
 pub static mut MMU_TRACE_COUNT: u32 = 0;
+/// PA-range filter for the walk tracer (post-resolution): if `lo < hi`, any
+/// walk whose final PA falls in `[lo, hi)` is captured (overrides VA-range).
+/// Used to grab the FIRST walk targeting a known PA (e.g. the DTB), no matter
+/// what kernel VA gets used.
+pub static mut MMU_TRACE_PA_LO: u64 = u64::MAX;
+pub static mut MMU_TRACE_PA_HI: u64 = 0;
+/// True = ring-buffer mode: when the trace fills, overwrite the oldest slot
+/// (so the LAST MMU_TRACE_MAX walks in the configured range are always
+/// available). False (default) = one-shot: stop capturing once full.
+pub static mut MMU_TRACE_RING: bool = false;
+
+/// Counter of walks whose final PA fell in `[MMU_TRACE_PA_LO, MMU_TRACE_PA_HI)`.
+/// Incremented at the bottom of `finish_leaf` regardless of trace capacity, so
+/// the hypervisor can confirm "did the kernel EVER successfully read the DTB?"
+/// even when the ring buffer has cycled past the actual DTB walks.
+pub static mut MMU_PA_HIT_COUNT: u32 = 0;
+/// VA of the first walk that produced a PA in the configured PA range.
+pub static mut MMU_PA_HIT_FIRST_VA: u64 = 0;
 pub static mut MMU_TRACE_VA: [u64; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
 pub static mut MMU_TRACE_TTBR: [u64; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
 pub static mut MMU_TRACE_START: [u8; MMU_TRACE_MAX] = [0; MMU_TRACE_MAX];
@@ -541,21 +578,63 @@ pub extern "C" fn aether_mmu_trace_range(lo: u64, hi: u64) {
     }
 }
 
+/// Configure the PA range filter (post-resolution) for the walk tracer.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_trace_pa_range(lo: u64, hi: u64) {
+    // SAFETY: EL2-private, single-vCPU.
+    unsafe {
+        *core::ptr::addr_of_mut!(MMU_TRACE_PA_LO) = lo;
+        *core::ptr::addr_of_mut!(MMU_TRACE_PA_HI) = hi;
+    }
+}
+
+/// Enable ring-buffer mode (overwrite oldest when full).
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_trace_set_ring(enable: bool) {
+    // SAFETY: EL2-private, single-vCPU.
+    unsafe { *core::ptr::addr_of_mut!(MMU_TRACE_RING) = enable; }
+}
+
 /// Return the next free trace slot if `va` is in-range and capacity remains.
+/// In ring-buffer mode, capacity is unbounded — the slot index wraps mod
+/// MMU_TRACE_MAX so the newest 16 walks overwrite the oldest.
 #[allow(unsafe_code)]
 fn trace_alloc(va: u64) -> Option<usize> {
     // SAFETY: EL2-private, single-vCPU.
     unsafe {
         let lo = *core::ptr::addr_of!(MMU_TRACE_LO);
         let hi = *core::ptr::addr_of!(MMU_TRACE_HI);
-        if lo >= hi || va < lo || va >= hi {
+        let in_va_range = lo < hi && va >= lo && va < hi;
+        if !in_va_range {
             return None;
         }
         let n = *core::ptr::addr_of!(MMU_TRACE_COUNT) as usize;
-        if n >= MMU_TRACE_MAX {
+        let ring = *core::ptr::addr_of!(MMU_TRACE_RING);
+        if n >= MMU_TRACE_MAX && !ring {
             return None;
         }
-        Some(n)
+        Some(n % MMU_TRACE_MAX)
+    }
+}
+
+/// PA-range-only allocation: used by `finish_leaf` callers after the PA is
+/// computed, so we can capture walks whose VA we don't know to filter on but
+/// whose final PA is interesting (e.g. the DTB region).
+#[allow(unsafe_code)]
+fn trace_alloc_for_pa(pa: u64) -> Option<usize> {
+    // SAFETY: EL2-private, single-vCPU.
+    unsafe {
+        let lo = *core::ptr::addr_of!(MMU_TRACE_PA_LO);
+        let hi = *core::ptr::addr_of!(MMU_TRACE_PA_HI);
+        if lo >= hi || pa < lo || pa >= hi {
+            return None;
+        }
+        let n = *core::ptr::addr_of!(MMU_TRACE_COUNT) as usize;
+        let ring = *core::ptr::addr_of!(MMU_TRACE_RING);
+        if n >= MMU_TRACE_MAX && !ring {
+            return None;
+        }
+        Some(n % MMU_TRACE_MAX)
     }
 }
 
