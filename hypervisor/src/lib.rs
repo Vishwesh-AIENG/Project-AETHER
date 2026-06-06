@@ -31,7 +31,11 @@ mod global_alloc {
     /// expansion is invisible in the PE32+ file size but the UEFI loader
     /// reserves 32 MiB of conventional memory at image load — fine on any
     /// desktop with ≥ 4 GiB RAM.
-    const HEAP_SIZE: usize = 32 * 1024 * 1024;
+    // Phase D: kernel boot translates many millions of distinct blocks before
+    // reaching userspace. 32 MiB exhausted at ~8.8M blocks (OOM "1536 bytes
+    // failed"). Bumped to 256 MiB — that covers JIT cache + block-cache hash
+    // expansion + transient buffers through Android userspace launch.
+    const HEAP_SIZE: usize = 256 * 1024 * 1024;
 
     #[repr(align(16))]
     struct AlignedHeap([u8; HEAP_SIZE]);

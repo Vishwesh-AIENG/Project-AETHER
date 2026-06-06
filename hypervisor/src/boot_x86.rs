@@ -3333,6 +3333,53 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puts(b"\n");
                     }
                 }
+                // Phase-D CRC32 fault diagnostics. The kernel hits a translation
+                // fault on a CRC32 table access; x8 should be the table base.
+                // Hook the CRC function entry (0xffffffc0_086cb014 ADRP x8) and
+                // the fault block start (0xffffffc0_086cb490) to compare x8.
+                {
+                    static mut CRC_ENTRY_HITS: u32 = 0;
+                    static mut CRC_FAULT_HITS: u32 = 0;
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    if *ptr::addr_of!(CRC_ENTRY_HITS) < 4
+                       && pc == 0xFFFF_FFC0_086C_B014
+                    {
+                        *ptr::addr_of_mut!(CRC_ENTRY_HITS) += 1;
+                        dual_puts(b"[dbg] CRC ENTRY hit=");
+                        dual_puthex64(*ptr::addr_of!(CRC_ENTRY_HITS) as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" x0=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b" x1=");
+                        dual_puthex64(g[1]);
+                        dual_puts(b" x2=");
+                        dual_puthex64(g[2]);
+                        dual_puts(b" lr=");
+                        dual_puthex64(g[30]);
+                        dual_puts(b"\n");
+                    }
+                    if *ptr::addr_of!(CRC_FAULT_HITS) < 4
+                       && pc == 0xFFFF_FFC0_086C_B490
+                    {
+                        *ptr::addr_of_mut!(CRC_FAULT_HITS) += 1;
+                        dual_puts(b"[dbg] CRC FAULT-BLOCK hit=");
+                        dual_puthex64(*ptr::addr_of!(CRC_FAULT_HITS) as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" x8(table)=");
+                        dual_puthex64(g[8]);
+                        dual_puts(b" x10=");
+                        dual_puthex64(g[10]);
+                        dual_puts(b" x11=");
+                        dual_puthex64(g[11]);
+                        dual_puts(b" x12=");
+                        dual_puthex64(g[12]);
+                        dual_puts(b" lr=");
+                        dual_puthex64(g[30]);
+                        dual_puts(b"\n");
+                    }
+                }
                 // Phase-C step 2: helper fdt_offset_ptr_ + jump-table dispatch
                 // chain hooks. Multi-fire (counter, max 8 prints each) so the
                 // SECOND helper invocation from path-0 (0x7d9e88c8 path =

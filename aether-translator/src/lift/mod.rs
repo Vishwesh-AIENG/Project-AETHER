@@ -496,12 +496,62 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             }
             cx.write_reg(rd, v_res, sf);
         }
-        AddSubExtReg { sf, rd, rn, rm, extend: _, imm3: _, sub, set_flags } => {
-            // Approximation: model as plain add/sub (the extend/imm3 details
-            // are refined in Phase B alongside Sext/Zext ops).
+        AddSubExtReg { sf, rd, rn, rm, extend, imm3, sub, set_flags } => {
+            // ADD/SUB (extended register): Rd = Rn ± (extend(Rm) << imm3).
+            //
+            // Per ARMv8 spec C6.2.6: Rm is read in the WIDTH selected by the
+            // extend kind. UXTB/UXTH/UXTW/SXTB/SXTH/SXTW take low 32 (Wm);
+            // UXTX/SXTX take all 64 (Xm). Then extend to register width.
+            // Then shift left by imm3 (0..4). Then add/sub.
+            //
+            // Phase-D bug: ignoring the extend kind AND imm3 made
+            // `add x17, x8, w17, uxtw #2` lift as `add x17, x8, x17`, so
+            // x17 was treated as the full 64-bit value (with whatever upper
+            // garbage) and the *4 was dropped. In the kernel's CRC32 inner
+            // loop that produced wild high-VA loads -> translation fault ->
+            // do_data_abort -> BUG().
+            use crate::decoder::ExtendKind;
+            let (rm_width, signed): (u8, bool) = match extend {
+                ExtendKind::Uxtb => (8, false),
+                ExtendKind::Uxth => (16, false),
+                ExtendKind::Uxtw => (32, false),
+                ExtendKind::Uxtx => (64, false),
+                ExtendKind::Sxtb => (8, true),
+                ExtendKind::Sxth => (16, true),
+                ExtendKind::Sxtw => (32, true),
+                ExtendKind::Sxtx => (64, true),
+            };
+            // Read Rm as W (low 32) when extend is sub-32; otherwise full X.
+            // The W-read covers UXTB/UXTH/UXTW/SXTB/SXTH/SXTW (the common
+            // ones); UXTX/SXTX read full 64.
+            let v_rm_raw = cx.read_reg(rm, rm_width >= 64);
+            let dest_64 = sf; // sf=true: 64-bit Rd; sf=false: 32-bit Rd
+            let to_bits: u8 = if dest_64 { 64 } else { 32 };
+            // Extract+extend Rm to the destination width.
+            let v_rm_ext = if rm_width >= to_bits {
+                // No extension needed (the operand is already wider than dst);
+                // truncation to dst-width happens implicitly in the add.
+                v_rm_raw
+            } else {
+                let v = cx.val(if dest_64 { IrValueKind::I64 } else { IrValueKind::I32 });
+                if signed {
+                    cx.push(IrOp::Sext { dst: v, a: v_rm_raw, from_bits: rm_width, to_bits });
+                } else {
+                    cx.push(IrOp::Zext { dst: v, a: v_rm_raw, from_bits: rm_width, to_bits });
+                }
+                v
+            };
+            // Apply imm3 shift (LSL 0..4).
+            let v_rm = if imm3 == 0 {
+                v_rm_ext
+            } else {
+                let v_amt = cx.const_i64(imm3 as i64);
+                let v = cx.val(if dest_64 { IrValueKind::I64 } else { IrValueKind::I32 });
+                cx.push(IrOp::Shl { dst: v, a: v_rm_ext, b: v_amt });
+                v
+            };
             let v_rn = cx.read_reg_or_sp(rn, sf, !set_flags);
-            let v_rm = cx.read_reg(rm, sf);
-            let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
+            let v_res = cx.val(if dest_64 { IrValueKind::I64 } else { IrValueKind::I32 });
             if sub {
                 if set_flags {
                     let f = cx.flags();

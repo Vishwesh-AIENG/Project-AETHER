@@ -1276,8 +1276,9 @@ impl IntLower {
             // follow with mov_rr32 so the high 32 are zeroed per ARM W-reg
             // semantics (x86 32-bit moves zero-extend).
             Sext { dst, a, from_bits, to_bits } => {
-                let rd = Self::gpr(alloc, *dst);
-                let ra = Self::gpr(alloc, *a);
+                // Spill-safe: route operands through src_in/dest_work.
+                let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
+                let (rd, sp) = Self::dest_work(alloc, *dst, SCRATCH0);
                 match (*from_bits, *to_bits) {
                     (8, 64)  => enc.emit_movsx_r64_r8(rd, ra),
                     (16, 64) => enc.emit_movsx_r64_r16(rd, ra),
@@ -1294,10 +1295,11 @@ impl IntLower {
                     }
                     _        => { if rd != ra { enc.emit_mov_rr64(rd, ra); } }
                 }
+                Self::store_dest(alloc, enc, *dst, rd, sp);
             }
             Zext { dst, a, from_bits, to_bits } => {
-                let rd = Self::gpr(alloc, *dst);
-                let ra = Self::gpr(alloc, *a);
+                let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
+                let (rd, sp) = Self::dest_work(alloc, *dst, SCRATCH0);
                 match (*from_bits, *to_bits) {
                     (8, 64)  => enc.emit_movzx_r64_r8(rd, ra),
                     (16, 64) => enc.emit_movzx_r64_r16(rd, ra),
@@ -1310,10 +1312,11 @@ impl IntLower {
                     }
                     _        => { if rd != ra { enc.emit_mov_rr64(rd, ra); } }
                 }
+                Self::store_dest(alloc, enc, *dst, rd, sp);
             }
             Trunc { dst, a, to_bits } => {
-                let rd = Self::gpr(alloc, *dst);
-                let ra = Self::gpr(alloc, *a);
+                let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
+                let (rd, sp) = Self::dest_work(alloc, *dst, SCRATCH0);
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 // Mask to the target width via AND.
                 match *to_bits {
@@ -1322,6 +1325,7 @@ impl IntLower {
                     32 => enc.emit_mov_rr32(rd, rd), // zero upper 32 bits
                     _  => {}
                 }
+                Self::store_dest(alloc, enc, *dst, rd, sp);
             }
 
             // ── Memory (M4b-2b: guest VA → host PA via aether_mmu_xlate) ──────
