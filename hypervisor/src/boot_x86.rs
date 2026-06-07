@@ -1097,7 +1097,19 @@ pub unsafe fn boot_x86_hypervisor(
         // board may not be conventional memory. AllocatePages with
         // MaxAddress < 4 GiB ensures the result is reachable from both
         // pre-EBS firmware page tables and our post-EBS identity NPT.
-        const STAGE_PAGES: usize = (STAGED_BOOT_IMG_SIZE / 4096) as usize; // 16384
+        //
+        // Phase-F: keep this at the boot.img staging size (64 MiB). We
+        // attempted to ask for the full HANDOFF_REGION_SIZE (1 GiB) so
+        // the DTB-advertised `/memory` would be 100% backed, but that
+        // triggered an unrelated register-spill UD2 in
+        // create_kpti_ng_temp_pgd at iter ~9M (the kernel's much larger
+        // code surface when seeing real 1 GiB exceeded our lower_int
+        // spill capacity). With the smaller UEFI allocation,
+        // probe_handoff_writable_extent finds the contiguous writable
+        // prefix and truncates the advertised range to it (~146 MiB on
+        // QEMU/OVMF), keeping the kernel inside what our translator can
+        // actually handle.
+        const STAGE_PAGES: usize = (STAGED_BOOT_IMG_SIZE / 4096) as usize;
         const MAX_PA_4GIB: u64 = 0xFFFF_FFFF;
         // SAFETY: image_handle + system_table came from efi_main and are
         // still valid before ExitBootServices.
@@ -1246,11 +1258,19 @@ pub unsafe fn boot_x86_hypervisor(
     let (stage_pa, stage_size) = {
         let alloc_pa = unsafe { STAGED_ALLOC_PA };
         if alloc_pa != 0 {
-            // UEFI gave us at least STAGED_BOOT_IMG_SIZE bytes at this PA.
-            (alloc_pa, crate::android_handoff::STAGED_BOOT_IMG_SIZE)
+            // UEFI gave us at least STAGED_BOOT_IMG_SIZE bytes; the
+            // KERNEL_WORKING_RAM extension lives in the contiguous
+            // span past the DTB. probe_handoff_writable_extent
+            // walks the FULL HANDOFF_REGION_SIZE below to find the
+            // genuinely-backed prefix; even though UEFI only allocated
+            // STAGED_BOOT_IMG_SIZE pages explicitly, the adjacent
+            // pages are often still conventional RAM (UEFI just
+            // hadn't tagged them as ours), and the probe accepts
+            // anything that round-trips a magic write/read.
+            (alloc_pa, crate::android_handoff::HANDOFF_REGION_SIZE)
         } else {
             (crate::android_handoff::STAGED_BOOT_IMG_PA,
-             crate::android_handoff::STAGED_BOOT_IMG_SIZE)
+             crate::android_handoff::HANDOFF_REGION_SIZE)
         }
     };
     // Dump first 16 bytes at the chosen PA so the post-mortem photo shows
@@ -4320,7 +4340,38 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                     // up the new PC (VBAR + 0x200 for EL1h sync) next iter.
                     continue;
                 }
-                dual_puts(b"[dbt] block UNSAFE (UD2 / unsupported op) pc=");
+                // Phase-F: instead of halting on UNSAFE (register-spill in
+                // lower_int → UD2), inject an Undefined Instruction
+                // exception (EC=0, IL=1). The kernel handles undef in
+                // do_undefinstr → die or fixup; in the worst case it
+                // kernel-panics, but at least subsequent boot still runs
+                // (the dispatcher's BRK path then catches the panic
+                // BRK and ERETs cleanly). Bounded by an UNSAFE counter so
+                // a true runaway loop still halts.
+                static mut UNSAFE_COUNT: u32 = 0;
+                let cur_unsafe = *ptr::addr_of_mut!(UNSAFE_COUNT);
+                *ptr::addr_of_mut!(UNSAFE_COUNT) = cur_unsafe.saturating_add(1);
+                if cur_unsafe < 32 {
+                    dual_puts(b"[dbt] block UNSAFE -> inject undef at pc=");
+                    dual_puthex64(pc);
+                    dual_puts(b" iter=");
+                    dual_puthex64(iter);
+                    dual_puts(b" cnt=");
+                    dual_puthex64(cur_unsafe as u64);
+                    dual_puts(b"\n");
+                    // EC=0 (Unknown / Undefined), IL=1 (32-bit insn)
+                    let esr = 0u64 | (1u64 << 25);
+                    let ctx_slice: &mut [u64] = &mut *ptr::addr_of_mut!(NPF_GUEST_CTX);
+                    aether_translator::runtime::exceptions::inject(
+                        ctx_slice,
+                        aether_translator::runtime::exceptions::ExceptionKind::Sync,
+                        esr,
+                        0,
+                        false,
+                    );
+                    continue;
+                }
+                dual_puts(b"[dbt] block UNSAFE storm (32 hits) -- halting pc=");
                 dual_puthex64(pc);
                 dual_puts(b" iter=");
                 dual_puthex64(iter);

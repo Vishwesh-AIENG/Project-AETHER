@@ -1362,10 +1362,17 @@ impl IntLower {
             }
             Load { dst, addr, ty, .. } => {
                 let is_fp = matches!(ty, LoadTy::F32 | LoadTy::F64 | LoadTy::Vec128);
-                if Self::is_spilled(alloc, *addr) || (!is_fp && Self::is_spilled(alloc, *dst)) || is_fp {
+                if is_fp {
                     enc.emit_ud2();
                 } else {
-                    let ra = Self::gpr(alloc, *addr);
+                    // Phase-F: handle spilled addr / dst. Spilled addr → load
+                    // from spill slot into SCRATCH0 before the MMU call (call
+                    // copies SCRATCH0→RDX, then RCX/R8/R9 setup doesn't
+                    // clobber SCRATCH0 until after copy). Spilled dst → load
+                    // into SCRATCH1 then store to spill slot. RAX (=SCRATCH0)
+                    // holds host PA after the call, so it MUST be used as
+                    // the [base] for the actual load.
+                    let ra = Self::src_in(alloc, enc, *addr, SCRATCH0);
                     let size: i32 = match ty {
                         LoadTy::U8 | LoadTy::I8 => 1,
                         LoadTy::U16 | LoadTy::I16 => 2,
@@ -1373,18 +1380,22 @@ impl IntLower {
                         _ => 8,
                     };
                     Self::emit_mmu_xlate_call(enc, ra, false, size); // RAX = host PA
-                    let rd_gpr = Self::gpr(alloc, *dst);
+                    // Pick a dest register that isn't SCRATCH0 (=RAX, the PA).
+                    let (rd_final, sp) = Self::dest_work(alloc, *dst, SCRATCH1);
+                    let rd_work = if rd_final == SCRATCH0 { SCRATCH1 } else { rd_final };
                     match ty {
-                        LoadTy::U8  => enc.emit_movzx_r64_mem8(rd_gpr, SCRATCH0, 0),
-                        LoadTy::I8  => enc.emit_movsx_r64_mem8(rd_gpr, SCRATCH0, 0),
-                        LoadTy::U16 => enc.emit_movzx_r64_mem16(rd_gpr, SCRATCH0, 0),
-                        LoadTy::I16 => enc.emit_movsx_r64_mem16(rd_gpr, SCRATCH0, 0),
-                        LoadTy::U32 => enc.emit_mov_r32_mem(rd_gpr, SCRATCH0, 0),
-                        LoadTy::I32 => enc.emit_movsxd_r64_mem32(rd_gpr, SCRATCH0, 0),
-                        LoadTy::U64 => enc.emit_mov_r64_mem(rd_gpr, SCRATCH0, 0),
+                        LoadTy::U8  => enc.emit_movzx_r64_mem8(rd_work, SCRATCH0, 0),
+                        LoadTy::I8  => enc.emit_movsx_r64_mem8(rd_work, SCRATCH0, 0),
+                        LoadTy::U16 => enc.emit_movzx_r64_mem16(rd_work, SCRATCH0, 0),
+                        LoadTy::I16 => enc.emit_movsx_r64_mem16(rd_work, SCRATCH0, 0),
+                        LoadTy::U32 => enc.emit_mov_r32_mem(rd_work, SCRATCH0, 0),
+                        LoadTy::I32 => enc.emit_movsxd_r64_mem32(rd_work, SCRATCH0, 0),
+                        LoadTy::U64 => enc.emit_mov_r64_mem(rd_work, SCRATCH0, 0),
                         // FP handled by the is_fp UD2 guard above.
                         LoadTy::F32 | LoadTy::F64 | LoadTy::Vec128 => enc.emit_ud2(),
                     }
+                    if rd_work != rd_final { enc.emit_mov_rr64(rd_final, rd_work); }
+                    Self::store_dest(alloc, enc, *dst, rd_final, sp);
                 }
             }
             // STR Q (128-bit) — M4b-6 ctx-template FPR store. lift emits this as
@@ -1404,21 +1415,22 @@ impl IntLower {
             }
             Store { val, addr, ty, .. } => {
                 let is_fp = matches!(ty, StoreTy::F32 | StoreTy::F64 | StoreTy::Vec128);
-                if Self::is_spilled(alloc, *addr) || (!is_fp && Self::is_spilled(alloc, *val)) || is_fp {
+                if is_fp {
                     enc.emit_ud2();
                 } else {
-                    let ra = Self::gpr(alloc, *addr);
-                    let rv = Self::gpr(alloc, *val);
+                    // Phase-F: handle spilled addr/val by loading them into
+                    // scratch regs before the runtime CALL. emit_mmu_store_call
+                    // expects addr in arg-2 (RDX) and val in arg-3 (R8) per
+                    // the Win64 ABI; both copies happen after we materialize
+                    // the spilled values into SCRATCH0/SCRATCH1.
+                    let ra = Self::src_in(alloc, enc, *addr, SCRATCH0);
+                    let rv = Self::src_in(alloc, enc, *val, SCRATCH1);
                     let size: i32 = match ty {
                         StoreTy::U8 => 1,
                         StoreTy::U16 => 2,
                         StoreTy::U32 => 4,
                         _ => 8,
                     };
-                    // M4b-5: single STR routes through aether_mmu_store, which
-                    // performs the store itself — RAM write OR MMIO emulation
-                    // (UART/GIC). No post-call deref: the runtime did the write.
-                    // The value must be in a real GPR (the spill guard above).
                     Self::emit_mmu_store_call(enc, ra, rv, size);
                 }
             }

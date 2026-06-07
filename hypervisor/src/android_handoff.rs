@@ -59,17 +59,19 @@ pub const GUEST_DTB_SIZE: u64 = 2 * 1024 * 1024;
 /// Kernel working RAM extending past boot.img + DTB. Linux init, page
 /// allocations, ramdisk extraction, and early userspace all live here.
 /// The total mapped guest RAM (HANDOFF_REGION_SIZE) is what the DTB
-/// `/memory` node advertises to the kernel. 1 GiB is the minimum that
-/// reaches Android home screen without OOM (Zygote + system_server alone
-/// reserve ~600 MiB).
+/// `/memory` node advertises to the kernel.
 ///
-/// Phase-E: the EFFECTIVE size advertised at runtime is the contiguous
-/// host-writable extent — `probe_handoff_writable_extent` in
-/// boot_x86.rs walks the window pre-handoff (write magic / read-back /
-/// restore) and truncates at the first UEFI-reserved hole. This static
-/// constant remains the upper bound the NPT prepares to map; the runtime
-/// probe shrinks the actually-advertised range down to what host RAM
-/// genuinely backs.
+/// Phase-F: keep this at 1 GiB to maximise what the kernel can see; the
+/// runtime probe (`probe_handoff_writable_extent` in boot_x86.rs)
+/// truncates DOWN to the actually-writable extent reported by UEFI.
+/// With the full HANDOFF_REGION_SIZE UEFI allocation (Phase-F change in
+/// boot_x86.rs) the writable extent IS the full 1 GiB, but kernel
+/// behaviour shifts: a much larger code surface gets translated which
+/// triggers more JIT bump arena pressure AND surfaces a register-spill
+/// UD2 in paging_init's map_mem path (block at 0xffffffc008041834,
+/// inside create_kpti_ng_temp_pgd). Phase F+G need this lower_int
+/// spill fix to land first; until then a smaller advertised range
+/// (256 MiB) avoids the over-pressured block while we wait.
 pub const KERNEL_WORKING_RAM_SIZE: u64 = 1024 * 1024 * 1024
     - STAGED_BOOT_IMG_SIZE
     - GUEST_DTB_SIZE;

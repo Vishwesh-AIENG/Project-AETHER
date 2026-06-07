@@ -37,7 +37,10 @@ mod global_alloc {
     // exhausted at "96 bytes failed" once paging_init completed and the
     // kernel started executing the much larger code surface of SMP /
     // scheduler init (each new translated block consumes a BlockCache
-    // entry that doesn't free).
+    // entry that doesn't free). Phase-F: kept at 1 GiB — UEFI on QEMU
+    // (with MEM=16G) easily satisfies both our 1 GiB BSS and the 1 GiB
+    // AllocatePages handoff request. Trimming heap below 1 GiB shortens
+    // the run dramatically once paging_init's larger code surface lands.
     const HEAP_SIZE: usize = 1024 * 1024 * 1024;
 
     #[repr(align(16))]
@@ -120,6 +123,17 @@ pub mod inflate; // gzip (RFC 1952) + DEFLATE (RFC 1951) decompressor — no_std
                  //       inflated before the DBT dispatcher fetches the entry,
                  //       else the first block lifts the gzip magic 1f 8b 08 00
                  //       instead of ARM64 code. Used by boot_x86_avb.
+pub mod cpio;    // Phase F: newc-format cpio archive parser for Android
+                 //       initramfs unpack. Mirrors the kernel's
+                 //       populate_rootfs (gunzip → cpio walk → file
+                 //       creation). Exposes a `run_phase_f_gates(blob,
+                 //       scratch)` entry that decompresses the raw
+                 //       initramfs payload, walks the cpio entries, and
+                 //       reports four boolean sub-gates: gunzip_succeeded,
+                 //       cpio_well_formed, init_present,
+                 //       init_is_executable_file. `passes()` is true iff
+                 //       all four are. Unit-tested via synthetic round-
+                 //       trip (build cpio → gzip → run gates → verify).
 #[cfg(target_arch = "x86_64")]
 pub mod boot_x86_avb; // Step B of the AT integration plan: Android boot.img
                       //       loader for the x86 tier. Parses v3/v4 header,
