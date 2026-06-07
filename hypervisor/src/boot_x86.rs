@@ -1098,17 +1098,16 @@ pub unsafe fn boot_x86_hypervisor(
         // MaxAddress < 4 GiB ensures the result is reachable from both
         // pre-EBS firmware page tables and our post-EBS identity NPT.
         //
-        // Phase-F: keep this at the boot.img staging size (64 MiB). We
-        // attempted to ask for the full HANDOFF_REGION_SIZE (1 GiB) so
-        // the DTB-advertised `/memory` would be 100% backed, but that
-        // triggered an unrelated register-spill UD2 in
-        // create_kpti_ng_temp_pgd at iter ~9M (the kernel's much larger
-        // code surface when seeing real 1 GiB exceeded our lower_int
-        // spill capacity). With the smaller UEFI allocation,
-        // probe_handoff_writable_extent finds the contiguous writable
-        // prefix and truncates the advertised range to it (~146 MiB on
-        // QEMU/OVMF), keeping the kernel inside what our translator can
-        // actually handle.
+        // Phase-F + Phase-E closeout: kept at boot.img staging size
+        // (64 MiB). Asking UEFI for the full HANDOFF_REGION_SIZE
+        // (1 GiB) competes with our static 1 GiB heap BSS for the
+        // contiguous low-4-GiB span; even on QEMU MEM=16G the
+        // hypervisor.efi loader can't satisfy both, hits the heap
+        // PANIC before the kernel banner. The 64 MiB alloc + probe
+        // truncation gives the kernel a ~146 MiB window, which is
+        // enough through pcpu_embed_first_chunk (the next blocker is
+        // the pcpu_setup_first_chunk BUG_ON, a memory write-doesn't-
+        // persist inside that window — a separate probe-quality issue).
         const STAGE_PAGES: usize = (STAGED_BOOT_IMG_SIZE / 4096) as usize;
         const MAX_PA_4GIB: u64 = 0xFFFF_FFFF;
         // SAFETY: image_handle + system_table came from efi_main and are
@@ -3115,22 +3114,43 @@ unsafe fn host_pt_make_handoff_rw() {
 /// `base_pa..base_pa+size_pa` must be entirely inside `[0, 4 GiB)` and
 /// host-identity-mapped (UEFI does this for low 4 GiB).
 unsafe fn probe_handoff_writable_extent(base_pa: u64, size_pa: u64) -> u64 {
+    // Phase-F: probe MULTIPLE offsets within each 4 KiB page (start,
+    // middle, end). A single write/read at offset 0 missed UEFI holes
+    // where SOME bytes inside the page silently drop writes (observed
+    // in the pcpu_setup_first_chunk BUG: ai->nr_groups field at
+    // page+0x40 read back 0 despite a non-zero kernel write moments
+    // earlier; offset 0 had probed clean). Eight evenly-spaced 8-byte
+    // probes per page catch these without doubling probe time
+    // noticeably.
     const MAGIC: u64 = 0xAE_C0_FFEE_DEAD_BEEFu64;
+    const OFFSETS_IN_PAGE: &[u64] = &[
+        0x000, 0x040, 0x080, 0x200, 0x400, 0x800, 0xC00, 0xFF8,
+    ];
     let mut off: u64 = 0;
     while off < size_pa {
-        let p = (base_pa + off) as *mut u64;
-        unsafe {
-            let saved = core::ptr::read_volatile(p);
-            core::ptr::write_volatile(p, MAGIC);
-            let rb = core::ptr::read_volatile(p);
-            core::ptr::write_volatile(p, saved);
-            if rb != MAGIC {
-                dual_puts(b"[x86] probe: hole at PA 0x");
-                dual_puthex64(base_pa + off);
-                dual_puts(b" (writable extent = 0x");
-                dual_puthex64(off);
-                dual_puts(b")\n");
-                return off;
+        for &within in OFFSETS_IN_PAGE.iter() {
+            let pa = base_pa + off + within;
+            // Avoid touching past the requested span.
+            if (off + within + 8) > size_pa { break; }
+            let p = pa as *mut u64;
+            unsafe {
+                let saved = core::ptr::read_volatile(p);
+                core::ptr::write_volatile(p, MAGIC);
+                let rb = core::ptr::read_volatile(p);
+                core::ptr::write_volatile(p, saved);
+                if rb != MAGIC {
+                    dual_puts(b"[x86] probe: hole at PA 0x");
+                    dual_puthex64(pa);
+                    dual_puts(b" within=0x");
+                    dual_puthex64(within);
+                    dual_puts(b" (writable extent = 0x");
+                    dual_puthex64(off);
+                    dual_puts(b")\n");
+                    // Truncate at the START of this page (off), not at
+                    // the bad offset within it — the kernel mustn't
+                    // allocate any byte of a partially-broken page.
+                    return off;
+                }
             }
         }
         off += 0x1000;
@@ -3264,21 +3284,16 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         // count). Widen to 0xFFFFFFFD_00000000 .. 0xFFFFFFFF_00000000 so
         // we catch every store/load to the suspect region. Trace ring
         // holds the last VMM_TRACE_CAP entries.
-        // Narrow VA trace to the failing PT page (0xFDA38000..0xFDA39000).
+        // Phase-E pcpu BUG investigation: trace VA 0xFFFFFF80_40F12000
+        // (the `ai` struct from the pcpu BUG dump) for one page so we
+        // see every write to ai->nr_groups (offset 0x40 within the
+        // page).
         aether_translator::runtime::mmu::aether_mmu_arm_vmm_trace(
-            0xFFFFFFFD_FDA38000,
-            0xFFFFFFFD_FDA39000,
+            0xFFFFFF80_40F12000,
+            0xFFFFFF80_40F13000,
         );
-        // Trace the L3 PT PAGE ITSELF (0x7DFB0000..0x7DFB1000) so we see
-        // every write the kernel makes to L3[*] slots. We expect to see
-        // writes to L3[0x38] (the entry pointing to PA 0xB7DFF) and
-        // possibly L3[0x39] etc. If L3[0x39] ever gets set to 0xb7dff703
-        // (same PA as L3[0x38]), THAT's why the walker returns PA
-        // 0xb7dff for VA 0xfda39xxx.
-        aether_translator::runtime::mmu::aether_mmu_arm_vmm_pa_trace(
-            0x7DFB0000,
-            0x7DFB1000,
-        );
+        // (PA trace disabled — focus on the VA trace for ai.)
+        aether_translator::runtime::mmu::aether_mmu_arm_vmm_pa_trace(0, 0);
 
         // ── M4b-6 fixmap probe ──────────────────────────────────────────────
         // Arm the walk tracer over the top 256 MiB of the TTBR1 kernel-VA

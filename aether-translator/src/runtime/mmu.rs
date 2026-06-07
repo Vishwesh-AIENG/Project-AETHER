@@ -177,7 +177,7 @@ const MMIO_STORE_OK: u64 = 1;
 // 1 for store. `value` is the actual u64 written (stores) or zero (loads —
 // the load primitive doesn't return value; the trace just records that the
 // xlate happened so PA can be compared with the corresponding store).
-pub const VMM_TRACE_CAP: usize = 128;
+pub const VMM_TRACE_CAP: usize = 1024;
 pub static mut VMM_TRACE_LO: u64 = 0;
 pub static mut VMM_TRACE_HI: u64 = 0;
 pub static mut VMM_TRACE_VA: [u64; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
