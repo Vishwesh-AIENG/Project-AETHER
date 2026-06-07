@@ -125,7 +125,11 @@ def main():
 
     stage_binary()
 
-    mem = os.environ.get("MEM", "1G")
+    # Default 16G: the translator JIT cache lives at PA 0x2_0000_0000 (8 GiB)
+    # and the bump arena at 0x2_0100_0000. With less than ~10 GiB QEMU has
+    # nothing backing those PAs and the JIT path silently corrupts staged
+    # kernel bytes (seen as iter-1 insn=0 UD2). Override via MEM=… if needed.
+    mem = os.environ.get("MEM", "16G")
     cmd = [
         QEMU_BIN,
         "-machine", "q35,accel=tcg",

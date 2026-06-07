@@ -690,9 +690,23 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 order: MemOrder::Relaxed,
             });
         }
-        Ldp { rt1, rt2, sf, signed: _, addr } => {
+        Ldp { rt1, rt2, sf, signed, addr } => {
             let v_addr = cx.lift_addr_mode(&addr, sf);
-            let access = if sf { LoadTy::U64 } else { LoadTy::U32 };
+            // Three families:
+            //   sf=false, signed=false → LDP w/Wt (2×4-byte zero-extended)
+            //   sf=true,  signed=false → LDP x/Xt (2×8-byte)
+            //   sf=true,  signed=true  → LDPSW (2×4-byte sign-extended to 64)
+            // Previously `signed` was discarded and LDPSW used LoadTy::U64,
+            // which over-read 16 bytes total and aliased the second element
+            // onto unrelated stack bytes. Real hits: small bounded loops
+            // (e.g. clear_resource_busy `ldpsw x9,x8,[sp]; sub x8,x9,x8;
+            // subs ...; b.ne`) where x8 became ~4 GiB causing the loop to
+            // run for billions of iterations and stall the boot silently.
+            let access = if sf {
+                if signed { LoadTy::I32 } else { LoadTy::U64 }
+            } else {
+                LoadTy::U32
+            };
             let v_a = cx.val(IrValueKind::I64);
             let v_b = cx.val(IrValueKind::I64);
             cx.push(IrOp::LoadPair {

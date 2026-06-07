@@ -1444,15 +1444,21 @@ impl IntLower {
                     Self::emit_mmu_xlate_call(enc, ra, false, 2 * width); // RAX = host PA
                     let da = Self::gpr(alloc, *dst_a);
                     let db = Self::gpr(alloc, *dst_b);
-                    if width == 8 {
-                        enc.emit_mov_r64_mem(da, SCRATCH0, 0);
-                        enc.emit_mov_r64_mem(db, SCRATCH0, width);
-                    } else {
-                        // 32-bit (W-register) pair: zero-extended 4-byte loads.
-                        // (The prior code used 64-bit moves here — a latent bug
-                        // that over-read 8 bytes per half and aliased element 2.)
-                        enc.emit_mov_r32_mem(da, SCRATCH0, 0);
-                        enc.emit_mov_r32_mem(db, SCRATCH0, width);
+                    match ty {
+                        LoadTy::U64 => {
+                            enc.emit_mov_r64_mem(da, SCRATCH0, 0);
+                            enc.emit_mov_r64_mem(db, SCRATCH0, width);
+                        }
+                        LoadTy::I32 => {
+                            // LDPSW: 2 × 32-bit signed → 64-bit sign-extended.
+                            enc.emit_movsxd_r64_mem32(da, SCRATCH0, 0);
+                            enc.emit_movsxd_r64_mem32(db, SCRATCH0, width);
+                        }
+                        _ => {
+                            // 32-bit (W-register) pair: zero-extended 4-byte loads.
+                            enc.emit_mov_r32_mem(da, SCRATCH0, 0);
+                            enc.emit_mov_r32_mem(db, SCRATCH0, width);
+                        }
                     }
                 }
             }

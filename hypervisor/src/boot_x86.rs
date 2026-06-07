@@ -3242,7 +3242,12 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         //   itself unfetchable re-faults forever → break after this many in a row.
         const DBT_TRACE_FIRST: u64 = 400; // first N *distinct* blocks (loops collapsed)
         const TRACE_PERIOD: u64 = 0x1_0000; // heartbeat every 65536 blocks
-        const NO_PROGRESS_LIMIT: u64 = 5_000_000;
+        // Phase-E: raised from 5M to 100M. The original 5M cap was hitting
+        // legitimate long bounded loops in early boot (e.g. clear_resource_busy
+        // iterating thousands of memblock entries — a `subs x8,x8,#1; b.ne`
+        // that just takes a while). 100M still catches a true cpu_park /
+        // panic-spin in a few seconds of wall-clock.
+        const NO_PROGRESS_LIMIT: u64 = 100_000_000;
         const FETCH_ABORT_STREAK_MAX: u32 = 16;
         let mut same_pc: u64 = 0;
         let mut fetch_abort_streak: u32 = 0;
@@ -3254,6 +3259,13 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         let mut prev_traced_pc: u64 = u64::MAX;
         let mut loop_reps: u64 = 0;
         let mut distinct_blocks: u64 = 0;
+        // Per-heartbeat delta trackers — answers "is the kernel still printing?"
+        // and "is it visiting new code or oscillating?" without needing a long
+        // post-run grep. Reset every TRACE_PERIOD when the heartbeat fires.
+        let mut hb_prev_pl011_w: u32 = 0;
+        let mut hb_prev_distinct: u64 = 0;
+        let mut hb_pc_min: u64 = u64::MAX;
+        let mut hb_pc_max: u64 = 0;
         // Baseline fault count BEFORE the live dispatch starts (the M3/M4b-2
         // proofs intentionally trigger walker faults — those don't count).
         let live_flt_baseline: u32 =
@@ -3766,6 +3778,11 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                     loop_reps = 0;
                 }
                 distinct_blocks += 1;
+                // Track the pc range visited inside this heartbeat window so
+                // a stuck-in-a-200-byte-function pattern shows up as a tiny
+                // [hb_pc_min..hb_pc_max] span next heartbeat.
+                if pc < hb_pc_min { hb_pc_min = pc; }
+                if pc > hb_pc_max { hb_pc_max = pc; }
                 if distinct_blocks <= DBT_TRACE_FIRST || iter % TRACE_PERIOD == 0 {
                     dual_puts(b"[dbt] #");
                     dual_puthex64(iter);
@@ -3815,6 +3832,55 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_FIRST_FAR));
                         dual_puts(b" 1st_esr=");
                         dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_FIRST_ESR));
+                        // Per-heartbeat deltas — the live signals for Task E:
+                        //   dpl = new PL011 byte writes since last hb
+                        //         (== chars printed in last 65536 blocks)
+                        //   dist = distinct new PCs visited since last hb
+                        //   pc_lo..pc_hi = pc span explored this window
+                        let cur_pl011 = *ptr::addr_of!(crate::mmio_emu::MMIO_PL011_W);
+                        let dpl = cur_pl011.wrapping_sub(hb_prev_pl011_w);
+                        let dist = distinct_blocks.wrapping_sub(hb_prev_distinct);
+                        dual_puts(b" dpl=");
+                        dual_puthex64(dpl as u64);
+                        dual_puts(b" dist=");
+                        dual_puthex64(dist);
+                        dual_puts(b" pc_lo=");
+                        dual_puthex64(hb_pc_min);
+                        dual_puts(b" pc_hi=");
+                        dual_puthex64(hb_pc_max);
+                        // Sysreg observability — catches unmodeled MRS/MSR loops
+                        // (e.g. ID_AA64ISAR1_EL1 feature probes that we always
+                        // read as 0). last_rd/last_wr are the live IDs (any MRS
+                        // / MSR), unk_rd / unk_wr count MRS/MSR for regs we
+                        // don't model at all (fallback `_ => 0`).
+                        dual_puts(b" last_rd=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::sysreg_rt::SYSREG_LAST_READ_ID
+                        ) as u64);
+                        dual_puts(b" last_wr=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::sysreg_rt::SYSREG_LAST_WRITE_ID
+                        ) as u64);
+                        dual_puts(b" unk_rd=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::sysreg_rt::SYSREG_UNKNOWN_READS
+                        ) as u64);
+                        dual_puts(b"/");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::sysreg_rt::SYSREG_LAST_UNKNOWN_READ_ID
+                        ) as u64);
+                        dual_puts(b" unk_wr=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::sysreg_rt::SYSREG_UNKNOWN_WRITES
+                        ) as u64);
+                        dual_puts(b"/");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::sysreg_rt::SYSREG_LAST_UNKNOWN_WRITE_ID
+                        ) as u64);
+                        hb_prev_pl011_w = cur_pl011;
+                        hb_prev_distinct = distinct_blocks;
+                        hb_pc_min = u64::MAX;
+                        hb_pc_max = 0;
                     }
                     dual_puts(b"\n");
 

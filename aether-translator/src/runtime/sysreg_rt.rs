@@ -63,6 +63,20 @@ static mut NOW: u64 = 0;
 /// `ICC_BPR1_EL1` storage (binary point — no preemption grouping modelled).
 static mut BPR1: u64 = 0;
 
+/// Diagnostic trackers for sysreg observability. The hypervisor heartbeat
+/// reads these to answer "did the kernel poll an unmodeled sysreg between
+/// the last two heartbeats?" A kernel feature-probe loop that reads
+/// e.g. `ID_AA64ISAR1_EL1` and waits for a bit that we always return 0
+/// for is invisible in MMIO/fault counters but pops here.
+pub static mut SYSREG_LAST_READ_ID: u32 = 0;
+pub static mut SYSREG_LAST_READ_VAL: u64 = 0;
+pub static mut SYSREG_LAST_WRITE_ID: u32 = 0;
+pub static mut SYSREG_LAST_WRITE_VAL: u64 = 0;
+pub static mut SYSREG_UNKNOWN_READS: u32 = 0;
+pub static mut SYSREG_UNKNOWN_WRITES: u32 = 0;
+pub static mut SYSREG_LAST_UNKNOWN_READ_ID: u32 = 0;
+pub static mut SYSREG_LAST_UNKNOWN_WRITE_ID: u32 = 0;
+
 #[allow(unsafe_code)]
 fn now() -> u64 {
     // SAFETY: EL2-private, single-vCPU.
@@ -101,7 +115,7 @@ pub extern "C" fn aether_sysreg_read(reg_id: u32) -> u64 {
     unsafe {
         let timer = &*core::ptr::addr_of!(TIMER);
         let gic = &mut *core::ptr::addr_of_mut!(GIC);
-        match reg_id {
+        let val = match reg_id {
             CNTVCT_EL0 | CNTPCT_EL0 => now,
             CNTFRQ_EL0 => timer.cntfrq,
             CNTV_CTL_EL0 => timer.read_ctl(now),
@@ -114,8 +128,16 @@ pub extern "C" fn aether_sysreg_read(reg_id: u32) -> u64 {
             ICC_CTLR_EL1 => gic.ctlr,
             ICC_SRE_EL1 => gic.read_sre(),
             ICC_BPR1_EL1 => *core::ptr::addr_of!(BPR1),
-            _ => 0,
-        }
+            other => {
+                *core::ptr::addr_of_mut!(SYSREG_UNKNOWN_READS) =
+                    (*core::ptr::addr_of!(SYSREG_UNKNOWN_READS)).saturating_add(1);
+                *core::ptr::addr_of_mut!(SYSREG_LAST_UNKNOWN_READ_ID) = other;
+                0
+            }
+        };
+        *core::ptr::addr_of_mut!(SYSREG_LAST_READ_ID) = reg_id;
+        *core::ptr::addr_of_mut!(SYSREG_LAST_READ_VAL) = val;
+        val
     }
 }
 
@@ -128,6 +150,8 @@ pub extern "C" fn aether_sysreg_write(reg_id: u32, val: u64) {
     unsafe {
         let timer = &mut *core::ptr::addr_of_mut!(TIMER);
         let gic = &mut *core::ptr::addr_of_mut!(GIC);
+        *core::ptr::addr_of_mut!(SYSREG_LAST_WRITE_ID) = reg_id;
+        *core::ptr::addr_of_mut!(SYSREG_LAST_WRITE_VAL) = val;
         match reg_id {
             CNTV_CTL_EL0 => timer.write_ctl(val),
             CNTV_CVAL_EL0 => timer.write_cval(val),
@@ -140,7 +164,11 @@ pub extern "C" fn aether_sysreg_write(reg_id: u32, val: u64) {
             ICC_CTLR_EL1 => gic.ctlr = val,
             ICC_SRE_EL1 => { /* SRE is RAO/effectively fixed; ignore writes */ }
             ICC_BPR1_EL1 => *core::ptr::addr_of_mut!(BPR1) = val,
-            _ => {}
+            other => {
+                *core::ptr::addr_of_mut!(SYSREG_UNKNOWN_WRITES) =
+                    (*core::ptr::addr_of!(SYSREG_UNKNOWN_WRITES)).saturating_add(1);
+                *core::ptr::addr_of_mut!(SYSREG_LAST_UNKNOWN_WRITE_ID) = other;
+            }
         }
     }
 }
