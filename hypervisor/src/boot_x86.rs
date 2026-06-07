@@ -1296,6 +1296,29 @@ pub unsafe fn boot_x86_hypervisor(
         }
     };
 
+    // Phase-E: PROBE the handoff window for actual writable extent. UEFI
+    // leaves non-RAM holes (runtime services, ACPI reclaim, reserved
+    // boot-services regions) inside the contiguous PA range AllocatePages
+    // returned. Writes to a hole silently return 0 on read-back; the
+    // kernel's early_pgtable_alloc grabs from the TOP of advertised
+    // memory, so without probing it lands in a hole and the next BUG_ON
+    // fires (`create_kpti_ng_temp_pgd+0x860` was the original symptom).
+    // Walk every 4 KiB page (write magic / read-back / restore) and
+    // truncate `region_size` to the first hole. Telemetry on the first
+    // hole is emitted by the probe.
+    let probed_writable = unsafe { probe_handoff_writable_extent(stage_pa, region_size) };
+    let safe_region_size = probed_writable & !0x1F_FFFFu64; // 2-MiB-align down
+    if safe_region_size < region_size {
+        unsafe {
+            dual_puts(b"[x86] handoff: truncating advertised RAM from 0x");
+            dual_puthex64(region_size);
+            dual_puts(b" to 0x");
+            dual_puthex64(safe_region_size);
+            dual_puts(b" (UEFI-reserved holes)\n");
+        }
+    }
+    let region_size = safe_region_size;
+
     let handoff: Option<AndroidHandoff> = unsafe {
         match prepare_android_handoff_at(
             stage_pa,
@@ -3051,6 +3074,50 @@ unsafe fn host_pt_make_handoff_rw() {
     }
 }
 
+/// Largest contiguous writable PA span starting at `base_pa`, up to
+/// `size_pa`. Walks 4-KiB at a time, writes a magic + reads back; the
+/// first non-persisting page bounds the writable extent.
+///
+/// UEFI may leave NON-RAM pages (Runtime Services, ACPI reclaim, MMIO)
+/// inside the contiguous "DRAM" range AETHER staged into. The kernel
+/// trusts the DTB's `/memory` node and allocates from anywhere in that
+/// range — if it picks a UEFI-reserved hole the writes silently disappear
+/// (host PT may map them W=0 or as Write-Combining backing a void). This
+/// probe finds where contiguous backing actually ends so the DTB can
+/// truncate `memory_size` to that.
+///
+/// We probe each page non-destructively: save → write magic → verify →
+/// restore. The first 8 bytes of every kernel-touched page get the magic
+/// briefly, but we restore the original 0 (boot-time DRAM zeroed by
+/// UEFI / firmware).
+///
+/// # Safety
+/// `base_pa..base_pa+size_pa` must be entirely inside `[0, 4 GiB)` and
+/// host-identity-mapped (UEFI does this for low 4 GiB).
+unsafe fn probe_handoff_writable_extent(base_pa: u64, size_pa: u64) -> u64 {
+    const MAGIC: u64 = 0xAE_C0_FFEE_DEAD_BEEFu64;
+    let mut off: u64 = 0;
+    while off < size_pa {
+        let p = (base_pa + off) as *mut u64;
+        unsafe {
+            let saved = core::ptr::read_volatile(p);
+            core::ptr::write_volatile(p, MAGIC);
+            let rb = core::ptr::read_volatile(p);
+            core::ptr::write_volatile(p, saved);
+            if rb != MAGIC {
+                dual_puts(b"[x86] probe: hole at PA 0x");
+                dual_puthex64(base_pa + off);
+                dual_puts(b" (writable extent = 0x");
+                dual_puthex64(off);
+                dual_puts(b")\n");
+                return off;
+            }
+        }
+        off += 0x1000;
+    }
+    off
+}
+
 /// Return a host pointer + length for reading the guest instruction stream at
 /// guest PA `guest_pa`, clamped to the pinned handoff window AND a single 4 KiB
 /// page (a translated block never spans a page — the walker is page-granular and
@@ -3167,6 +3234,30 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         let kimg_span: u64 = 1024 * 1024 * 1024;
         aether_translator::runtime::mmu::aether_mmu_set_kimg_fallback(
             kimg_va_base, kimg_pa_base, kimg_span,
+        );
+
+        // Phase-E: arm the vmemmap store/load tracer. Range covers the
+        // vmemmap region we observed in the create_kpti_ng_temp_pgd BUG
+        // dump (x22 = 0xFFFFFFFD_FDA38200). Linux ARM64 VA_BITS=39 puts
+        // vmemmap near the top of TTBR1 space (0xFFFFFFFB_00000000 ..
+        // 0xFFFFFFFF_FFFFFFFF region — the precise span depends on PFN
+        // count). Widen to 0xFFFFFFFD_00000000 .. 0xFFFFFFFF_00000000 so
+        // we catch every store/load to the suspect region. Trace ring
+        // holds the last VMM_TRACE_CAP entries.
+        // Narrow VA trace to the failing PT page (0xFDA38000..0xFDA39000).
+        aether_translator::runtime::mmu::aether_mmu_arm_vmm_trace(
+            0xFFFFFFFD_FDA38000,
+            0xFFFFFFFD_FDA39000,
+        );
+        // Trace the L3 PT PAGE ITSELF (0x7DFB0000..0x7DFB1000) so we see
+        // every write the kernel makes to L3[*] slots. We expect to see
+        // writes to L3[0x38] (the entry pointing to PA 0xB7DFF) and
+        // possibly L3[0x39] etc. If L3[0x39] ever gets set to 0xb7dff703
+        // (same PA as L3[0x38]), THAT's why the walker returns PA
+        // 0xb7dff for VA 0xfda39xxx.
+        aether_translator::runtime::mmu::aether_mmu_arm_vmm_pa_trace(
+            0x7DFB0000,
+            0x7DFB1000,
         );
 
         // ── M4b-6 fixmap probe ──────────────────────────────────────────────
@@ -4134,8 +4225,84 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                                     dual_puts(b" *target=");
                                     dual_puthex64(val);
                                     dual_puts(b"\n");
+                                    // Phase-E: dump several neighboring L3
+                                    // entries so we can see whether they all
+                                    // map to the same PA (= huge page or
+                                    // alias) or each to a distinct page (=
+                                    // walker indexing bug).
+                                    let mut k: i64 = -2;
+                                    while k <= 4 {
+                                        let idx_k = ((l3_idx as i64) + k) as u64;
+                                        if idx_k < 512 {
+                                            let lk_pa = l3_base + idx_k * 8;
+                                            let lkd = core::ptr::read_volatile(lk_pa as *const u64);
+                                            dual_puts(b"    L3[");
+                                            dual_puthex64(idx_k);
+                                            dual_puts(b"]@");
+                                            dual_puthex64(lk_pa);
+                                            dual_puts(b" = ");
+                                            dual_puthex64(lkd);
+                                            dual_puts(b"\n");
+                                        }
+                                        k += 1;
+                                    }
                                 }
                             }
+                        }
+                        // Phase-E: dump the vmemmap-store/load ring buffer.
+                        // For each entry print kind/va/pa/value/size so we
+                        // can spot stores whose PA doesn't match a later
+                        // load PA for the same VA — i.e. walker mismatch —
+                        // or stores with the right PA but the wrong value
+                        // (lifter mis-emission). Iterate oldest-first.
+                        let idx = *ptr::addr_of!(
+                            aether_translator::runtime::mmu::VMM_TRACE_IDX
+                        );
+                        let cap = aether_translator::runtime::mmu::VMM_TRACE_CAP as u64;
+                        let n = if idx < cap { idx } else { cap };
+                        let start = if idx > cap { idx - cap } else { 0 };
+                        dual_puts(b"[exc] VMM trace (idx=");
+                        dual_puthex64(idx);
+                        dual_puts(b" entries=");
+                        dual_puthex64(n);
+                        dual_puts(b"):\n");
+                        let mut i: u64 = 0;
+                        while i < n {
+                            let slot = ((start + i) as usize)
+                                % aether_translator::runtime::mmu::VMM_TRACE_CAP;
+                            let kind = *ptr::addr_of!(
+                                aether_translator::runtime::mmu::VMM_TRACE_KIND[slot]
+                            );
+                            let vva = *ptr::addr_of!(
+                                aether_translator::runtime::mmu::VMM_TRACE_VA[slot]
+                            );
+                            let vpa = *ptr::addr_of!(
+                                aether_translator::runtime::mmu::VMM_TRACE_PA[slot]
+                            );
+                            let vval = *ptr::addr_of!(
+                                aether_translator::runtime::mmu::VMM_TRACE_VAL[slot]
+                            );
+                            let vsz = *ptr::addr_of!(
+                                aether_translator::runtime::mmu::VMM_TRACE_SIZE[slot]
+                            );
+                            if kind == 1 {
+                                dual_puts(b"  STR sz=");
+                            } else if kind == 2 {
+                                dual_puts(b"  MISMATCH-READBACK sz=");
+                            } else {
+                                dual_puts(b"  LDR sz=");
+                            }
+                            dual_puthex64(vsz as u64);
+                            dual_puts(b" va=");
+                            dual_puthex64(vva);
+                            dual_puts(b" pa=");
+                            dual_puthex64(vpa);
+                            if kind == 1 || kind == 2 {
+                                dual_puts(b" val=");
+                                dual_puthex64(vval);
+                            }
+                            dual_puts(b"\n");
+                            i += 1;
                         }
                     }
                     // Manually inject. The runtime exceptions::inject() wants

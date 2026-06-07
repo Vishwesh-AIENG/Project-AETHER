@@ -164,6 +164,75 @@ pub const SLOT_MMIO_SCRATCH: usize = 59;
 /// [`XLATE_FAULT`] keeps the lowered fault-check `test rax,rax; jz fault` valid).
 const MMIO_STORE_OK: u64 = 1;
 
+// ── Phase-E vmemmap store/load tracer ─────────────────────────────────────────
+// When the hypervisor arms a (lo, hi) VA range, every store AND load that
+// resolves into that range gets a (va, pa, value, size, kind) entry in a
+// circular buffer. The hypervisor reads this on first BRK to cross-reference
+// the store PA with the load PA at the failing PTE slot. `kind` = 0 for load,
+// 1 for store. `value` is the actual u64 written (stores) or zero (loads —
+// the load primitive doesn't return value; the trace just records that the
+// xlate happened so PA can be compared with the corresponding store).
+pub const VMM_TRACE_CAP: usize = 128;
+pub static mut VMM_TRACE_LO: u64 = 0;
+pub static mut VMM_TRACE_HI: u64 = 0;
+pub static mut VMM_TRACE_VA: [u64; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
+pub static mut VMM_TRACE_PA: [u64; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
+pub static mut VMM_TRACE_VAL: [u64; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
+pub static mut VMM_TRACE_SIZE: [u8; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
+pub static mut VMM_TRACE_KIND: [u8; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
+/// Monotonic counter — `(idx % CAP)` is the next slot. Lets the dumper
+/// distinguish "ring wrapped" from "ring not full" and walk oldest-first.
+pub static mut VMM_TRACE_IDX: u64 = 0;
+
+/// Arm the vmemmap tracer over `[lo, hi)` BY VA. Pass `(0, 0)` to disable.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_arm_vmm_trace(lo: u64, hi: u64) {
+    // SAFETY: EL2-private, single-vCPU; set once at boot.
+    unsafe {
+        *core::ptr::addr_of_mut!(VMM_TRACE_LO) = lo;
+        *core::ptr::addr_of_mut!(VMM_TRACE_HI) = hi;
+        *core::ptr::addr_of_mut!(VMM_TRACE_IDX) = 0;
+    }
+}
+
+/// PA-based trace range. When non-zero, ANY store/load whose RESOLVED PA
+/// is in `[VMM_TRACE_PA_LO, VMM_TRACE_PA_HI)` is recorded, regardless of
+/// the VA the kernel used to reach it. Catches "different VA aliases
+/// hitting the same PA" patterns that VA-only tracing misses.
+pub static mut VMM_TRACE_PA_LO: u64 = 0;
+pub static mut VMM_TRACE_PA_HI: u64 = 0;
+
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_arm_vmm_pa_trace(lo: u64, hi: u64) {
+    // SAFETY: EL2-private, single-vCPU; set once at boot.
+    unsafe {
+        *core::ptr::addr_of_mut!(VMM_TRACE_PA_LO) = lo;
+        *core::ptr::addr_of_mut!(VMM_TRACE_PA_HI) = hi;
+    }
+}
+
+#[allow(unsafe_code)]
+fn vmm_trace_record(va: u64, pa: u64, value: u64, size: u8, kind: u8) {
+    // SAFETY: EL2-private, single-vCPU; bounded indexing into a fixed array.
+    unsafe {
+        let va_lo = *core::ptr::addr_of!(VMM_TRACE_LO);
+        let va_hi = *core::ptr::addr_of!(VMM_TRACE_HI);
+        let pa_lo = *core::ptr::addr_of!(VMM_TRACE_PA_LO);
+        let pa_hi = *core::ptr::addr_of!(VMM_TRACE_PA_HI);
+        let va_hit = (va_lo != 0 || va_hi != 0) && va >= va_lo && va < va_hi;
+        let pa_hit = (pa_lo != 0 || pa_hi != 0) && pa >= pa_lo && pa < pa_hi;
+        if !va_hit && !pa_hit { return; }
+        let i = (*core::ptr::addr_of!(VMM_TRACE_IDX) as usize) % VMM_TRACE_CAP;
+        *core::ptr::addr_of_mut!(VMM_TRACE_VA[i]) = va;
+        *core::ptr::addr_of_mut!(VMM_TRACE_PA[i]) = pa;
+        *core::ptr::addr_of_mut!(VMM_TRACE_VAL[i]) = value;
+        *core::ptr::addr_of_mut!(VMM_TRACE_SIZE[i]) = size;
+        *core::ptr::addr_of_mut!(VMM_TRACE_KIND[i]) = kind;
+        let cur = *core::ptr::addr_of!(VMM_TRACE_IDX);
+        *core::ptr::addr_of_mut!(VMM_TRACE_IDX) = cur.wrapping_add(1);
+    }
+}
+
 /// Signature of the host MMIO emulation callback the hypervisor registers.
 /// `is_write != 0` ⇒ write `value` (return ignored); otherwise read and return
 /// the value (zero-extended into the u64).
@@ -499,13 +568,33 @@ pub static mut MMU_TLBI_VA_FIXMAP: u32 = 0;
 pub static mut MMU_TLBI_FLUSH_ALL_TOTAL: u32 = 0;
 pub static mut MMU_TLBI_VA_FIRST_FIXMAP: u64 = 0;
 
-/// Invalidate a single VA page (TLBI VAE1). Conservative: 4 KiB granularity.
+/// Invalidate a single VA page (TLBI VAE1).
+///
+/// Phase-E correctness fix: the kernel's actual invalidation pattern is
+/// "modify a non-canonical-aliased VA, issue TLBI VAALE1IS for SOME VA in a
+/// different range, expect ALL stale entries to drop". The architecture
+/// permits a "broader-than-asked" invalidate, and our 256-entry direct-mapped
+/// TLB can hold entries that no kernel-issued single-VA TLBI will ever target
+/// (e.g. a vmemmap VA whose mapping the kernel built then tore down via a
+/// pgd-level rewrite without per-VA TLBI). The cheapest correct policy is:
+/// any TLBI flushes the WHOLE software TLB. This matches what the architecture
+/// allows, costs one cache walk per kernel TLBI (rare on the hot path), and
+/// eliminates an entire class of stale-mapping bugs.
+///
+/// Real-world hit: create_kpti_ng_temp_pgd was reading L3 slots through the
+/// vmemmap VA; an earlier kernel walk had cached VA 0xFFFFFFFDFDA39000 → PA
+/// 0xB7DFF000 in our TLB; the kernel later cleared L3[0x39] for that VA
+/// without a per-VA TLBI for the vmemmap alias, so subsequent stores to
+/// 0xFDA39xxx silently corrupted the still-live PT page at PA 0xB7DFF000.
 #[allow(unsafe_code)]
 pub extern "C" fn aether_mmu_tlbi_va(va: u64) {
-    let idx = ((va >> 12) as usize) & (TLB_ENTRIES - 1);
     // SAFETY: EL2-private, single-vCPU; in-bounds index + diagnostic counters.
     unsafe {
-        *core::ptr::addr_of_mut!(TLB_TAG[idx]) = TLB_EMPTY;
+        // Whole-TLB flush — see doc above.
+        let tag = core::ptr::addr_of_mut!(TLB_TAG);
+        for i in 0..TLB_ENTRIES {
+            (*tag)[i] = TLB_EMPTY;
+        }
         let t = core::ptr::addr_of_mut!(MMU_TLBI_VA_TOTAL);
         *t = (*t).saturating_add(1);
         let lo = *core::ptr::addr_of!(MMU_TRACE_LO);
@@ -532,21 +621,42 @@ pub extern "C" fn aether_mmu_tlbi_va(va: u64) {
 fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u8)> {
     let page = va >> 12;
     let idx = (page as usize) & (TLB_ENTRIES - 1);
-    // SAFETY: EL2-private, single-vCPU.
-    unsafe {
-        if *core::ptr::addr_of!(TLB_TAG[idx]) == page
-            && (!is_w || *core::ptr::addr_of!(TLB_W[idx]))
-        {
-            return Ok(*core::ptr::addr_of!(TLB_PA[idx]) | (va & 0xFFF));
+    // Phase-E correctness: TLB cache DISABLED for kernel high-VA (TTBR1)
+    // accesses. The kernel modifies page tables, then issues TLBI for a
+    // SUBSET of the affected VAs (relying on ARM ARM's "implicit
+    // break-before-make" semantics for some classes of edit, e.g. clearing
+    // a leaf entry that was never valid in the visible TLB). Our software
+    // TLB has no way to know which entries are "implicitly invalidated" by
+    // any given store, and aggressive flush-on-every-TLBI still leaves
+    // stale entries cached between the kernel's store and its next TLBI.
+    //
+    // For TTBR1 VAs (high bit 63 set) we therefore ALWAYS walk fresh —
+    // the kernel's PT-write-then-immediate-read pattern in
+    // create_kpti_ng_temp_pgd then sees the just-written entry. TTBR0
+    // (low) VAs still cache; the boot-time identity-mapped low VAs that
+    // dominate the early dispatch hot path benefit from the cache and the
+    // kernel never rewrites them.
+    let va_high = (va >> 63) & 1 == 1;
+    if !va_high {
+        // SAFETY: EL2-private, single-vCPU.
+        unsafe {
+            if *core::ptr::addr_of!(TLB_TAG[idx]) == page
+                && (!is_w || *core::ptr::addr_of!(TLB_W[idx]))
+            {
+                return Ok(*core::ptr::addr_of!(TLB_PA[idx]) | (va & 0xFFF));
+            }
         }
     }
     match walk(sysregs, va, is_w) {
         Ok((pa, writable)) => {
-            // SAFETY: EL2-private, single-vCPU.
-            unsafe {
-                *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
-                *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
-                *core::ptr::addr_of_mut!(TLB_W[idx]) = writable;
+            // Only cache low (TTBR0) VAs — see top-of-fn rationale.
+            if !va_high {
+                // SAFETY: EL2-private, single-vCPU.
+                unsafe {
+                    *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
+                    *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
+                    *core::ptr::addr_of_mut!(TLB_W[idx]) = writable;
+                }
             }
             Ok(pa)
         }
@@ -576,11 +686,13 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
             {
                 let pa = kimg_pa.wrapping_add(va - kimg_va);
                 if in_window(pa) {
-                    // SAFETY: EL2-private, single-vCPU.
+                    // SAFETY: EL2-private, single-vCPU. Don't cache TTBR1.
                     unsafe {
-                        *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
-                        *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
-                        *core::ptr::addr_of_mut!(TLB_W[idx]) = true;
+                        if !va_high {
+                            *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
+                            *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
+                            *core::ptr::addr_of_mut!(TLB_W[idx]) = true;
+                        }
                         *core::ptr::addr_of_mut!(MMU_KIMG_FALLBACK_HITS) =
                             (*core::ptr::addr_of!(MMU_KIMG_FALLBACK_HITS))
                                 .saturating_add(1);
@@ -900,6 +1012,13 @@ pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64,
             return record_pending_fault(ctx, va, FaultKind::Translation, 3, is_w);
         }
     }
+    // Phase-E: vmemmap LOAD tracer — record (va, pa, 0, size) so we can
+    // compare the LOAD PA against the matching STORE PA for the same VA.
+    // Stores carry the value field; loads carry 0 (the value isn't known
+    // here, the caller does the actual read via the returned pa pointer).
+    if !is_w {
+        vmm_trace_record(va, pa, 0, size.max(1) as u8, 0);
+    }
     pa
 }
 
@@ -963,6 +1082,10 @@ pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, val
             return record_pending_fault(ctx, va, FaultKind::Translation, 0, true);
         }
     }
+    // Phase-E: vmemmap store tracer — record (va, pa, value, size) so the
+    // hypervisor can verify the kernel's store actually landed where the
+    // load expects to read it from.
+    vmm_trace_record(va, pa, value, sz as u8, 1);
     // SAFETY: `pa` is an in-window guest PA == identity host RAM (the walk /
     // flat path established it is not MMIO and, when walked, is in-window).
     unsafe {
@@ -971,6 +1094,25 @@ pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, val
             2 => core::ptr::write_volatile(pa as *mut u16, value as u16),
             4 => core::ptr::write_volatile(pa as *mut u32, value as u32),
             _ => core::ptr::write_volatile(pa as *mut u64, value),
+        }
+        // Phase-E: immediate read-back verification. If the host store
+        // didn't persist (cache type / unmapped / dropped write), record
+        // a SECOND ring entry with kind=2 (MISMATCH) and the actual
+        // value read. The dumper distinguishes kinds.
+        let readback: u64 = match sz {
+            1 => core::ptr::read_volatile(pa as *const u8) as u64,
+            2 => core::ptr::read_volatile(pa as *const u16) as u64,
+            4 => core::ptr::read_volatile(pa as *const u32) as u64,
+            _ => core::ptr::read_volatile(pa as *const u64),
+        };
+        let expect_mask: u64 = match sz {
+            1 => 0xFF,
+            2 => 0xFFFF,
+            4 => 0xFFFFFFFF,
+            _ => !0u64,
+        };
+        if (readback & expect_mask) != (value & expect_mask) {
+            vmm_trace_record(va, pa, readback, sz as u8, 2);
         }
     }
     MMIO_STORE_OK

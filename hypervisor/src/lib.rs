@@ -33,9 +33,12 @@ mod global_alloc {
     /// desktop with ≥ 4 GiB RAM.
     // Phase D: kernel boot translates many millions of distinct blocks before
     // reaching userspace. 32 MiB exhausted at ~8.8M blocks (OOM "1536 bytes
-    // failed"). Bumped to 256 MiB — that covers JIT cache + block-cache hash
-    // expansion + transient buffers through Android userspace launch.
-    const HEAP_SIZE: usize = 256 * 1024 * 1024;
+    // failed"). Bumped to 256 MiB then 1 GiB — Phase-E showed 256 MiB
+    // exhausted at "96 bytes failed" once paging_init completed and the
+    // kernel started executing the much larger code surface of SMP /
+    // scheduler init (each new translated block consumes a BlockCache
+    // entry that doesn't free).
+    const HEAP_SIZE: usize = 1024 * 1024 * 1024;
 
     #[repr(align(16))]
     struct AlignedHeap([u8; HEAP_SIZE]);

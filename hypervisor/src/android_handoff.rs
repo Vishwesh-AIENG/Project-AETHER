@@ -62,6 +62,14 @@ pub const GUEST_DTB_SIZE: u64 = 2 * 1024 * 1024;
 /// `/memory` node advertises to the kernel. 1 GiB is the minimum that
 /// reaches Android home screen without OOM (Zygote + system_server alone
 /// reserve ~600 MiB).
+///
+/// Phase-E: the EFFECTIVE size advertised at runtime is the contiguous
+/// host-writable extent — `probe_handoff_writable_extent` in
+/// boot_x86.rs walks the window pre-handoff (write magic / read-back /
+/// restore) and truncates at the first UEFI-reserved hole. This static
+/// constant remains the upper bound the NPT prepares to map; the runtime
+/// probe shrinks the actually-advertised range down to what host RAM
+/// genuinely backs.
 pub const KERNEL_WORKING_RAM_SIZE: u64 = 1024 * 1024 * 1024
     - STAGED_BOOT_IMG_SIZE
     - GUEST_DTB_SIZE;
