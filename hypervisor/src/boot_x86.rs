@@ -3767,9 +3767,18 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                 0
             };
             last_insn = insn0;
-            // Trace every one of the first N blocks, then a heartbeat every
-            // TRACE_PERIOD, so the opening ARM64 trajectory is visible and the
-            // post-mortem photo shows how far the kernel got + the live insn.
+            // Phase-E: ring buffer of last N (pc, insn) for post-BRK forensics.
+            // When the kernel hits a BUG_ON the actual BRK fires at a panic
+            // trampoline; the executed branch that PUT us there is one entry
+            // back in this ring. Dumping the last 32 distinct blocks reveals
+            // which conditional check failed.
+            const RING_LEN: usize = 32;
+            static mut PC_RING: [u64; RING_LEN] = [0; RING_LEN];
+            static mut INSN_RING: [u32; RING_LEN] = [0; RING_LEN];
+            static mut RING_IDX: usize = 0;
+            *ptr::addr_of_mut!(PC_RING[*ptr::addr_of!(RING_IDX) % RING_LEN]) = pc;
+            *ptr::addr_of_mut!(INSN_RING[*ptr::addr_of!(RING_IDX) % RING_LEN]) = insn0;
+            *ptr::addr_of_mut!(RING_IDX) = (*ptr::addr_of!(RING_IDX)).wrapping_add(1);
             if pc != prev_traced_pc {
                 if loop_reps > 0 {
                     dual_puts(b"[dbt]   ^ looped ");
@@ -4029,6 +4038,43 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                     dual_puts(b" iter=");
                     dual_puthex64(iter);
                     dual_puts(b"\n");
+                    // Phase-E: dump ring buffer of last RING_LEN distinct
+                    // (pc, insn) on FIRST BRK only — so the trace doesn't
+                    // flood when the kernel's panic handler emits more BRKs.
+                    static mut BRK_DUMPED: bool = false;
+                    if !*ptr::addr_of!(BRK_DUMPED) {
+                        *ptr::addr_of_mut!(BRK_DUMPED) = true;
+                        dual_puts(b"[exc] PRE-BRK ring (oldest first):\n");
+                        let cur = *ptr::addr_of!(RING_IDX);
+                        let mut i = 0usize;
+                        while i < RING_LEN {
+                            // oldest entry is the one we are about to overwrite
+                            let slot = (cur + i) % RING_LEN;
+                            let p = *ptr::addr_of!(PC_RING[slot]);
+                            let ins = *ptr::addr_of!(INSN_RING[slot]);
+                            if p != 0 {
+                                dual_puts(b"  pc=");
+                                dual_puthex64(p);
+                                dual_puts(b" insn=");
+                                dual_puthex64(ins as u64);
+                                dual_puts(b"\n");
+                            }
+                            i += 1;
+                        }
+                        // Also dump key GPRs at the BRK so we can see
+                        // x21/x26 (the corrupted PTE-looking values).
+                        let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                        dual_puts(b"[exc] GPRs at BRK:\n");
+                        let mut r = 0usize;
+                        while r < 31 {
+                            dual_puts(b"  x");
+                            dual_puthex64(r as u64);
+                            dual_puts(b"=");
+                            dual_puthex64(g[r]);
+                            dual_puts(b"\n");
+                            r += 1;
+                        }
+                    }
                     // Manually inject. The runtime exceptions::inject() wants
                     // a &mut [u64] ctx slice; NPF_GUEST_CTX is a sized array,
                     // turn it into a mutable slice.
