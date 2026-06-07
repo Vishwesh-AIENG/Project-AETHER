@@ -699,6 +699,16 @@ pub enum IrOp {
     TlbInval {
         va: Option<IrValueId>,
     },
+    /// Phase-E: `AT S1E1R/W/E0R/W` — Address Translate Stage 1 at
+    /// EL1/EL0. Calls the walker on `va`; writes PAR_EL1 with the
+    /// resulting PA (success) or fault status (F=1, failure). Lifted
+    /// by the SysAt decoder arm. The runtime helper is
+    /// `aether_mmu_at_s1e1` in runtime/mmu.rs.
+    AtS1E1 {
+        va: IrValueId,
+        is_write: bool,
+        at_el0: bool,
+    },
     /// PAC / BTI / WFI / WFE / YIELD / SEV / SEVL / NOP all collapse here so
     /// AT-5 audit sees coverage; semantics-relevant variants get distinct ops
     /// in AT-4 fill.
@@ -994,6 +1004,7 @@ impl IrOp {
 
             IrOp::Msr { val, .. } => f(val),
             IrOp::TlbInval { va: Some(va) } => f(va),
+            IrOp::AtS1E1 { va, .. } => f(va),
             IrOp::WriteGpr { src, .. } | IrOp::WriteSp { src, .. }
             | IrOp::WriteFpr { src, .. } | IrOp::WritePc { src, .. } => f(src),
 
@@ -1213,6 +1224,8 @@ impl IrOp {
             | IrOp::Dmb { .. } | IrOp::Dsb { .. }
             | IrOp::Isb | IrOp::Sb | IrOp::Hint { .. } => self,
             IrOp::TlbInval { va } => IrOp::TlbInval { va: va.map(&mut vr) },
+            IrOp::AtS1E1 { va, is_write, at_el0 } =>
+                IrOp::AtS1E1 { va: vr(va), is_write, at_el0 },
             IrOp::Mrs { dst, reg } => IrOp::Mrs { dst, reg },
             IrOp::Msr { reg, val } => IrOp::Msr { reg, val: vr(val) },
 

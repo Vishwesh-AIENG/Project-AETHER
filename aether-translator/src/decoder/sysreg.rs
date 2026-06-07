@@ -127,6 +127,14 @@ pub enum SysReg {
     EsrEl3,         // 3, 6, 5, 2, 0
     FarEl3,         // 3, 6, 6, 0, 0
 
+    // ----- Address Translate result (op0=3, op1=0, CRn=7, CRm=4) -----
+    /// `PAR_EL1` — Physical Address Register. Holds the result of an
+    /// `AT S1E1R/W/E0R/W` instruction: PA bits + attrs on success,
+    /// `F=1` + fault status on translation failure. The kernel reads
+    /// this in `is_spurious_el1_translation_fault` to distinguish a
+    /// genuine fault from a stale-TLB race.
+    ParEl1,         // 3, 0, 7, 4, 0
+
     // ----- Vector base (op0=3, op1=0, CRn=12) -----
     VbarEl1,        // 3, 0, 12, 0, 0
     IsrEl1,         // 3, 0, 12, 1, 0
@@ -451,6 +459,9 @@ pub fn lookup(id: SysRegId) -> SysReg {
         (3, 4, 6, 0, 4) => Hpfar_El2,
         (3, 6, 5, 2, 0) => EsrEl3,
         (3, 6, 6, 0, 0) => FarEl3,
+
+        // ----- AT result -----
+        (3, 0, 7, 4, 0) => ParEl1,
 
         // ----- Vector base -----
         (3, 0, 12, 0, 0) => VbarEl1,

@@ -39,6 +39,11 @@ pub const SLOT_TTBR1: usize = 2;
 pub const SLOT_TCR: usize = 3;
 /// MAIR_EL1 — memory attributes. Not needed to compute the PA in 2a.
 pub const SLOT_MAIR: usize = 4;
+/// PAR_EL1 — Address Translate result. Phase-E. Written by
+/// `aether_mmu_at_s1e1` (runtime AT helper), read by the kernel's
+/// `is_spurious_el1_translation_fault`. MUST match the `ParEl1 => 26`
+/// arm in `backend/lower_int.rs::sysreg_read_idx`.
+pub const SLOT_PAR_EL1: usize = 26;
 
 // ── Pending-fault ABI ───────────────────────────────────────────────────────
 // Free sysreg slots 56..62 (40..55 are RO ID regs, 63 is the write sink). The
@@ -210,6 +215,70 @@ pub extern "C" fn aether_mmu_arm_vmm_pa_trace(lo: u64, hi: u64) {
         *core::ptr::addr_of_mut!(VMM_TRACE_PA_HI) = hi;
     }
 }
+
+/// Phase-E: `AT S1E1R/W` and `AT S1E0R/W` runtime — Address Translate
+/// Stage 1 at EL1 / EL0 for read or write. The kernel uses this in
+/// `is_spurious_el1_translation_fault` (and various other places) to
+/// "probe" whether a VA would translate cleanly. Without this, PAR_EL1
+/// always reads 0 → kernel thinks every fault is spurious → ERETs back
+/// → re-faults → infinite loop.
+///
+/// Behaviour (per ARM ARM D8.12 PAR_EL1):
+///   - Success: PAR.F = 0, bits[51:12] = PA, attrs in upper bits.
+///   - Fault: PAR.F = 1, FST = encoded fault status, PTW/S/NS as
+///     appropriate. We pack a minimal Translation fault encoding
+///     (FST = 0b000111 = translation at level 3) for any walk failure;
+///     the kernel only reads F to make the spurious-vs-real decision.
+///
+/// `is_write` selects the access type for AP[2] permission checks.
+/// `at_el0` selects the EL0 regime (uses PAN — but we ignore PAN for
+/// simplicity; the kernel handles the few cases that matter).
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_at_s1e1(
+    ctx: *mut u64,
+    va: u64,
+    is_write: u32,
+    _at_el0: u32,
+) {
+    // SAFETY: caller contract — `ctx` is the register-file base.
+    let sysregs = unsafe { core::slice::from_raw_parts(ctx, CTX_U64S) };
+    let par: u64 = match xlate_page(sysregs, va, is_write != 0) {
+        Ok(pa) => {
+            // PAR.F = 0 (success). Bits [51:12] = PA bits, page-aligned.
+            // Bits [10:9] = SH (inner shareable), [7] = NS, [11] = NSE,
+            // bits[63:56] = MAIR attrs. We set NS=0 (secure) and SH=3
+            // (inner shareable, matches our walker default) and MAIR=
+            // 0xFF (Normal WB cacheable — the common case for kernel
+            // RAM accesses). The kernel only checks F for spurious; the
+            // attr bits are correct enough for read-back.
+            let pa_field = pa & 0x000F_FFFF_FFFF_F000;
+            let sh = 3u64 << 9;
+            let mair = 0xFFu64 << 56;
+            pa_field | sh | mair
+        }
+        Err(_) => {
+            // PAR.F = 1. FST = 0b000111 (translation fault, level 3).
+            // Bit 0 = F (=1), bits [6:1] = FST. We don't bother with
+            // the PTW (page table walk) or S2 bits.
+            let f = 1u64;
+            let fst = 0b000111u64 << 1;
+            f | fst
+        }
+    };
+    // Write into PAR_EL1's storage slot. PAR_EL1 lives at sysreg slot
+    // SLOT_PAR_EL1 in the context. Find that slot.
+    unsafe {
+        *ctx.add(SYSREG_SLOT0 + SLOT_PAR_EL1) = par;
+        // Bookkeeping counter for diag.
+        let c = core::ptr::addr_of_mut!(MMU_AT_HITS);
+        *c = (*c).saturating_add(1);
+    }
+}
+
+/// Count of AT S1E1 instructions our runtime serviced. The kernel
+/// issues these aggressively in is_spurious_el1_translation_fault; a
+/// non-zero value here confirms the lifter is routing AT correctly.
+pub static mut MMU_AT_HITS: u64 = 0;
 
 #[allow(unsafe_code)]
 fn vmm_trace_record(va: u64, pa: u64, value: u64, size: u8, kind: u8) {
@@ -730,31 +799,27 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
                     return Ok(pa);
                 }
             }
-            // Phase-E spurious-fault loop breaker — see doc above.
-            // Only applies to LOADS (is_w=false). Stores still fault.
-            if !is_w {
-                // SAFETY: EL2-private, single-vCPU.
-                unsafe {
-                    let last_va = *core::ptr::addr_of!(SPURIOUS_LAST_VA);
-                    if last_va == va {
-                        let c = (*core::ptr::addr_of!(SPURIOUS_REPEAT_COUNT))
-                            .saturating_add(1);
-                        *core::ptr::addr_of_mut!(SPURIOUS_REPEAT_COUNT) = c;
-                        if c >= SPURIOUS_FAKE_AFTER {
-                            *core::ptr::addr_of_mut!(SPURIOUS_FAKE_HITS) =
-                                (*core::ptr::addr_of!(SPURIOUS_FAKE_HITS))
-                                    .saturating_add(1);
-                            let zp = spurious_zero_pa();
-                            // Return host PA pointing into the all-zeros
-                            // scratch page, page-offset preserved. The
-                            // kernel reads zero and (likely) takes its
-                            // end-of-iter exit.
-                            return Ok(zp | (va & 0xFFF));
-                        }
-                    } else {
-                        *core::ptr::addr_of_mut!(SPURIOUS_LAST_VA) = va;
-                        *core::ptr::addr_of_mut!(SPURIOUS_REPEAT_COUNT) = 1;
-                    }
+            // Phase-E: spurious-fake-zero fallback REMOVED in favour of
+            // proper AT S1E1R / PAR_EL1 modelling (see
+            // aether_mmu_at_s1e1). The kernel's
+            // is_spurious_el1_translation_fault now sees a TRUTHFUL F=1
+            // when the access genuinely faults, so it calls die_kernel_
+            // fault and emits a clean panic + diagnostic instead of
+            // looping. The corrupting fake-zero return is gone.
+            //
+            // The statics SPURIOUS_LAST_VA / SPURIOUS_REPEAT_COUNT /
+            // SPURIOUS_FAKE_HITS are retained as diagnostic counters
+            // (incremented on every fault for telemetry) but never
+            // gate the return value.
+            unsafe {
+                let last_va = *core::ptr::addr_of!(SPURIOUS_LAST_VA);
+                if last_va == va {
+                    let c = (*core::ptr::addr_of!(SPURIOUS_REPEAT_COUNT))
+                        .saturating_add(1);
+                    *core::ptr::addr_of_mut!(SPURIOUS_REPEAT_COUNT) = c;
+                } else {
+                    *core::ptr::addr_of_mut!(SPURIOUS_LAST_VA) = va;
+                    *core::ptr::addr_of_mut!(SPURIOUS_REPEAT_COUNT) = 1;
                 }
             }
             Err(e)

@@ -1059,12 +1059,41 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 _ => { let _ = (op1, crm, op2); }
             }
         }
-        SysIc { rt, .. } | SysAt { rt, .. } => {
-            // IC / AT cache & address-translation maintenance — model as a Hint
-            // (require Rt read for liveness). These do not touch the software MMU
-            // TLB or the JIT block cache, so a no-op is correct.
+        SysIc { rt, .. } => {
+            // IC cache maintenance — model as a Hint (require Rt read for
+            // liveness). Does not touch the software MMU TLB or the JIT
+            // block cache, so a no-op is correct.
             let _ = cx.read_reg(rt, true);
             cx.push(IrOp::Hint { imm: 128 });
+        }
+        SysAt { op1, crm, op2, rt } => {
+            // AT (Address Translate). Phase-E: instead of treating as a
+            // no-op, emit an `AtS1E1` IR op that calls our walker at
+            // runtime and writes PAR_EL1 accordingly. The kernel's
+            // `is_spurious_el1_translation_fault` reads PAR.F to
+            // distinguish a stale-TLB race (F=0, retry) from a real
+            // fault (F=1, die). Without this PAR stays 0 → every fault
+            // looks spurious → ERET → re-fault → infinite loop.
+            //
+            // Encodings (op1=000 EL1 set, op1=100 EL2 set — we only
+            // handle EL1 here):
+            //   CRm=1000, op2=000  → S1E1R    (read)
+            //   CRm=1000, op2=001  → S1E1W    (write)
+            //   CRm=1000, op2=010  → S1E0R    (read,  EL0 regime)
+            //   CRm=1000, op2=011  → S1E0W    (write, EL0 regime)
+            //   CRm=1001, op2=000  → S1E1RP   (privileged read with PAN)
+            //   CRm=1001, op2=001  → S1E1WP   (privileged write with PAN)
+            if op1 == 0 && (crm == 0b1000 || crm == 0b1001) {
+                let v_va = cx.read_reg(rt, true);
+                let is_write = (op2 & 1) == 1;
+                let at_el0 = crm == 0b1000 && (op2 & 0b10) != 0;
+                cx.push(IrOp::AtS1E1 { va: v_va, is_write, at_el0 });
+            } else {
+                // EL2/EL3 forms — treat as no-op (we don't run at EL2/EL3
+                // for the guest kernel).
+                let _ = cx.read_reg(rt, true);
+                cx.push(IrOp::Hint { imm: 128 });
+            }
         }
         SysDc { op1, crm, op2, rt } => {
             // DC ZVA (op1=011, CRn=0111, CRm=0100, op2=001) ZEROES the naturally-

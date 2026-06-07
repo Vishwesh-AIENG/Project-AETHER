@@ -212,7 +212,17 @@ fn decode_system(word: u32) -> Result<DecodedInsn, DecodeErr> {
     // SYS (IC/DC/AT/TLBI): l=0, op0=01, CRn varies
     if l == 0 && op0_field == 0b01 {
         return Ok(match crn {
-            0b0111 => match (op1, op2) {
+            0b0111 => match crm {
+                // AT (Address Translate) lives at CRm=1000 (S1 EL1 R/W
+                // and S1 EL0 R/W via op2) and CRm=1001 (S1E1RP /
+                // S1E1WP). Everything else under CRn=0111 is cache
+                // maintenance (DC / IC). Phase-E: model AT properly so
+                // the kernel's is_spurious_el1_translation_fault gets a
+                // truthful PAR.F bit and stops looping on bad accesses.
+                0b1000 | 0b1001 => DecodedInsn::SysAt { op1, crm, op2, rt },
+                // IC: CRm=0001 (IALLUIS), 0101 (IVAU)
+                0b0001 | 0b0101 => DecodedInsn::SysIc { op1, crm, op2, rt },
+                // Everything else under CRn=0111 — DC maintenance.
                 _ => DecodedInsn::SysDc { op1, crm, op2, rt },
             },
             0b1000 => DecodedInsn::SysTlbi { op1, crm, op2, rt },

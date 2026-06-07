@@ -930,6 +930,7 @@ pub fn variant_tag(op: &IrOp) -> u8 {
         IrOp::Sb => 0xCA,
         IrOp::Hint { .. } => 0xCB,
         IrOp::TlbInval { .. } => 0xCC,
+        IrOp::AtS1E1 { .. } => 0xCD,
 
         // Guest CPU state access
         IrOp::ReadGpr { .. } => 0xE0,

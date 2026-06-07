@@ -492,6 +492,45 @@ impl IntLower {
     /// `mov rcx, va_reg` below reads the live register value before the call
     /// clobbers RCX (RCX is volatile). Same save/realign discipline as
     /// [`Self::emit_mmu_flush_call`].
+    /// Runtime address of `aether_mmu_at_s1e1` (Phase-E).
+    fn mmu_at_s1e1_addr() -> usize {
+        crate::runtime::mmu::aether_mmu_at_s1e1 as *const () as usize
+    }
+
+    /// Emit a Win64 CALL to `aether_mmu_at_s1e1(ctx, va, is_write, at_el0)`.
+    /// 4 args: RCX=ctx (R15), RDX=va, R8=is_write, R9=at_el0. Same
+    /// save/realign discipline as `emit_mmu_xlate_call`.
+    fn emit_mmu_at_call(
+        enc: &mut X86Encoder,
+        va_reg: u8,
+        is_write: bool,
+        at_el0: bool,
+    ) {
+        const RAX: u8 = 0;
+        const RCX: u8 = 1;
+        const RDX: u8 = 2;
+        const R8: u8 = 8;
+        const R9: u8 = 9;
+        for &r in Self::MMU_SAVE_REGS.iter() {
+            enc.emit_push_r64(r);
+        }
+        // Marshal: RDX=va FIRST (while va_reg still live), then the
+        // others which don't alias va_reg.
+        if va_reg != RDX {
+            enc.emit_mov_rr64(RDX, va_reg);
+        }
+        enc.emit_mov_rr64(RCX, CONTEXT_REG);
+        enc.emit_mov_r64_imm32(R8, if is_write { 1 } else { 0 });
+        enc.emit_mov_r64_imm32(R9, if at_el0 { 1 } else { 0 });
+        enc.emit_sub_r64_imm32(4 /* RSP */, 0x28);
+        enc.emit_mov_r64_imm64(RAX, Self::mmu_at_s1e1_addr() as i64);
+        enc.emit_call_r64(RAX);
+        enc.emit_add_r64_imm32(4 /* RSP */, 0x28);
+        for &r in Self::MMU_SAVE_REGS.iter().rev() {
+            enc.emit_pop_r64(r);
+        }
+    }
+
     fn emit_mmu_tlbi_va_call(enc: &mut X86Encoder, va_reg: u8) {
         const RAX: u8 = 0;
         const RCX: u8 = 1;
@@ -723,6 +762,11 @@ impl IntLower {
             SpEl0 => 16, SpEl1 => 17, Afsr0El1 => 18, Afsr1El1 => 19,
             ActlrEl1 => 20, CsselrEl1 => 21, DaifEl0 => 22, SpselEl1 => 23,
             Mdscr_El1 => 24, OslarEl1 => 25,
+            // Phase-E: PAR_EL1 — slot 26. Written by aether_mmu_at_s1e1
+            // (the AT runtime), read by the kernel's
+            // is_spurious_el1_translation_fault. MUST match SLOT_PAR_EL1
+            // in runtime/mmu.rs.
+            ParEl1 => 26,
             MidrEl1 => 40, MpidrEl1 => 41, CurrentEl => 42, CtrEl0 => 43,
             DczidEl0 => 44, CntfrqEl0 => 45,
             IdAa64Pfr0El1 => 46, IdAa64Pfr1El1 => 47,
@@ -1750,6 +1794,13 @@ impl IntLower {
                         Self::emit_dbt_invalidate_call(enc);
                     }
                 }
+            }
+            AtS1E1 { va, is_write, at_el0 } => {
+                // Phase-E: `AT S1E1*` runtime CALL. Handles spilled VA by
+                // loading it into SCRATCH0 first (Win64 RDX gets it after
+                // the save set is pushed).
+                let ra = Self::src_in(alloc, enc, *va, SCRATCH0);
+                Self::emit_mmu_at_call(enc, ra, *is_write, *at_el0);
             }
 
             // ── System-register access (M4a) ──────────────────────────────────
