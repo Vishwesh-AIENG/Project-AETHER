@@ -4074,6 +4074,69 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                             dual_puts(b"\n");
                             r += 1;
                         }
+                        // Phase-E: dump *x22 (the PTE slot that fails the
+                        // mvn-tst check). Manually walk TTBR1 to find the PA
+                        // and read the actual bytes. If our PA matches what
+                        // we expect, the bug is in store-width / load-width.
+                        // If the PA is "wrong" (relative to what the kernel
+                        // expects), the bug is in the walker.
+                        let x22 = g[22];
+                        const SR0: usize = aether_translator::runtime::context::SYSREG_SLOT0;
+                        let ttbr1 = g[SR0 + 2] & 0x0000_FFFF_FFFF_F000;
+                        dual_puts(b"[exc] x22=");
+                        dual_puthex64(x22);
+                        dual_puts(b" ttbr1=");
+                        dual_puthex64(ttbr1);
+                        dual_puts(b"\n");
+                        // Walk levels at x22 (4 KiB granule, VA_BITS=39 →
+                        // 3 levels: L1@bits[38:30], L2@bits[29:21],
+                        // L3@bits[20:12]).
+                        if ttbr1 != 0 {
+                            let l1_idx = (x22 >> 30) & 0x1FF;
+                            let l2_idx = (x22 >> 21) & 0x1FF;
+                            let l3_idx = (x22 >> 12) & 0x1FF;
+                            let off_in_pg = x22 & 0xFFF;
+                            let l1_pa = ttbr1 + l1_idx * 8;
+                            let l1d = core::ptr::read_volatile(l1_pa as *const u64);
+                            dual_puts(b"  L1[");
+                            dual_puthex64(l1_idx);
+                            dual_puts(b"]@");
+                            dual_puthex64(l1_pa);
+                            dual_puts(b" = ");
+                            dual_puthex64(l1d);
+                            dual_puts(b"\n");
+                            if l1d & 0b11 == 0b11 {
+                                let l2_base = l1d & 0x0000_FFFF_FFFF_F000;
+                                let l2_pa = l2_base + l2_idx * 8;
+                                let l2d = core::ptr::read_volatile(l2_pa as *const u64);
+                                dual_puts(b"  L2[");
+                                dual_puthex64(l2_idx);
+                                dual_puts(b"]@");
+                                dual_puthex64(l2_pa);
+                                dual_puts(b" = ");
+                                dual_puthex64(l2d);
+                                dual_puts(b"\n");
+                                if l2d & 0b11 == 0b11 {
+                                    let l3_base = l2d & 0x0000_FFFF_FFFF_F000;
+                                    let l3_pa = l3_base + l3_idx * 8;
+                                    let l3d = core::ptr::read_volatile(l3_pa as *const u64);
+                                    let target_pa = (l3d & 0x0000_FFFF_FFFF_F000) | off_in_pg;
+                                    let val = core::ptr::read_volatile(target_pa as *const u64);
+                                    dual_puts(b"  L3[");
+                                    dual_puthex64(l3_idx);
+                                    dual_puts(b"]@");
+                                    dual_puthex64(l3_pa);
+                                    dual_puts(b" = ");
+                                    dual_puthex64(l3d);
+                                    dual_puts(b"\n");
+                                    dual_puts(b"  target_pa=");
+                                    dual_puthex64(target_pa);
+                                    dual_puts(b" *target=");
+                                    dual_puthex64(val);
+                                    dual_puts(b"\n");
+                                }
+                            }
+                        }
                     }
                     // Manually inject. The runtime exceptions::inject() wants
                     // a &mut [u64] ctx slice; NPF_GUEST_CTX is a sized array,
