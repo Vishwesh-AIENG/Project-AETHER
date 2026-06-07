@@ -610,6 +610,36 @@ pub extern "C" fn aether_mmu_tlbi_va(va: u64) {
     }
 }
 
+/// Phase-E: spurious-fault loop breaker. The kernel's
+/// `is_spurious_el1_translation_fault` does `AT S1E1R + read PAR_EL1`; we
+/// don't model AT so PAR.F stays 0 and the kernel decides every kernel-VA
+/// translation fault is "spurious", WARNs, ERETs to the faulting PC, and
+/// re-faults. Loop forever.
+///
+/// To break this, the walker tracks the last (VA, kind) it faulted on. If
+/// the SAME load VA faults more than `FAKE_AFTER_FAULTS` times in a row,
+/// the walker returns a host pointer to a fixed all-zeros scratch page —
+/// the kernel's iterator dereferences zeros, takes its end-of-iter exit,
+/// and forward progress resumes. This trades correctness on truly bad
+/// kernel state (which the kernel CAN'T recover from anyway) for boot
+/// liveness.
+pub static mut SPURIOUS_LAST_VA: u64 = 0;
+pub static mut SPURIOUS_REPEAT_COUNT: u32 = 0;
+pub static mut SPURIOUS_FAKE_HITS: u64 = 0;
+const SPURIOUS_FAKE_AFTER: u32 = 32;
+
+/// Static 4 KiB zero page that fake-succeed loads return a host pointer to.
+/// Page-aligned (the type alignment + static placement guarantees 4 KiB).
+#[repr(align(4096))]
+struct ZeroPage([u8; 4096]);
+static mut SPURIOUS_ZERO_PAGE: ZeroPage = ZeroPage([0u8; 4096]);
+
+#[allow(unsafe_code)]
+fn spurious_zero_pa() -> u64 {
+    // SAFETY: EL2-private, taking address of a static is sound.
+    unsafe { core::ptr::addr_of!(SPURIOUS_ZERO_PAGE) as u64 }
+}
+
 /// One page's translation: a TLB-cached single-page walk. Returns the full host
 /// PA (page base | in-page offset of `va`) and writability, or the walk fault.
 /// The 256-entry direct-mapped software TLB is consulted first (a read hits any
@@ -698,6 +728,33 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
                                 .saturating_add(1);
                     }
                     return Ok(pa);
+                }
+            }
+            // Phase-E spurious-fault loop breaker — see doc above.
+            // Only applies to LOADS (is_w=false). Stores still fault.
+            if !is_w {
+                // SAFETY: EL2-private, single-vCPU.
+                unsafe {
+                    let last_va = *core::ptr::addr_of!(SPURIOUS_LAST_VA);
+                    if last_va == va {
+                        let c = (*core::ptr::addr_of!(SPURIOUS_REPEAT_COUNT))
+                            .saturating_add(1);
+                        *core::ptr::addr_of_mut!(SPURIOUS_REPEAT_COUNT) = c;
+                        if c >= SPURIOUS_FAKE_AFTER {
+                            *core::ptr::addr_of_mut!(SPURIOUS_FAKE_HITS) =
+                                (*core::ptr::addr_of!(SPURIOUS_FAKE_HITS))
+                                    .saturating_add(1);
+                            let zp = spurious_zero_pa();
+                            // Return host PA pointing into the all-zeros
+                            // scratch page, page-offset preserved. The
+                            // kernel reads zero and (likely) takes its
+                            // end-of-iter exit.
+                            return Ok(zp | (va & 0xFFF));
+                        }
+                    } else {
+                        *core::ptr::addr_of_mut!(SPURIOUS_LAST_VA) = va;
+                        *core::ptr::addr_of_mut!(SPURIOUS_REPEAT_COUNT) = 1;
+                    }
                 }
             }
             Err(e)
