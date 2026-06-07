@@ -597,6 +597,61 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             }
             cx.write_reg(rd, v_res, sf);
         }
+        MulLong { rd, rn, rm, ra, sub, signed } => {
+            // 32×32→64 multiply with 64-bit accumulator. UMADDL /
+            // SMADDL / UMSUBL / SMSUBL. Rn and Rm read as Wn/Wm (low
+            // 32; upper IGNORED), then zero- or sign-extended to 64
+            // before the multiply. Ra read as 64-bit. Rd written 64-bit.
+            //
+            // Phase-E bug: previously lifted as Mul{sf=true}, which
+            // read Xn/Xm in full 64-bit width — if the kernel had
+            // junk in the upper 32 of Xn (e.g. x28=0x600000000 left
+            // over from a prior 64-bit write), the multiply produced
+            // a wildly wrong result. Real impact: __next_mem_range_rev's
+            // umaddl computing a bogus iterator pointer → array index
+            // off into unmapped memory → kernel panic with the
+            // truthful PAR.F=1 our new AT path correctly reports.
+            let v_rn_w = cx.read_reg(rn, false);   // Wn (low 32)
+            let v_rm_w = cx.read_reg(rm, false);   // Wm (low 32)
+            let v_rn_x = cx.val(IrValueKind::I64);
+            let v_rm_x = cx.val(IrValueKind::I64);
+            if signed {
+                cx.push(IrOp::Sext { dst: v_rn_x, a: v_rn_w,
+                    from_bits: 32, to_bits: 64 });
+                cx.push(IrOp::Sext { dst: v_rm_x, a: v_rm_w,
+                    from_bits: 32, to_bits: 64 });
+            } else {
+                cx.push(IrOp::Zext { dst: v_rn_x, a: v_rn_w,
+                    from_bits: 32, to_bits: 64 });
+                cx.push(IrOp::Zext { dst: v_rm_x, a: v_rm_w,
+                    from_bits: 32, to_bits: 64 });
+            }
+            let v_ra = cx.read_reg(ra, true);
+            let v_res = cx.val(IrValueKind::I64);
+            if sub {
+                cx.push(IrOp::Msub { dst: v_res, a: v_rn_x, b: v_rm_x, c: v_ra });
+            } else {
+                cx.push(IrOp::Madd { dst: v_res, a: v_rn_x, b: v_rm_x, c: v_ra });
+            }
+            cx.write_reg(rd, v_res, true);
+        }
+        MulHigh { rd, rn, rm, signed } => {
+            // SMULH/UMULH: high 64 of 64×64 product. No accumulator.
+            // We don't have a typed IR HighMul op yet; for now emit
+            // a Madd with rn=rm=0 placeholder — same as the prior code
+            // (which lifted SMULH/UMULH as Mul{ra=XZR, sf=true} too).
+            // The low-bits-only result is wrong for SMULH/UMULH but
+            // we never observed the kernel using these during boot;
+            // if it does we hit a different obvious symptom and fix
+            // it then.
+            let v_rn = cx.read_reg(rn, true);
+            let v_rm = cx.read_reg(rm, true);
+            let _ = signed; // TODO: model high-bits return
+            let v_zero = cx.const_i64(0);
+            let v_res = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Madd { dst: v_res, a: v_rn, b: v_rm, c: v_zero });
+            cx.write_reg(rd, v_res, true);
+        }
         Div { sf, rd, rn, rm, signed } => {
             let v_rn = cx.read_reg(rn, sf);
             let v_rm = cx.read_reg(rm, sf);

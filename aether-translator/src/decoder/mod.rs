@@ -255,6 +255,31 @@ pub enum DecodedInsn {
         ra: Reg, // MADD / MSUB family; pure MUL has ra=XZR
         sub: bool,
     },
+    /// SMADDL / UMADDL / SMSUBL / UMSUBL: 32×32→64 multiply, signed or
+    /// unsigned, with optional add or subtract of a 64-bit accumulator.
+    /// `Rn` and `Rm` are READ AS 32-BIT W-REGISTERS (low half only, the
+    /// upper 32 of Xn/Xm is IGNORED). `Ra` is read as 64-bit. `Rd` is
+    /// written 64-bit. The decoded form replaces what was previously a
+    /// `Mul { sf=true }` — Phase E found that this lumping produced
+    /// wrong results when the kernel's `__next_mem_range_rev` ran
+    /// `umaddl x15, w28, w11, x9` with x28's upper half holding live
+    /// bits, because reading as Xn polluted the multiply.
+    MulLong {
+        rd: Reg,
+        rn: Reg,
+        rm: Reg,
+        ra: Reg, // XZR for the MUL alias (no accumulator)
+        sub: bool,
+        signed: bool,
+    },
+    /// SMULH / UMULH: 64×64 multiply, return the HIGH 64 bits of the
+    /// 128-bit product. No accumulator. signed = SMULH.
+    MulHigh {
+        rd: Reg,
+        rn: Reg,
+        rm: Reg,
+        signed: bool,
+    },
     Div {
         sf: bool,
         rd: Reg,

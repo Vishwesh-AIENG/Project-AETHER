@@ -303,21 +303,37 @@ fn decode_dp_3_source(word: u32) -> Result<DecodedInsn, DecodeErr> {
         0b000 => Ok(DecodedInsn::Mul {
             sf, rd, rn, rm, ra, sub: o0 != 0,
         }),
-        0b001 | 0b101 => {
+        // SMADDL/SMSUBL — 32×32 SIGNED long mul + 64-bit add/sub.
+        0b001 => {
             if !sf {
                 return Err(DecodeErr::Reserved);
             }
-            Ok(DecodedInsn::Mul {
-                sf: true, rd, rn, rm, ra, sub: o0 != 0,
+            Ok(DecodedInsn::MulLong {
+                rd, rn, rm, ra, sub: o0 != 0, signed: true,
             })
         }
-        0b010 | 0b110 => {
+        // UMADDL/UMSUBL — 32×32 UNSIGNED long mul + 64-bit add/sub.
+        0b101 => {
+            if !sf {
+                return Err(DecodeErr::Reserved);
+            }
+            Ok(DecodedInsn::MulLong {
+                rd, rn, rm, ra, sub: o0 != 0, signed: false,
+            })
+        }
+        // SMULH — high 64 of 64×64 signed mul.
+        0b010 => {
             if !sf || o0 != 0 {
                 return Err(DecodeErr::Reserved);
             }
-            Ok(DecodedInsn::Mul {
-                sf: true, rd, rn, rm, ra: Reg::XZR, sub: false,
-            })
+            Ok(DecodedInsn::MulHigh { rd, rn, rm, signed: true })
+        }
+        // UMULH — high 64 of 64×64 unsigned mul.
+        0b110 => {
+            if !sf || o0 != 0 {
+                return Err(DecodeErr::Reserved);
+            }
+            Ok(DecodedInsn::MulHigh { rd, rn, rm, signed: false })
         }
         _ => Err(DecodeErr::Reserved),
     }
