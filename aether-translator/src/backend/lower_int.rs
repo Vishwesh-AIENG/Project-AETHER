@@ -100,6 +100,36 @@ impl IntLower {
         enc: &mut X86Encoder,
         branch_patches: &mut BTreeMap<usize, crate::ir::BlockId>,
     ) {
+        Self::lower_block_with_pc(blk, 0, alloc, enc, branch_patches);
+    }
+
+    /// Phase-E variant: also stamps `LAST_GUEST_PC` with the block's
+    /// guest entry PC at block prologue. Reserved scratch RAX is used
+    /// for the staging move (no live value can occupy RAX — see
+    /// ALLOCATABLE_GPRS), so the prologue is safe to inject before any
+    /// op. Two instructions, ~22 bytes per block; only emitted when
+    /// `entry_pc != 0` (callers pass 0 from unit tests where no kernel
+    /// PC exists).
+    pub fn lower_block_with_pc(
+        blk: &IrBlock,
+        entry_pc: u64,
+        alloc: &AllocResult,
+        enc: &mut X86Encoder,
+        branch_patches: &mut BTreeMap<usize, crate::ir::BlockId>,
+    ) {
+        if entry_pc != 0 {
+            const RAX: u8 = 0;
+            const RCX: u8 = 1;
+            // RAX = entry_pc
+            enc.emit_mov_r64_imm64(RAX, entry_pc as i64);
+            // RCX = &LAST_GUEST_PC
+            let pc_addr = core::ptr::addr_of_mut!(
+                crate::runtime::mmu::LAST_GUEST_PC
+            ) as usize as i64;
+            enc.emit_mov_r64_imm64(RCX, pc_addr);
+            // [RCX] = RAX
+            enc.emit_mov_mem_r64(RCX, 0, RAX);
+        }
         for op in &blk.ops {
             Self::lower_op(op, alloc, enc, branch_patches);
         }

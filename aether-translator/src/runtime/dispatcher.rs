@@ -196,7 +196,7 @@ impl Dispatcher {
         // 6. Lower the (only) block to x86_64.
         let mut enc = X86Encoder::new();
         let mut patches: BTreeMap<usize, BlockId> = BTreeMap::new();
-        IntLower::lower_block(&ir_fn.blocks[0], &alloc, &mut enc, &mut patches);
+        IntLower::lower_block_with_pc(&ir_fn.blocks[0], guest_pc, &alloc, &mut enc, &mut patches);
         let code = enc.finish();
 
         // 7. Emit + commit.

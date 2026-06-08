@@ -328,7 +328,7 @@ impl DbtRuntime {
         let mut enc = X86Encoder::new();
         let mut branch_patches: BTreeMap<usize, crate::ir::BlockId> = BTreeMap::new();
         for blk in &func.blocks {
-            IntLower::lower_block(blk, &alloc, &mut enc, &mut branch_patches);
+            IntLower::lower_block_with_pc(blk, pc, &alloc, &mut enc, &mut branch_patches);
         }
         // Block epilogue: RET. Cheapest possible "return to dispatcher" —
         // production lowering inserts the AT-19 context-save/restore here,

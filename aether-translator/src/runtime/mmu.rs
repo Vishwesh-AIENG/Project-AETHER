@@ -185,6 +185,15 @@ pub static mut VMM_TRACE_PA: [u64; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
 pub static mut VMM_TRACE_VAL: [u64; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
 pub static mut VMM_TRACE_SIZE: [u8; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
 pub static mut VMM_TRACE_KIND: [u8; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
+/// Phase-E: guest PC of the basic-block whose code most recently ran
+/// (and therefore is currently executing the traced store/load). The
+/// backend emits a `mov [LAST_GUEST_PC], imm64` at every block entry,
+/// so each trace entry can be attributed to the ARM64 block containing
+/// the offending instruction. A single block may emit multiple stores;
+/// combined with the VA in the same entry, the source-level write site
+/// is uniquely identified.
+pub static mut LAST_GUEST_PC: u64 = 0;
+pub static mut VMM_TRACE_PC: [u64; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
 /// Monotonic counter — `(idx % CAP)` is the next slot. Lets the dumper
 /// distinguish "ring wrapped" from "ring not full" and walk oldest-first.
 pub static mut VMM_TRACE_IDX: u64 = 0;
@@ -297,6 +306,8 @@ fn vmm_trace_record(va: u64, pa: u64, value: u64, size: u8, kind: u8) {
         *core::ptr::addr_of_mut!(VMM_TRACE_VAL[i]) = value;
         *core::ptr::addr_of_mut!(VMM_TRACE_SIZE[i]) = size;
         *core::ptr::addr_of_mut!(VMM_TRACE_KIND[i]) = kind;
+        *core::ptr::addr_of_mut!(VMM_TRACE_PC[i]) =
+            *core::ptr::addr_of!(LAST_GUEST_PC);
         let cur = *core::ptr::addr_of!(VMM_TRACE_IDX);
         *core::ptr::addr_of_mut!(VMM_TRACE_IDX) = cur.wrapping_add(1);
     }

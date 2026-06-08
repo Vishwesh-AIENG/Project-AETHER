@@ -4320,6 +4320,9 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                             let vsz = *ptr::addr_of!(
                                 aether_translator::runtime::mmu::VMM_TRACE_SIZE[slot]
                             );
+                            let vpc = *ptr::addr_of!(
+                                aether_translator::runtime::mmu::VMM_TRACE_PC[slot]
+                            );
                             if kind == 1 {
                                 dual_puts(b"  STR sz=");
                             } else if kind == 2 {
@@ -4336,6 +4339,8 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                                 dual_puts(b" val=");
                                 dual_puthex64(vval);
                             }
+                            dual_puts(b" pc=");
+                            dual_puthex64(vpc);
                             dual_puts(b"\n");
                             i += 1;
                         }
