@@ -4379,6 +4379,43 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                     dual_puts(b" cnt=");
                     dual_puthex64(cur_unsafe as u64);
                     dual_puts(b"\n");
+                    // Phase-E investigation: dump the first 192 bytes of the
+                    // UNSAFE block AND the byte offset of the UD2 sentinel so
+                    // the lowering arm can be identified from the byte
+                    // pattern just before `0F 1F 40 00 0F 0B`.
+                    if let Some((host_va, blen)) =
+                        aether_translator::dbt::aether_dbt_block_host_va(pc)
+                    {
+                        dual_puts(b"[dbt]   host_va=");
+                        dual_puthex64(host_va as u64);
+                        dual_puts(b" len=");
+                        dual_puthex64(blen as u64);
+                        dual_puts(b"\n");
+                        let nlen = if blen > 64 { 64 } else { blen };
+                        let bytes = core::slice::from_raw_parts(
+                            host_va as *const u8, nlen);
+                        dual_puts(b"[dbt]   bytes:");
+                        for b in bytes.iter() {
+                            dual_puts(b" ");
+                            dual_puthex64(*b as u64);
+                        }
+                        dual_puts(b"\n");
+                        // Find the UD2 sentinel byte offset (first occurrence).
+                        let sentinel = [0x0Fu8, 0x1F, 0x40, 0x00, 0x0F, 0x0B];
+                        let full = core::slice::from_raw_parts(
+                            host_va as *const u8, blen);
+                        if let Some(idx) =
+                            full.windows(6).position(|w| w == sentinel)
+                        {
+                            dual_puts(b"[dbt]   UD2 sentinel @ off=");
+                            dual_puthex64(idx as u64);
+                            dual_puts(b" of ");
+                            dual_puthex64(blen as u64);
+                            dual_puts(b"\n");
+                        } else {
+                            dual_puts(b"[dbt]   NO sentinel in cached bytes (false-positive?)\n");
+                        }
+                    }
                     // EC=0 (Unknown / Undefined), IL=1 (32-bit insn)
                     let esr = 0u64 | (1u64 << 25);
                     let ctx_slice: &mut [u64] = &mut *ptr::addr_of_mut!(NPF_GUEST_CTX);

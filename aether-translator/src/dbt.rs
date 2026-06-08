@@ -339,12 +339,21 @@ impl DbtRuntime {
         let host_offset = match self.code_buf.alloc_block(pc, &bytes) {
             Ok(o) => o,
             Err(CodeBufError::OutOfCapacity { .. }) => {
-                // Capacity pressure: evict the entire cache + reset the
-                // buffer, then retry once. Generational eviction is owned by
-                // BlockCache; here we just give the buffer back to itself.
+                // Capacity pressure: reset the buffer, then retry once.
+                //
+                // Phase-E correctness fix: `code_buf.reset()` ZEROES the buf.
+                // Without also clearing `block_cache`, every old entry still
+                // points to a now-zeroed offset — the next dispatch hits the
+                // cache, reads zeros at that offset, fails the safety gate
+                // (no RET sentinel), and the hypervisor injects an Unknown
+                // EC undef. Real failure: kernel reached cgroup early-init
+                // after the RBIT/UMULH bring-up, then thrashed against
+                // pc=0xffffffc008f6251c (a jiffies / locking helper) as the
+                // arena filled up — every cache hit returned 0-byte code.
                 self.stat_lower_failures =
                     self.stat_lower_failures.saturating_add(1);
                 self.code_buf.reset();
+                self.block_cache.flush_all();
                 match self.code_buf.alloc_block(pc, &bytes) {
                     Ok(o) => o,
                     Err(_) => return AetherDbtResult::TranslationFailed,
