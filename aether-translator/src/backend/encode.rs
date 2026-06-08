@@ -15,6 +15,15 @@ use alloc::vec::Vec;
 /// [`X86Encoder::reserve_rel32`] + [`X86Encoder::patch_rel32`].
 pub struct X86Encoder {
     buf: Vec<u8>,
+    /// Phase-E: sticky bit set by `emit_ud2`. The block-safety gate previously
+    /// scanned the byte buffer for the `0F 0B` pair, which produced a FALSE
+    /// POSITIVE whenever an ARM ADD immediate (e.g., `add x20, x20, #0xB0F`)
+    /// lowered to `mov r/m64, imm32` and the imm32 little-endian bytes spelled
+    /// `0F 0B …`. Real failure: cgroup_disable+0x48 was rejected as UNSAFE
+    /// even though no UD2 was emitted; the kernel saw an injected Unknown EC
+    /// exception, panicked. Track UD2 emission explicitly here so the gate is
+    /// based on actual lowering decisions, not coincidental byte sequences.
+    ud2_emitted: bool,
 }
 
 impl Default for X86Encoder {
@@ -25,11 +34,24 @@ impl Default for X86Encoder {
 
 impl X86Encoder {
     pub fn new() -> Self {
-        Self { buf: Vec::new() }
+        Self { buf: Vec::new(), ud2_emitted: false }
     }
 
     pub fn finish(self) -> Vec<u8> {
         self.buf
+    }
+
+    /// Phase-E: did any `emit_ud2` happen during this encoder's lifetime?
+    /// `block_bytes_are_safe` consults this through `finish_with_ud2_flag`.
+    pub fn had_ud2(&self) -> bool { self.ud2_emitted }
+
+    /// Variant of `finish` that returns the buffer alongside the UD2 flag.
+    /// Callers that gate execution on UD2 emission (the production
+    /// VMEXIT/NPF resume path) MUST use this, not the byte-scanning
+    /// `block_bytes_are_safe`. The two-byte scan stays as a defence-in-depth
+    /// check but is no longer load-bearing for false-positive correctness.
+    pub fn finish_with_ud2_flag(self) -> (Vec<u8>, bool) {
+        (self.buf, self.ud2_emitted)
     }
 
     /// Current byte offset (used for RIP-relative calculations).
@@ -152,8 +174,25 @@ impl X86Encoder {
     }
 
     pub fn emit_ud2(&mut self) {
+        // Phase-E sentinel: prepend a unique 4-byte NOP (`0F 1F 40 00` =
+        // NOP DWORD PTR [RAX+0]) before the UD2 byte pair. The full 6-byte
+        // sequence `0F 1F 40 00 0F 0B` is then what the block-safety gate
+        // scans for, instead of plain `0F 0B`. Plain 0F 0B appears
+        // SPURIOUSLY whenever any ARM immediate happens to spell those
+        // bytes — e.g. `add x20, x20, #0xB0F` (cgroup_disable+0x48) lowers
+        // to `mov r/m64, imm32` with imm32 = 0x0000_0B0F whose little-endian
+        // bytes are `0F 0B 00 00`. That single false positive made the
+        // hypervisor inject an "Unknown" undef exception and crashed the
+        // kernel after the prior RBIT/UMULH bring-up unblocked pcpu.
+        // The semantic NOP is a no-op (instruction decoder ignores it),
+        // so prepending it does not change execution; and the 4-byte NOP
+        // pattern has effectively zero probability of appearing inside any
+        // other emitted instruction. emit_ud2 is rare (the lowering's
+        // fail-loud path) so a 4-byte tax per UD2 is acceptable.
+        self.buf.extend_from_slice(&[0x0F, 0x1F, 0x40, 0x00]);
         self.buf.push(0x0F);
         self.buf.push(0x0B);
+        self.ud2_emitted = true;
     }
 
     /// JMP rel32 (near unconditional).  Returns the offset of the rel32 field

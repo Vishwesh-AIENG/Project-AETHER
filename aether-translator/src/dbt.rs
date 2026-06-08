@@ -625,21 +625,31 @@ pub fn aether_dbt_block_host_va(pc: u64) -> Option<(usize, usize)> {
 }
 
 /// Static structural safety check for a translated x86 block before the
-/// hypervisor CALLs into it. A block is safe to enter iff it is non-empty,
-/// ends in `RET` (0xC3), and contains no `UD2` (0F 0B) — the latter is the
-/// sentinel `lower_int` plants for an unhandled/poison case (e.g. a Csel with
-/// a spilled destination), so its presence means the translator deliberately
-/// refused to produce executable code for some instruction in the block.
+/// hypervisor CALLs into it. A block is safe to enter iff:
+///   1. non-empty,
+///   2. ends in `RET` (0xC3),
+///   3. contains no `UD2` sentinel.
 ///
-/// This is the SOLE structural gate the production VMEXIT/NPF resume paths use
-/// before transferring control to JIT output; it operates on a byte slice so
-/// it stays in the `#![deny(unsafe_code)]` translator crate and is unit-test
-/// covered. The hypervisor forms the slice from the block's host VA (the only
-/// `unsafe`, on its side) and delegates here.
+/// Phase-E: the sentinel is the 6-byte sequence `0F 1F 40 00 0F 0B` — a
+/// 4-byte NOP DWORD PTR [RAX+0] (semantic no-op) followed by UD2 (`0F 0B`).
+/// `X86Encoder::emit_ud2` emits this full sequence. The prior gate scanned
+/// for the bare 2-byte `0F 0B` pair, which false-positived whenever an ARM
+/// immediate happened to spell those bytes (e.g. `add x_, x_, #0xB0F`
+/// lowering to `mov r/m64, imm32` with imm32 = 0x0000_0B0F whose
+/// little-endian bytes are `0F 0B 00 00`). Real failure: cgroup_disable+0x48
+/// (Phase-E boot path after the RBIT/UMULH fixes) was rejected as UNSAFE,
+/// the hypervisor injected an Unknown EC exception, kernel panicked.
+///
+/// This is the SOLE structural gate the production VMEXIT/NPF resume paths
+/// use before transferring control to JIT output; it operates on a byte
+/// slice so it stays in the `#![deny(unsafe_code)]` translator crate and
+/// is unit-test covered. The hypervisor forms the slice from the block's
+/// host VA (the only `unsafe`, on its side) and delegates here.
 pub fn block_bytes_are_safe(code: &[u8]) -> bool {
+    const UD2_SENTINEL: [u8; 6] = [0x0F, 0x1F, 0x40, 0x00, 0x0F, 0x0B];
     !code.is_empty()
         && code.last() == Some(&0xC3)
-        && !code.windows(2).any(|w| w == [0x0F, 0x0B])
+        && !code.windows(6).any(|w| w == UD2_SENTINEL)
 }
 
 // ── Symbol audit helpers ──────────────────────────────────────────────────────
