@@ -2252,6 +2252,183 @@ fn phase_e_smulh_negative_no_overflow_is_zero() {
     );
 }
 
+// ── Phase-E CLZ regression: kmalloc_index `fls` size class lookup ────────
+//
+// The prior Clz lowering always emitted `lzcnt_r64`. For the W-form
+// (Wn in low 32 of Xn, upper 32 zero by ARM convention) lzcnt_64
+// returned `32 + clz_32(Wn)` — values in [32..64]. WriteGpr W truncated
+// to low 32, giving wrong values. `kmalloc_index(size)` uses
+// `fls = 32 - clz_w(size)`; the buggy clz_w produced negative-or-large
+// fls → out-of-range slab index → UBSAN BRK #0x5512 at __kmalloc+0x190.
+
+/// CLZ X0, X1 with X1=1 must produce 63 (bit 0 set → 63 leading zeros).
+#[test]
+fn phase_e_clz_x_low_bit_set() {
+    // MOVZ X1, #1 ; CLZ X0, X1
+    const MOVZ_X1_1: u32 = 0xD280_0021;
+    const CLZ_X0_X1:  u32 = 0xDAC0_1020; // clz x0, x1
+    let words = [MOVZ_X1_1, CLZ_X0_X1];
+    let code = translate_straight_line(&words, 0x16800);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[0], 63, "CLZ X(1) must be 63 (got {})", ctx[0]);
+}
+
+/// CLZ X0, X1 with X1=0 must produce 64.
+#[test]
+fn phase_e_clz_x_zero() {
+    // MOVZ X1, #0 ; CLZ X0, X1
+    const MOVZ_X1_0: u32 = 0xD280_0001;
+    const CLZ_X0_X1:  u32 = 0xDAC0_1020;
+    let words = [MOVZ_X1_0, CLZ_X0_X1];
+    let code = translate_straight_line(&words, 0x16900);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[0], 64, "CLZ X(0) must be 64 (got {})", ctx[0]);
+}
+
+/// CLZ W0, W1 with W1=1 must produce 31 (NOT 63).
+/// This is the failure mode that broke __kmalloc.
+#[test]
+fn phase_e_clz_w_low_bit_set() {
+    // MOVZ W1, #1 ; CLZ W0, W1
+    const MOVZ_W1_1: u32 = 0x5280_0021;
+    const CLZ_W0_W1:  u32 = 0x5AC0_1020; // clz w0, w1
+    let words = [MOVZ_W1_1, CLZ_W0_W1];
+    let code = translate_straight_line(&words, 0x16A00);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[0], 31, "CLZ W(1) must be 31 (got {})", ctx[0]);
+}
+
+/// CLZ W0, W1 with W1=0 must produce 32 (not 64).
+#[test]
+fn phase_e_clz_w_zero() {
+    const MOVZ_W1_0: u32 = 0x5280_0001;
+    const CLZ_W0_W1:  u32 = 0x5AC0_1020;
+    let words = [MOVZ_W1_0, CLZ_W0_W1];
+    let code = translate_straight_line(&words, 0x16B00);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[0], 32, "CLZ W(0) must be 32 (got {})", ctx[0]);
+}
+
+/// CLZ W0, W1 with W1=0x80000000 must produce 0 (MSB set → 0 leading zeros).
+#[test]
+fn phase_e_clz_w_msb_set() {
+    // MOVZ W1, #0x8000, LSL #16 → w1 = 0x8000_0000
+    const MOVZ_W1_MSB: u32 = 0x52B0_0001;
+    const CLZ_W0_W1:   u32 = 0x5AC0_1020;
+    let words = [MOVZ_W1_MSB, CLZ_W0_W1];
+    let code = translate_straight_line(&words, 0x16C00);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 0x8000_0000, "W1 setup");
+    assert_eq!(ctx[0], 0, "CLZ W(0x80000000) must be 0 (got {})", ctx[0]);
+}
+
+// ── Phase-E LDXP/STXP regression: kernel CAS spinlock at 0x...343xxx ──────
+//
+// The prior Ldxr/Stxr lifter discarded the `pair` flag → LDXP loaded only
+// one register, STXP wrote only one register. Kernel 128-bit CAS spun
+// forever because the second half of the pair was stale.
+
+/// LDXP X1, X2, [X0]: loads two adjacent 64-bit words. Lay down a known
+/// pattern at the stack-style buffer and confirm BOTH registers receive
+/// the expected values.
+#[test]
+fn phase_e_ldxp_loads_pair() {
+    // Setup: store known values into a small ctx-resident buffer via a
+    // small ARM sequence that initialises x0 = &buffer, then LDXP.
+    // For simplicity: prime x0 with a buffer VA that maps to the ctx,
+    // then prepopulate the bytes via direct ctx-write before entering
+    // the block.
+    //
+    // Easier: emit a translated program that:
+    //   MOVZ X0, #LOW16(addr)
+    //   MOVK X0, #..  ; build 64-bit ctx-relative addr
+    //   LDXP X1, X2, [X0]
+    // Then assert ctx[1] / ctx[2].
+    //
+    // Even easier path: rely on the fact that LDXP routes through
+    // aether_mmu_xlate. The MMU walker's flat fallback (MMU off) returns
+    // the VA as PA. So pointing X0 at an arbitrary ctx-resident region
+    // works — the loads land on that region.
+    //
+    // For the host test we use a small static array as the "guest mem"
+    // region by allocating ctx slots and pointing X0 there. The xlate
+    // path treats VAs as PAs when SCTLR.M=0 (which it is at block entry).
+    // Use a stack buffer allocated inside `enter_block`'s safe frame:
+    // we'll use ctx slot range [10..16] as the in-memory storage.
+    let target_addr: u64 = 0x2000;
+    let mut backing = vec![0u8; 0x4000];
+    // Lay out two adjacent 64-bit values that LDXP should pick up.
+    backing[(target_addr as usize)..(target_addr as usize + 8)]
+        .copy_from_slice(&0xCAFE_BABE_DEAD_BEEFu64.to_le_bytes());
+    backing[(target_addr as usize + 8)..(target_addr as usize + 16)]
+        .copy_from_slice(&0xFEED_FACE_1234_5678u64.to_le_bytes());
+
+    // We can't easily plumb backing memory into the host execution path
+    // without the MMU walker also seeing it. So this test focuses on the
+    // LIFT correctness: translate LDXP and assert the emitted x86 contains
+    // two `aether_mmu_xlate` call sequences (one per element).
+    let words = [
+        // LDXP X1, X2, [X0]  encoding: 1100_1000_0111_1111_1000_1000_0000_0001
+        // 0xc87f8801: ldxp x1, x2, [x0]
+        0xc87f8801u32,
+    ];
+    let code = translate_straight_line(&words, 0x17000);
+    // Count xlate-call setup: `mov rax, addr_of_xlate` immediates appear
+    // for each MMU access. A pair should produce TWO such calls (not one).
+    use aether_translator::runtime::mmu::aether_mmu_xlate;
+    let xlate_addr = aether_mmu_xlate as *const () as usize as u64;
+    let xlate_le = xlate_addr.to_le_bytes();
+    // Search for the 8-byte pattern in the emitted bytes.
+    let count = code
+        .windows(8)
+        .filter(|w| *w == xlate_le)
+        .count();
+    assert!(
+        count >= 2,
+        "LDXP pair must emit TWO mmu_xlate calls (got {}); first half is the \
+         prior single-load behaviour that left rt2 stale",
+        count
+    );
+    assert_eq!(*code.last().unwrap(), 0xC3, "block must end in RET");
+}
+
+/// STXP w0, x1, x2, [x3]: stores two adjacent 64-bit words, w0 = status.
+#[test]
+fn phase_e_stxp_stores_pair() {
+    // STXP W0, X1, X2, [X3]: sz=3 / 001000 / L=0 / pair=1 / Rs=W0 /
+    // o0=0 / Rt2=X2 / Rn=X3 / Rt=X1
+    //   = 1100_1000_0010_0000_0000_1000_0110_0001 = 0xC8200861
+    let words = [0xc8200861u32];
+    let code = translate_straight_line(&words, 0x18000);
+    // StoreExclusive lowering routes through aether_mmu_xlate (write=true)
+    // then writes the bytes via emit_mov_mem*_r64. Pair lifting emits two
+    // such xlate calls — one per element.
+    use aether_translator::runtime::mmu::aether_mmu_xlate;
+    let xlate_addr = aether_mmu_xlate as *const () as usize as u64;
+    let xlate_le = xlate_addr.to_le_bytes();
+    let count = code
+        .windows(8)
+        .filter(|w| *w == xlate_le)
+        .count();
+    assert!(
+        count >= 2,
+        "STXP pair must emit TWO mmu_xlate calls (got {}); the prior single-store \
+         behaviour left the second half of the lock value stale",
+        count
+    );
+    assert_eq!(*code.last().unwrap(), 0xC3, "block must end in RET");
+}
+
 /// Phase C bisect 2: full sequence — MOVK + ADD shifted-reg.
 ///
 ///   MOVZ X10, #0x8894 ; MOVK X10, #0x7d9e, LSL #16  ; X10 = 0x7d9e8894

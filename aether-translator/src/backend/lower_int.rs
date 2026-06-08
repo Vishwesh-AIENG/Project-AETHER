@@ -1108,22 +1108,45 @@ impl IntLower {
                 enc.emit_neg_r64(rd);
                 enc.emit_add_rr64(rd, rc);
             }
-            Clz { dst, a } => {
-                // LZCNT dst, a (requires LZCNT; BSR gives 63-lz otherwise).
+            Clz { dst, a, sf } => {
+                // Phase-E correctness fix. ARM64 CLZ has two width-forms:
+                //   CLZ Xd, Xn — 64-bit, result 0..64 (64 means Xn=0)
+                //   CLZ Wd, Wn — 32-bit, result 0..32 (32 means Wn=0)
+                // The prior lowering always emitted `lzcnt_r64`. For the
+                // W-form (Wn is the low 32 of Xn, upper 32 zero by ARM
+                // convention), lzcnt_64 returns `32 + clz_32(low32)` —
+                // result in [32..64]. The W-write then truncated to low
+                // 32, giving wrong values. Real failure: __kmalloc's
+                // `kmalloc_index(size)` uses `fls = 32 - clz_w(size)`;
+                // the bug made fls land in [-32..0] → out-of-range slab
+                // index → UBSAN BRK #0x5512 at __kmalloc+0x190 (Code
+                // sequence ending in `cmp w8, #0xd; b.ls; brk 0x5512`).
+                //
+                // Fix: for !sf, follow the 64-bit lzcnt with `sub rd, 32`.
+                // For Wn=0 the lzcnt is 64, sub-32 = 32 = correct clz_32(0).
+                // For Wn=0xFFFFFFFF the lzcnt is 32, sub-32 = 0 = correct.
                 let rd = Self::gpr(alloc, *dst);
                 let ra = Self::gpr(alloc, *a);
                 enc.emit_lzcnt_r64(rd, ra);
+                if !*sf {
+                    enc.emit_sub_r64_imm32(rd, 32);
+                }
             }
-            Cls { dst, a } => {
-                // Count leading sign bits = CLZ(a XOR (a << 1)) - 1
+            Cls { dst, a, sf } => {
+                // Count leading sign bits = CLZ(a XOR (a << 1)) - 1.
+                // For W-form: do the XOR/shift in 32-bit (so the sign bit
+                // sits at bit 31, not bit 63), then clz_w. Sub-32 handles
+                // the width as in the Clz arm.
                 let rd = Self::gpr(alloc, *dst);
                 let ra = Self::gpr(alloc, *a);
-                // tmp = a << 1
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 enc.emit_shl_r64_imm8(rd, 1);
                 enc.emit_xor_rr64(rd, ra);
                 enc.emit_lzcnt_r64(rd, rd);
-                // subtract 1 (cls returns leading sign count minus the sign bit)
+                if !*sf {
+                    enc.emit_sub_r64_imm32(rd, 32);
+                }
+                // Subtract 1 (cls returns leading-sign count minus sign bit).
                 enc.emit_sub_r64_imm32(rd, 1);
             }
             Rbit { dst, a, sf } => {

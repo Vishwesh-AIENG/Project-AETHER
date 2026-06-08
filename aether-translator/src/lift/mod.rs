@@ -689,8 +689,8 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 1 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: 2 }),
                 2 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: 4 }),
                 3 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: 8 }),
-                4 => cx.push(IrOp::Clz { dst: v_res, a: v_rn }),
-                5 => cx.push(IrOp::Cls { dst: v_res, a: v_rn }),
+                4 => cx.push(IrOp::Clz { dst: v_res, a: v_rn, sf }),
+                5 => cx.push(IrOp::Cls { dst: v_res, a: v_rn, sf }),
                 _ => return Err(LiftErr::Unimplemented(0)),
             }
             cx.write_reg(rd, v_res, sf);
@@ -790,23 +790,86 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 val_a: v_a, val_b: v_b, addr: v_addr, ty,
             });
         }
-        Ldxr { size, rt, rn, acquire, pair: _, rt2: _ } => {
+        Ldxr { size, rt, rn, acquire, pair, rt2 } => {
+            // Phase-E correctness fix. The prior lifter discarded `pair` +
+            // `rt2`, so LDXP rt, rt2, [rn] silently loaded ONLY rt (a single
+            // exclusive load) and left rt2 holding its previous value. The
+            // kernel's 128-bit CAS at pc=0xffffffc0083436e8 does:
+            //   ldxp x11, x0, [x10]
+            //   eor x11, x11, x9       ; compare low half
+            //   eor x0,  x0,  x8       ; compare high half  <- stale x0!
+            //   orr x0,  x11, x0
+            //   cbnz x0, ...           ; if mismatch, exit
+            //   stlxp w11, x4, x5, [x10]
+            //   cbnz w11, retry        ; if STLXP failed, retry from ldxp
+            // With the bug, the stale x0 produced wrong compare results,
+            // STLXP wrote only one half, and the lock acquire spun forever.
+            //
+            // Single-vCPU semantics: the "exclusive" pair just means the
+            // pair is loaded as two adjacent words. The host's atomic
+            // monitor isn't needed (single CPU has no real race), so we
+            // emit two consecutive LoadExclusive ops at offsets [0, width).
             let v_addr = cx.read_reg(rn, true);
             let v_data = cx.val(IrValueKind::I64);
             cx.push(IrOp::LoadExclusive {
                 dst: v_data, addr: v_addr, ty: load_ty_for(size, false),
             });
-            let _ = acquire; // memory-order tag refined in Phase B
             cx.write_reg(rt, v_data, true);
+            if pair {
+                // Second element at addr + width.
+                let width: i64 = match size {
+                    AccessSize::Word => 4,
+                    AccessSize::DoubleWord => 8,
+                    _ => 8, // pair forms are size>=10 (Word/DoubleWord) by decoder check
+                };
+                let v_off = cx.const_i64(width);
+                let v_addr2 = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Add { dst: v_addr2, a: v_addr, b: v_off });
+                let v_data2 = cx.val(IrValueKind::I64);
+                cx.push(IrOp::LoadExclusive {
+                    dst: v_data2, addr: v_addr2, ty: load_ty_for(size, false),
+                });
+                cx.write_reg(rt2, v_data2, true);
+            }
+            let _ = acquire; // memory-order tag refined in Phase B
         }
-        Stxr { size, rs, rt, rn, release: _, pair: _, rt2: _ } => {
+        Stxr { size, rs, rt, rn, release: _, pair, rt2 } => {
+            // Phase-E correctness fix (same shape as Ldxr): STLXP wrote only
+            // ONE word instead of TWO, leaving the second half of the CAS
+            // pair stale. Fix: emit two consecutive StoreExclusive ops; OR
+            // their status bits so any failure surfaces (the kernel only
+            // looks at status==0 vs !=0).
             let v_addr = cx.read_reg(rn, true);
             let v_data = cx.read_reg(rt, true);
             let v_status = cx.val(IrValueKind::I32);
             cx.push(IrOp::StoreExclusive {
                 status: v_status, val: v_data, addr: v_addr, ty: store_ty_for(size),
             });
-            cx.write_reg(rs, v_status, false);
+            if pair {
+                let width: i64 = match size {
+                    AccessSize::Word => 4,
+                    AccessSize::DoubleWord => 8,
+                    _ => 8,
+                };
+                let v_off = cx.const_i64(width);
+                let v_addr2 = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Add { dst: v_addr2, a: v_addr, b: v_off });
+                let v_data2 = cx.read_reg(rt2, true);
+                let v_status2 = cx.val(IrValueKind::I32);
+                cx.push(IrOp::StoreExclusive {
+                    status: v_status2, val: v_data2, addr: v_addr2,
+                    ty: store_ty_for(size),
+                });
+                // Combine: result_status = v_status | v_status2 (so any
+                // half failing surfaces as non-zero to the cbnz checker).
+                let v_combined = cx.val(IrValueKind::I32);
+                cx.push(IrOp::Or {
+                    dst: v_combined, a: v_status, b: v_status2,
+                });
+                cx.write_reg(rs, v_combined, false);
+            } else {
+                cx.write_reg(rs, v_status, false);
+            }
         }
         Ldar { size, rt, rn } | Ldapr { size, rt, rn } => {
             let v_addr = cx.read_reg(rn, true);

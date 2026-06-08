@@ -150,10 +150,18 @@ pub enum IrOp {
     Clz {
         dst: IrValueId,
         a: IrValueId,
+        /// Phase-E: ARM64 CLZ has W (32-bit, result 0..32) and X
+        /// (64-bit, result 0..64) forms. Without sf, lowering would
+        /// always emit lzcnt_r64 and the W-form would return
+        /// 32 + clz_32(low32), then the W-write would truncate giving
+        /// wrong values in [32..64]. Same bug class as RBIT (sf field
+        /// added in the same Phase-E commit).
+        sf: bool,
     },
     Cls {
         dst: IrValueId,
         a: IrValueId,
+        sf: bool,
     },
     Bswap16 {
         dst: IrValueId,
@@ -1093,8 +1101,8 @@ impl IrOp {
             IrOp::Not { dst, a } => IrOp::Not { dst, a: vr(a) },
             IrOp::Rbit { dst, a, sf } => IrOp::Rbit { dst, a: vr(a), sf },
             IrOp::Rev { dst, a, bytes } => IrOp::Rev { dst, a: vr(a), bytes },
-            IrOp::Clz { dst, a } => IrOp::Clz { dst, a: vr(a) },
-            IrOp::Cls { dst, a } => IrOp::Cls { dst, a: vr(a) },
+            IrOp::Clz { dst, a, sf } => IrOp::Clz { dst, a: vr(a), sf },
+            IrOp::Cls { dst, a, sf } => IrOp::Cls { dst, a: vr(a), sf },
             IrOp::Bswap16 { dst, a } => IrOp::Bswap16 { dst, a: vr(a) },
             IrOp::Bswap32 { dst, a } => IrOp::Bswap32 { dst, a: vr(a) },
             IrOp::Bswap64 { dst, a } => IrOp::Bswap64 { dst, a: vr(a) },
