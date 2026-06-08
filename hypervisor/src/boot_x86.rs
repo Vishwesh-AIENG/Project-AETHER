@@ -3594,35 +3594,92 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puts(b"\n");
                     }
                 }
-                // Phase-G fortify-trigger diagnostic. build_sched_domains has
-                // 3 b.hs sites (0x1180c8, 0x118388, 0x118570) that all funnel
-                // to the memset-fortify thunk at 0x118c5c (adrp; add #0xced;
-                // bl fortify_panic; brk #1). When we reach 0x118c5c, fortify
-                // is about to fire — dump x2 (cmp source), x9 (canary),
-                // x20 (site-3 source), x24 (site-1/2 source), x26
-                // (site-3 base ptr) to identify which site fired and what
-                // value triggered the size > 8 check.
+                // Phase-G ptp_classifier_init diagnostic — already confirmed
+                // bpf_prog_create returns -524 (-ENOTSUPP) because BPF JIT
+                // failed with "unknown opcode 00". Hook at the JIT's
+                // pr_err_once site (0x48b8c) to capture which opcode + where
+                // it came from. w24 holds the opcode byte, plus we dump x0
+                // (ptr to bpf_insn or prog?), x1..x4 (likely insn fields),
+                // x16 (likely prog->something).
                 {
-                    static mut FORTIFY_FIRED: bool = false;
+                    static mut JIT_FIRED: bool = false;
                     let g = &*ptr::addr_of!(NPF_GUEST_CTX);
-                    if !*ptr::addr_of!(FORTIFY_FIRED)
-                       && pc == 0xFFFF_FFC0_0811_8C5C
+                    if !*ptr::addr_of!(JIT_FIRED)
+                       && pc == 0xFFFF_FFC0_0804_8B88
                     {
-                        *ptr::addr_of_mut!(FORTIFY_FIRED) = true;
-                        dual_puts(b"[fortify] thunk reached pc=0xffffffc008118c5c iter=");
+                        *ptr::addr_of_mut!(JIT_FIRED) = true;
+                        dual_puts(b"[bpf_jit] unknown opcode block iter=");
                         dual_puthex64(iter);
-                        dual_puts(b"\n[fortify]   x2(cmp_src)=");
-                        dual_puthex64(g[2]);
-                        dual_puts(b" x9=");
-                        dual_puthex64(g[9]);
-                        dual_puts(b"\n[fortify]   x20=");
+                        dual_puts(b"\n[bpf_jit]   w24(opcode)=");
+                        dual_puthex64(g[24] & 0xff);
+                        dual_puts(b" x21(idx?)=");
+                        dual_puthex64(g[21]);
+                        dual_puts(b"\n[bpf_jit]   x16(buf?)=");
+                        dual_puthex64(g[16]);
+                        dual_puts(b" x20(cur?)=");
                         dual_puthex64(g[20]);
-                        dual_puts(b" x24=");
-                        dual_puthex64(g[24]);
-                        dual_puts(b"\n[fortify]   x26=");
-                        dual_puthex64(g[26]);
-                        dual_puts(b" x28=");
-                        dual_puthex64(g[28]);
+                        dual_puts(b" x19(prog)=");
+                        dual_puthex64(g[19]);
+                        dual_puts(b"\n");
+                        // Dump 256 bytes starting at x16. Use guest_va_to_pa
+                        // helper if needed — but x16 is a kernel VA that maps
+                        // to PA via TTBR1. Walk it manually using the helper
+                        // exposed by aether_translator.
+                        let buf_va: u64 = g[16];
+                        if buf_va != 0 {
+                            dual_puts(b"[bpf_jit]   buf dump (32 insns = 256B):\n");
+                            for i in 0..32u64 {
+                                let va = buf_va + i * 8;
+                                // Use the same xlate path the dispatcher uses.
+                                let pa = aether_translator::runtime::mmu::aether_mmu_xlate(ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                                if pa == 0 { continue; }
+                                let insn_u64 = ptr::read_volatile(pa as *const u64);
+                                dual_puts(b"[bpf_jit]    [");
+                                dual_puthex64(i);
+                                dual_puts(b"] @va=");
+                                dual_puthex64(va);
+                                dual_puts(b" insn=");
+                                dual_puthex64(insn_u64);
+                                dual_puts(b"\n");
+                            }
+                        }
+                        // Also dump prog->len at x19+offset 4 (typical struct layout)
+                        let prog_va: u64 = g[19];
+                        if prog_va != 0 {
+                            let pa = aether_translator::runtime::mmu::aether_mmu_xlate(ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, prog_va, 0, 8);
+                            if pa != 0 {
+                                dual_puts(b"[bpf_jit]   *prog[0..32] dump:\n");
+                                for i in 0..4u64 {
+                                    let va = prog_va + i * 8;
+                                    let p = aether_translator::runtime::mmu::aether_mmu_xlate(ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                                    if p == 0 { continue; }
+                                    let v = ptr::read_volatile(p as *const u64);
+                                    dual_puts(b"[bpf_jit]    +");
+                                    dual_puthex64(i*8);
+                                    dual_puts(b" = ");
+                                    dual_puthex64(v);
+                                    dual_puts(b"\n");
+                                }
+                            }
+                        }
+                    }
+                }
+                // Companion hook at bpf_int_jit_compile entry (0x46ca8) —
+                // dumps bpf_prog pointer so the buffer dump above can be
+                // correlated to the prog struct. x0 = bpf_prog.
+                {
+                    static mut PROG_FIRED: bool = false;
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    if !*ptr::addr_of!(PROG_FIRED)
+                       && pc == 0xFFFF_FFC0_0804_6CA8
+                    {
+                        *ptr::addr_of_mut!(PROG_FIRED) = true;
+                        dual_puts(b"[bpf_jit] enter compile iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n[bpf_jit]   x0(prog)=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b" x1=");
+                        dual_puthex64(g[1]);
                         dual_puts(b"\n");
                     }
                 }
