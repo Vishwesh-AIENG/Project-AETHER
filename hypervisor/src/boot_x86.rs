@@ -2510,6 +2510,15 @@ unsafe fn boot_amd(
         dual_puts(b" size=");
         dual_puthex64(win_size);
         dual_puts(b"\n");
+        // Phase-G: TIGHT range over just the eBPF buffer. Captures all
+        // writes (direct + STP via xlate) to slot insn[*] including any
+        // post-memcpy clobber of insn[20]. Ring at 8192 is way more than
+        // we need for ~256 stores into a 512B buffer.
+        aether_translator::runtime::mmu::aether_arm_ebpf_store_trace(
+            0xFFFF_FFC0_0A0F_5000,
+            0xFFFF_FFC0_0A0F_5200,
+        );
+        dual_puts(b"[mmu] eBPF store tracker armed: [0xa0f5000, 0xa0f5200)\n");
         if crate::dbt_dispatch::is_armed() {
             dual_puts(b"[x86] dispatch armed (handoff staged) - host-mode dispatch loop\n");
             // M4b-5: a real kernel runs through the vendor-neutral HOST-MODE
@@ -3608,6 +3617,10 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                        && pc == 0xFFFF_FFC0_0804_8B88
                     {
                         *ptr::addr_of_mut!(JIT_FIRED) = true;
+                        // FREEZE the tracker immediately so subsequent boot
+                        // activity (which can quickly fill 1024 entries)
+                        // doesn't overwrite the convert_bpf_ld_abs traces.
+                        aether_translator::runtime::mmu::aether_freeze_ebpf_store_trace();
                         dual_puts(b"[bpf_jit] unknown opcode block iter=");
                         dual_puthex64(iter);
                         dual_puts(b"\n[bpf_jit]   w24(opcode)=");
@@ -3663,22 +3676,53 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                                 }
                             }
                         }
-                        // Also dump 8 eBPF insns centered on JIT's claimed i=20:
-                        // if insnsi starts at offset 0x30 (typical 6.1), then
-                        // insn[20] is at x19+0x30+20*8 = x19+0xd0.
-                        // Try multiple insnsi-offset candidates.
-                        if prog_va != 0 {
-                            for insnsi_off in [0x30u64, 0x38, 0x40, 0x48, 0x50] {
-                                let test_va = prog_va + insnsi_off + 20 * 8;
-                                let p = aether_translator::runtime::mmu::aether_mmu_xlate(ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, test_va, 0, 8);
-                                if p == 0 { continue; }
-                                let v = ptr::read_volatile(p as *const u64);
-                                dual_puts(b"[bpf_jit]   try insnsi_off=");
-                                dual_puthex64(insnsi_off);
-                                dual_puts(b" insn[20]=");
-                                dual_puthex64(v);
-                                dual_puts(b"\n");
-                            }
+                        // Dump the eBPF store ring. Every guest STR whose
+                        // target VA fell in [0xa0f5000, 0xa0f5400) was
+                        // recorded with its source PC. Look for the missing
+                        // store at va=0xa0f50a0 (= insn[20] slot) — if no
+                        // entry has that VA, the convert_bpf_filter loop
+                        // SKIPPED writing it. If an entry has that VA but
+                        // value=0, the lifter computed zero. Either way the
+                        // immediately-preceding entries point at the buggy
+                        // ARM64 instruction sequence.
+                        let store_idx = *ptr::addr_of!(
+                            aether_translator::runtime::mmu::EBPF_STORE_IDX
+                        );
+                        let cap = aether_translator::runtime::mmu::EBPF_STORE_CAP as u64;
+                        dual_puts(b"[ebpf_str] total stores logged=");
+                        dual_puthex64(store_idx);
+                        dual_puts(b"\n");
+                        let start = if store_idx > cap { store_idx - cap } else { 0 };
+                        let mut entry = start;
+                        while entry < store_idx {
+                            let i = (entry as usize) % aether_translator::runtime::mmu::EBPF_STORE_CAP;
+                            let pc_s = ptr::read_volatile(
+                                ptr::addr_of!(aether_translator::runtime::mmu::EBPF_STORE_PC[i])
+                            );
+                            let va_s = ptr::read_volatile(
+                                ptr::addr_of!(aether_translator::runtime::mmu::EBPF_STORE_VA[i])
+                            );
+                            let val_s = ptr::read_volatile(
+                                ptr::addr_of!(aether_translator::runtime::mmu::EBPF_STORE_VAL[i])
+                            );
+                            let sz_s = ptr::read_volatile(
+                                ptr::addr_of!(aether_translator::runtime::mmu::EBPF_STORE_SIZE[i])
+                            );
+                            let seq_s = ptr::read_volatile(
+                                ptr::addr_of!(aether_translator::runtime::mmu::EBPF_STORE_SEQ[i])
+                            );
+                            dual_puts(b"[ebpf_str]   seq=");
+                            dual_puthex64(seq_s);
+                            dual_puts(b" pc=");
+                            dual_puthex64(pc_s);
+                            dual_puts(b" va=");
+                            dual_puthex64(va_s);
+                            dual_puts(b" sz=");
+                            dual_puthex64(sz_s as u64);
+                            dual_puts(b" val=");
+                            dual_puthex64(val_s);
+                            dual_puts(b"\n");
+                            entry += 1;
                         }
                     }
                 }
@@ -3699,6 +3743,42 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puts(b" x1=");
                         dual_puthex64(g[1]);
                         dual_puts(b"\n");
+                    }
+                }
+                // Hook every memcpy call into the eBPF buffer. memcpy entry
+                // is the BTI at 0x8f1de20; the 16..32B fast path branches to
+                // 0x8f1de44. Capture x0/dst x1/src x2/size for ALL memcpys
+                // whose dst lands in the eBPF buffer. When we see memcpy #1
+                // (the suspect 32-byte one writing insn[17..20]), FREEZE the
+                // store tracker so the 8192-entry ring preserves the writes
+                // that POPULATED the src buffer — those are the stores
+                // immediately preceding memcpy and identify whoever
+                // (mis)filled src+24 = the slot that becomes insn[20]=0.
+                {
+                    static mut MEMCPY_HITS: u32 = 0;
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    let dst = g[0];
+                    if pc == 0xFFFF_FFC0_08F1_DE20
+                       && dst >= 0xFFFF_FFC0_0A0F_5000
+                       && dst <  0xFFFF_FFC0_0A0F_5200
+                       && *ptr::addr_of!(MEMCPY_HITS) < 8
+                    {
+                        let n = *ptr::addr_of!(MEMCPY_HITS);
+                        *ptr::addr_of_mut!(MEMCPY_HITS) = n + 1;
+                        dual_puts(b"[memcpy->ebpf] #");
+                        dual_puthex64(n as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" dst=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b" src=");
+                        dual_puthex64(g[1]);
+                        dual_puts(b" n=");
+                        dual_puthex64(g[2]);
+                        dual_puts(b"\n");
+                        // Don't freeze — let the tracker capture writes AFTER
+                        // memcpy too, so we can see if anything zeroes
+                        // insn[20] post-memcpy.
                     }
                 }
                 // Phase-D CRC32 fault diagnostics. The kernel hits a translation

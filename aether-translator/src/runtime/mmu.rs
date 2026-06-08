@@ -198,6 +198,66 @@ pub static mut VMM_TRACE_PC: [u64; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
 /// distinguish "ring wrapped" from "ring not full" and walk oldest-first.
 pub static mut VMM_TRACE_IDX: u64 = 0;
 
+// ── Phase-G eBPF buffer store tracker ──────────────────────────────────────
+// When `EBPF_STORE_LO <= va < EBPF_STORE_HI`, every guest STR is logged into
+// a parallel ring of (pc, va, size, value). Arm the range at runtime from
+// the hypervisor (boot_x86.rs) once we know where convert_bpf_filter's
+// output buffer lands; dump the ring when bpf_jit hits "unknown opcode" so
+// we can pinpoint which exact guest PC stored zero (or nothing) at insn[20].
+pub const EBPF_STORE_CAP: usize = 8192;
+pub static mut EBPF_STORE_LO: u64 = 0;
+pub static mut EBPF_STORE_HI: u64 = 0;
+pub static mut EBPF_STORE_IDX: u64 = 0;
+pub static mut EBPF_STORE_PC:   [u64; EBPF_STORE_CAP] = [0; EBPF_STORE_CAP];
+pub static mut EBPF_STORE_VA:   [u64; EBPF_STORE_CAP] = [0; EBPF_STORE_CAP];
+pub static mut EBPF_STORE_VAL:  [u64; EBPF_STORE_CAP] = [0; EBPF_STORE_CAP];
+pub static mut EBPF_STORE_SIZE: [u8;  EBPF_STORE_CAP] = [0; EBPF_STORE_CAP];
+/// Monotonic event counter logged with each entry — lets the dumper
+/// determine temporal order even across ring wraps.
+pub static mut EBPF_STORE_SEQ: [u64; EBPF_STORE_CAP] = [0; EBPF_STORE_CAP];
+
+/// Arm the eBPF store tracker over `[lo, hi)` by VA. Resets the ring.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_arm_ebpf_store_trace(lo: u64, hi: u64) {
+    unsafe {
+        *core::ptr::addr_of_mut!(EBPF_STORE_LO) = lo;
+        *core::ptr::addr_of_mut!(EBPF_STORE_HI) = hi;
+        *core::ptr::addr_of_mut!(EBPF_STORE_IDX) = 0;
+    }
+}
+
+/// Freeze the tracker without resetting the ring — used when bpf_jit hits
+/// "unknown opcode" so subsequent boot activity doesn't overwrite the
+/// convert_bpf_filter traces.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_freeze_ebpf_store_trace() {
+    unsafe {
+        *core::ptr::addr_of_mut!(EBPF_STORE_LO) = 0;
+        *core::ptr::addr_of_mut!(EBPF_STORE_HI) = 0;
+        // IDX preserved so dumper sees existing entries.
+    }
+}
+
+#[inline]
+#[allow(unsafe_code)]
+fn ebpf_store_record(va: u64, value: u64, size: u8) {
+    // SAFETY: EL2-private statics; single-vCPU; tracker arming is one-shot
+    // and the ring is plain POD. Mirrors the vmm_trace_record pattern above.
+    unsafe {
+        let lo = *core::ptr::addr_of!(EBPF_STORE_LO);
+        let hi = *core::ptr::addr_of!(EBPF_STORE_HI);
+        if lo == 0 || va < lo || va >= hi { return; }
+        let idx = *core::ptr::addr_of!(EBPF_STORE_IDX);
+        let i = (idx as usize) % EBPF_STORE_CAP;
+        *core::ptr::addr_of_mut!(EBPF_STORE_IDX) = idx.wrapping_add(1);
+        *core::ptr::addr_of_mut!(EBPF_STORE_PC[i])   = *core::ptr::addr_of!(LAST_GUEST_PC);
+        *core::ptr::addr_of_mut!(EBPF_STORE_VA[i])   = va;
+        *core::ptr::addr_of_mut!(EBPF_STORE_VAL[i])  = value;
+        *core::ptr::addr_of_mut!(EBPF_STORE_SIZE[i]) = size;
+        *core::ptr::addr_of_mut!(EBPF_STORE_SEQ[i])  = idx;
+    }
+}
+
 /// Arm the vmemmap tracer over `[lo, hi)` BY VA. Pass `(0, 0)` to disable.
 #[allow(unsafe_code)]
 pub extern "C" fn aether_mmu_arm_vmm_trace(lo: u64, hi: u64) {
@@ -1066,6 +1126,15 @@ pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64,
     let sysregs = unsafe { core::slice::from_raw_parts(ctx, CTX_U64S) };
     let is_w = is_write != 0;
     let mmu_on = sysregs[SYSREG_SLOT0 + SLOT_SCTLR] & SCTLR_M != 0;
+    // Phase-G: log xlate-for-write calls that fall in the eBPF buffer range.
+    // STP / wide-Q stores go through here and write to host RAM directly,
+    // bypassing aether_mmu_store — so the simple store-tracker would miss
+    // them. Value is unknown at xlate time (the caller emits raw mov-to-pa
+    // after we return), but the (pc, va, size) tuple is enough to identify
+    // which guest PC wrote which slot.
+    if is_w {
+        ebpf_store_record(va, 0xFFFF_FFFF_FFFF_FFFFu64, (size.max(1) as u8) | 0x80);
+    }
 
     // Resolve the guest PA of the first byte: flat when the MMU is off, else a
     // TLB-cached single-page walk.
@@ -1219,6 +1288,7 @@ pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, val
     // hypervisor can verify the kernel's store actually landed where the
     // load expects to read it from.
     vmm_trace_record(va, pa, value, sz as u8, 1);
+    ebpf_store_record(va, value, sz as u8);
     // SAFETY: `pa` is an in-window guest PA == identity host RAM (the walk /
     // flat path established it is not MMIO and, when walked, is in-window).
     unsafe {
