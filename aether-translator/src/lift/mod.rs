@@ -636,20 +636,31 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.write_reg(rd, v_res, true);
         }
         MulHigh { rd, rn, rm, signed } => {
-            // SMULH/UMULH: high 64 of 64×64 product. No accumulator.
-            // We don't have a typed IR HighMul op yet; for now emit
-            // a Madd with rn=rm=0 placeholder — same as the prior code
-            // (which lifted SMULH/UMULH as Mul{ra=XZR, sf=true} too).
-            // The low-bits-only result is wrong for SMULH/UMULH but
-            // we never observed the kernel using these during boot;
-            // if it does we hit a different obvious symptom and fix
-            // it then.
+            // SMULH / UMULH: high 64 of a 64×64 product. No accumulator.
+            //
+            // Phase-E correctness fix. The prior lifter emitted Madd
+            // (low-64 multiply-add with c=0), so SMULH/UMULH always
+            // returned the LOW 64 bits of the product — silently miscomputing
+            // every overflow check. Specifically: pcpu_build_alloc_info uses
+            // UMULH for `nr_groups * sizeof(pcpu_group_info)` overflow
+            // detection, then `cmp xzr, x_; csel x19, xzr, x_, ne`.
+            // For nr_groups=1 the correct UMULH(1, 24) is 0 → NE FALSE
+            // → x19 = aligned base_size = 0x58. The buggy Madd returned 24,
+            // making NE TRUE → x19 = 0 → base_size collapsed to zero →
+            // ai->groups[0].cpu_map = ai+0 overlapped ai->static_size →
+            // setup_first_chunk tripped `BUG_ON(!ai->static_size)`.
+            //
+            // The backend already has typed `MulHU` and `MulHS` IR ops
+            // (lower_int.rs emits x86 MUL/IMUL r/m64 returning RDX:RAX).
+            // Use them directly — no helper call, no host-arch tax.
             let v_rn = cx.read_reg(rn, true);
             let v_rm = cx.read_reg(rm, true);
-            let _ = signed; // TODO: model high-bits return
-            let v_zero = cx.const_i64(0);
             let v_res = cx.val(IrValueKind::I64);
-            cx.push(IrOp::Madd { dst: v_res, a: v_rn, b: v_rm, c: v_zero });
+            if signed {
+                cx.push(IrOp::MulHS { dst: v_res, a: v_rn, b: v_rm });
+            } else {
+                cx.push(IrOp::MulHU { dst: v_res, a: v_rn, b: v_rm });
+            }
             cx.write_reg(rd, v_res, true);
         }
         Div { sf, rd, rn, rm, signed } => {
@@ -674,7 +685,7 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let v_rn = cx.read_reg(rn, sf);
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             match opcode {
-                0 => cx.push(IrOp::Rbit { dst: v_res, a: v_rn }),
+                0 => cx.push(IrOp::Rbit { dst: v_res, a: v_rn, sf }),
                 1 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: 2 }),
                 2 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: 4 }),
                 3 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: 8 }),

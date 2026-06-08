@@ -131,6 +131,16 @@ pub enum IrOp {
     Rbit {
         dst: IrValueId,
         a: IrValueId,
+        /// Phase-E: ARM64 RBIT has W (32-bit) and X (64-bit) forms.
+        /// Without `sf`, a naive 64-bit bit reversal of a W-register
+        /// value (upper 32 = 0) places the reversed bits in the UPPER
+        /// 32 — and the W-register WriteGpr then truncates them away,
+        /// producing 0. Carrying sf lets the lowering reverse the
+        /// correct width. Discovered when `_find_first_bit` returned
+        /// the wrong index because RBIT (1) yielded 0 instead of
+        /// 0x80000000, making `pcpu_build_alloc_info`'s
+        /// `for_each_cpu` loop never increment `nr_groups`.
+        sf: bool,
     },
     Rev {
         dst: IrValueId,
@@ -1081,7 +1091,7 @@ impl IrOp {
             // Unary ALU
             IrOp::Neg { dst, a } => IrOp::Neg { dst, a: vr(a) },
             IrOp::Not { dst, a } => IrOp::Not { dst, a: vr(a) },
-            IrOp::Rbit { dst, a } => IrOp::Rbit { dst, a: vr(a) },
+            IrOp::Rbit { dst, a, sf } => IrOp::Rbit { dst, a: vr(a), sf },
             IrOp::Rev { dst, a, bytes } => IrOp::Rev { dst, a: vr(a), bytes },
             IrOp::Clz { dst, a } => IrOp::Clz { dst, a: vr(a) },
             IrOp::Cls { dst, a } => IrOp::Cls { dst, a: vr(a) },

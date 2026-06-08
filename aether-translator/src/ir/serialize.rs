@@ -409,10 +409,15 @@ pub fn encode(op: &IrOp, out: &mut Vec<u8>) -> Result<(), SerErr> {
             put_vid(out, *b);
         }
         IrOp::Neg { dst, a } | IrOp::Not { dst, a } | IrOp::Clz { dst, a } | IrOp::Cls { dst, a }
-        | IrOp::Rbit { dst, a } | IrOp::Bswap16 { dst, a } | IrOp::Bswap32 { dst, a }
+        | IrOp::Bswap16 { dst, a } | IrOp::Bswap32 { dst, a }
         | IrOp::Bswap64 { dst, a } => {
             put_vid(out, *dst);
             put_vid(out, *a);
+        }
+        IrOp::Rbit { dst, a, sf } => {
+            put_vid(out, *dst);
+            put_vid(out, *a);
+            out.push(if *sf { 1 } else { 0 });
         }
         IrOp::Madd { dst, a, b, c } | IrOp::Msub { dst, a, b, c } => {
             put_vid(out, *dst);
@@ -664,7 +669,7 @@ pub fn decode(bytes: &[u8]) -> Result<(IrOp, usize), SerErr> {
         0x21 => IrOp::Msub { dst: r.vid()?, a: r.vid()?, b: r.vid()?, c: r.vid()? },
         0x12 => IrOp::Neg { dst: r.vid()?, a: r.vid()? },
         0x16 => IrOp::Not { dst: r.vid()?, a: r.vid()? },
-        0x22 => IrOp::Rbit { dst: r.vid()?, a: r.vid()? },
+        0x22 => IrOp::Rbit { dst: r.vid()?, a: r.vid()?, sf: r.u8()? != 0 },
         0x24 => IrOp::Clz { dst: r.vid()?, a: r.vid()? },
         0x25 => IrOp::Cls { dst: r.vid()?, a: r.vid()? },
         0x26 => IrOp::Bswap16 { dst: r.vid()?, a: r.vid()? },

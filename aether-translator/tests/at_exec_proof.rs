@@ -2107,6 +2107,151 @@ fn phase_c_movk_preserves_low_bits() {
     );
 }
 
+// ── Phase-E RBIT regression: pcpu_build_alloc_info nr_groups=0 root cause ─────
+//
+// _find_first_bit (lib/find_bit.c) does `RBIT ; CLZ` to locate the first set
+// bit in a bitmap. The prior RBIT lowering emitted BSWAP + NOP (the bit-
+// reverse-per-byte step was literally stubbed to NOP), so RBIT(1) returned
+// 0x0100_0000_0000_0000 instead of 0x8000_0000_0000_0000. CLZ on the wrong
+// value then returned 7 instead of 0, so _find_first_bit(cpumask, 32) said
+// "first set bit at index 7" instead of 0 — the cpu loop in
+// pcpu_build_alloc_info skipped the only present CPU, nr_groups stayed 0,
+// and the kernel hit `kernel BUG at mm/percpu.c:2615`.
+
+/// 64-bit RBIT: RBIT (1) must produce 0x8000_0000_0000_0000.
+#[test]
+fn phase_e_rbit_x_low_bit_to_msb() {
+    // MOVZ X1, #1       (X1 = 1)
+    // RBIT X0, X1       (X0 = bit-reverse(X1))
+    const MOVZ_X1_1: u32 = 0xD280_0021;
+    const RBIT_X0_X1: u32 = 0xDAC0_0020;
+    let words = [MOVZ_X1_1, RBIT_X0_X1];
+    let code = translate_straight_line(&words, 0x16000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 0x0000_0000_0000_0001, "X1 setup");
+    assert_eq!(
+        ctx[0], 0x8000_0000_0000_0000,
+        "RBIT X0,X1 with X1=1 must produce 0x8000000000000000 (got 0x{:x})",
+        ctx[0]
+    );
+}
+
+/// 64-bit RBIT round trip: RBIT(RBIT(v)) == v.
+#[test]
+fn phase_e_rbit_x_involution() {
+    // MOVZ X1, #0xCAFE; MOVK X1, #0xBABE, LSL #16; RBIT X0, X1; RBIT X2, X0
+    const MOVZ_X1: u32 = 0xD299_5FC1; // movz x1, #0xcafe
+    const MOVK_X1: u32 = 0xF2B7_57C1; // movk x1, #0xbabe, lsl #16
+    const RBIT_X0_X1: u32 = 0xDAC0_0020;
+    const RBIT_X2_X0: u32 = 0xDAC0_0002;
+    let words = [MOVZ_X1, MOVK_X1, RBIT_X0_X1, RBIT_X2_X0];
+    let code = translate_straight_line(&words, 0x16100);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 0xBABE_CAFE, "X1 setup");
+    assert_eq!(
+        ctx[2], ctx[1],
+        "RBIT(RBIT(v)) must equal v (got X2=0x{:x} vs X1=0x{:x})",
+        ctx[2], ctx[1]
+    );
+}
+
+/// 32-bit RBIT W: RBIT W0, W1 with W1=1 must produce 0x8000_0000 in the low
+/// 32 of X0 and zero the upper 32. This is the path exercised by find_bit
+/// when CONFIG_KALLSYMS or 32-bit cpumask access reaches the W form.
+#[test]
+fn phase_e_rbit_w_low_bit_to_bit31() {
+    // MOVZ W1, #1
+    // RBIT W0, W1
+    const MOVZ_W1_1: u32 = 0x5280_0021;
+    const RBIT_W0_W1: u32 = 0x5AC0_0020;
+    let words = [MOVZ_W1_1, RBIT_W0_W1];
+    let code = translate_straight_line(&words, 0x16200);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 1, "W1 setup");
+    assert_eq!(
+        ctx[0], 0x0000_0000_8000_0000,
+        "RBIT W0,W1 with W1=1 must yield 0x80000000 in low 32, upper 32 zero (got 0x{:x})",
+        ctx[0]
+    );
+}
+
+// ── Phase-E UMULH/SMULH regression: pcpu_build_alloc_info static_size=0 ─────
+//
+// pcpu_build_alloc_info uses `UMULH x_, x_, x_` to detect overflow in the
+// base_size computation. The prior MulHigh lifter emitted `Madd` (low-64
+// multiply-add with c=0) instead of the actual high-64 multiply — so the
+// overflow check ALWAYS reported the low bits of the product, miscomparing
+// in `cmp xzr, x_; csel x19, xzr, x_, ne`. For nr_groups=1, UMULH(1,24)=0
+// should evaluate NE FALSE so x19 keeps the real base_size (0x58); the bug
+// returned 24 → NE TRUE → x19=0 → cpu_map collapsed onto ai->static_size
+// → kernel BUG at percpu.c:2617 (ai->static_size == 0).
+
+/// UMULH(1, 24) must produce 0 (high 64 of 1*24 = 24 fits in low 64).
+#[test]
+fn phase_e_umulh_no_overflow_is_zero() {
+    // MOVZ X1, #1 ; MOVZ X2, #24 ; UMULH X0, X1, X2
+    const MOVZ_X1_1: u32 = 0xD280_0021;
+    const MOVZ_X2_24: u32 = 0xD280_0302;
+    const UMULH_X0_X1_X2: u32 = 0x9BC2_7C20;
+    let words = [MOVZ_X1_1, MOVZ_X2_24, UMULH_X0_X1_X2];
+    let code = translate_straight_line(&words, 0x16300);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 1, "X1 setup");
+    assert_eq!(ctx[2], 24, "X2 setup");
+    assert_eq!(
+        ctx[0], 0,
+        "UMULH(1, 24) must yield 0 (high 64 of 24) (got 0x{:x})",
+        ctx[0]
+    );
+}
+
+/// UMULH high bits: 2^63 * 2 → high=1.
+#[test]
+fn phase_e_umulh_overflow_high_bit() {
+    // X1 = 2^63 ; X2 = 2 ; UMULH X0, X1, X2 -> 1
+    const MOVZ_X1_2P63: u32 = 0xD2F0_0001; // movz x1, #0x8000, lsl #48
+    const MOVZ_X2_2:    u32 = 0xD280_0042;
+    const UMULH_X0_X1_X2: u32 = 0x9BC2_7C20;
+    let words = [MOVZ_X1_2P63, MOVZ_X2_2, UMULH_X0_X1_X2];
+    let code = translate_straight_line(&words, 0x16400);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 0x8000_0000_0000_0000, "X1 setup");
+    assert_eq!(ctx[2], 2, "X2 setup");
+    assert_eq!(
+        ctx[0], 1,
+        "UMULH(2^63, 2) must yield 1 (got 0x{:x})", ctx[0]
+    );
+}
+
+/// SMULH: -1 * -1 = 1 → high 64 = 0.
+#[test]
+fn phase_e_smulh_negative_no_overflow_is_zero() {
+    const MOVN_X1_M1: u32 = 0x9280_0001;
+    const MOVN_X2_M1: u32 = 0x9280_0002;
+    const SMULH_X0_X1_X2: u32 = 0x9B42_7C20;
+    let words = [MOVN_X1_M1, MOVN_X2_M1, SMULH_X0_X1_X2];
+    let code = translate_straight_line(&words, 0x16500);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 0xFFFF_FFFF_FFFF_FFFF, "X1 setup -1");
+    assert_eq!(ctx[2], 0xFFFF_FFFF_FFFF_FFFF, "X2 setup -1");
+    assert_eq!(
+        ctx[0], 0,
+        "SMULH(-1, -1) must yield 0 (got 0x{:x})", ctx[0]
+    );
+}
+
 /// Phase C bisect 2: full sequence — MOVK + ADD shifted-reg.
 ///
 ///   MOVZ X10, #0x8894 ; MOVK X10, #0x7d9e, LSL #16  ; X10 = 0x7d9e8894

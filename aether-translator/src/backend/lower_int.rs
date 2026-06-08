@@ -1011,21 +1011,61 @@ impl IntLower {
                 enc.emit_imul_rr64(rd, rb);
             }
             MulHU { dst, a, b } => {
-                // RAX = a, MUL b → RDX:RAX; result high in RDX.
-                let rd = Self::gpr(alloc, *dst);
-                let ra = Self::gpr(alloc, *a);
-                let rb = Self::gpr(alloc, *b);
-                if ra != 0 { enc.emit_mov_rr64(0, ra); } // RAX = a
-                enc.emit_mul_r64(rb);
-                if rd != 2 { enc.emit_mov_rr64(rd, 2); } // dst = RDX
+                // Phase-E correctness fix. Previously this used Self::gpr (the
+                // legacy non-spill-aware helper that returns RAX for a spilled
+                // value), so a spilled `a` or `b` silently miscompiled (the
+                // operand reads landed on the scratch register before the MUL
+                // ran). It also clobbered RDX without preservation — any live
+                // value the allocator placed in RDX (RDX is in ALLOCATABLE_GPRS)
+                // was destroyed by every MulHU. Both paths matter for the
+                // kernel: pcpu_build_alloc_info's overflow check at fc6b0
+                // `umulh x8, x8, x10` lowers via this arm under high register
+                // pressure (16+ live values). Caught when the prior MulHigh
+                // bug (lifted as Madd; fixed in the same commit) was repaired
+                // and the second-order bug surfaced — kernel BUG at percpu.c
+                // 2617 ai->static_size == 0 because x19 (= aligned base_size)
+                // ended up 0 from a bad NE flag from the wrong umulh result.
+                //
+                // Marshal: RAX = a (load through SCRATCH0 if `a` spilled),
+                // SCRATCH1 = b (load through SCRATCH1 if `b` spilled — covers
+                // the b-in-RAX case too because src_in for a non-spilled value
+                // returns its allocated reg which is never RAX). Save RDX
+                // before the MUL (RDX may hold a live value); store dst from
+                // RDX after; restore RDX if dst is not RDX itself.
+                const RAX: u8 = 0;
+                const RCX: u8 = 1;
+                const RDX: u8 = 2;
+                let ra = Self::src_in(alloc, enc, *a, RAX);
+                if ra != RAX { enc.emit_mov_rr64(RAX, ra); }
+                let rb = Self::src_in(alloc, enc, *b, RCX);
+                // If `b` resolved to RAX (impossible by allocator rules but
+                // defensive), copy through RCX so MUL doesn't read RAX twice.
+                let rb_safe = if rb == RAX { enc.emit_mov_rr64(RCX, RAX); RCX } else { rb };
+                let (rd, sp) = Self::dest_work(alloc, *dst, RDX);
+                // Preserve RDX if it could hold a live (non-dst) value.
+                let preserve_rdx = rd != RDX;
+                if preserve_rdx { enc.emit_push_r64(RDX); }
+                enc.emit_mul_r64(rb_safe);
+                if rd != RDX { enc.emit_mov_rr64(rd, RDX); }
+                if preserve_rdx { enc.emit_pop_r64(RDX); }
+                Self::store_dest(alloc, enc, *dst, rd, sp);
             }
             MulHS { dst, a, b } => {
-                let rd = Self::gpr(alloc, *dst);
-                let ra = Self::gpr(alloc, *a);
-                let rb = Self::gpr(alloc, *b);
-                if ra != 0 { enc.emit_mov_rr64(0, ra); }
-                enc.emit_imul1_r64(rb);
-                if rd != 2 { enc.emit_mov_rr64(rd, 2); }
+                // Same rationale and shape as MulHU (signed variant: IMUL r64).
+                const RAX: u8 = 0;
+                const RCX: u8 = 1;
+                const RDX: u8 = 2;
+                let ra = Self::src_in(alloc, enc, *a, RAX);
+                if ra != RAX { enc.emit_mov_rr64(RAX, ra); }
+                let rb = Self::src_in(alloc, enc, *b, RCX);
+                let rb_safe = if rb == RAX { enc.emit_mov_rr64(RCX, RAX); RCX } else { rb };
+                let (rd, sp) = Self::dest_work(alloc, *dst, RDX);
+                let preserve_rdx = rd != RDX;
+                if preserve_rdx { enc.emit_push_r64(RDX); }
+                enc.emit_imul1_r64(rb_safe);
+                if rd != RDX { enc.emit_mov_rr64(rd, RDX); }
+                if preserve_rdx { enc.emit_pop_r64(RDX); }
+                Self::store_dest(alloc, enc, *dst, rd, sp);
             }
             SDiv { dst, a, b } => {
                 let rd = Self::gpr(alloc, *dst);
@@ -1086,18 +1126,74 @@ impl IntLower {
                 // subtract 1 (cls returns leading sign count minus the sign bit)
                 enc.emit_sub_r64_imm32(rd, 1);
             }
-            Rbit { dst, a } => {
-                // No native RBIT on x86; emulate with a 64-bit bit reversal.
-                // Use a simple byte-swap then bit-reverse each byte (3 ops).
-                // Production: emit a small unrolled loop or call a helper.
-                // For the lowering pass, emit BSWAP then a bit-reverse per byte.
-                let rd = Self::gpr(alloc, *dst);
-                let ra = Self::gpr(alloc, *a);
-                if rd != ra { enc.emit_mov_rr64(rd, ra); }
-                enc.emit_bswap_r64(rd);
-                // Bit-reverse each byte via lookup table (stubbed as NOP for AT-12
-                // gate; full implementation in AT-13/14 helper).
-                enc.emit_nop();
+            Rbit { dst, a, sf } => {
+                // Phase-E correctness fix. The prior lowering emitted BSWAP +
+                // NOP, dropping the per-byte bit-reverse step entirely (the
+                // comment literally said "stubbed as NOP for AT-12 gate;
+                // full implementation in AT-13/14 helper"). RBIT(1) therefore
+                // returned 0x0100_0000_0000_0000 (a byte swap) instead of
+                // 0x8000_0000_0000_0000 (the true bit reversal). Real failure:
+                // `_find_first_bit` (mm/percpu's for_each_cpu helper) uses
+                // `RBIT; CLZ` to locate the first set bit — the bug made it
+                // return 7 instead of 0, so `pcpu_build_alloc_info`'s outer
+                // `for (group = 0; !cpumask_empty(...); group++)` loop never
+                // entered the body for cpu 0, leaving nr_groups=0 and tripping
+                // `kernel BUG at mm/percpu.c:2615` (ai->nr_groups <= 0).
+                //
+                // Algorithm (classic 64-bit bit reversal): three rounds of
+                // swap-adjacent (1-bit, 2-bit, 4-bit) followed by a BSWAP for
+                // the final byte-level reverse. ~25 x86 insns, ~80 bytes.
+                //
+                // SF: for the W-form (sf=false) the input W-register sits in
+                // the low 32 bits with the upper 32 zero. A 64-bit reversal
+                // would land the reversed bits in the UPPER 32, then the
+                // WriteGpr's mov_rr32 zero-extend would truncate them to 0.
+                // Compensate with a SHR rd,32 after the reverse so the bits
+                // come back to the low 32 (where the W-write expects them).
+                //
+                // Spilled operands are rare for a single-source op; fail loud
+                // (UD2) rather than miscompute (RAX/RCX scratch collision).
+                if Self::is_spilled(alloc, *dst) || Self::is_spilled(alloc, *a) {
+                    enc.emit_ud2();
+                } else {
+                    let rd = Self::gpr(alloc, *dst);
+                    let ra = Self::gpr(alloc, *a);
+                    const RAX: u8 = 0;
+                    const RCX: u8 = 1;
+                    if rd != ra { enc.emit_mov_rr64(rd, ra); }
+                    // Three swap rounds. Mask + shift width per round:
+                    //   round 0: mask 0x5555_5555_5555_5555, shift 1
+                    //   round 1: mask 0x3333_3333_3333_3333, shift 2
+                    //   round 2: mask 0x0F0F_0F0F_0F0F_0F0F, shift 4
+                    const MASKS: [(i64, u8); 3] = [
+                        (0x5555_5555_5555_5555u64 as i64, 1),
+                        (0x3333_3333_3333_3333u64 as i64, 2),
+                        (0x0F0F_0F0F_0F0F_0F0Fu64 as i64, 4),
+                    ];
+                    for &(mask, sh) in MASKS.iter() {
+                        // RAX = mask
+                        enc.emit_mov_r64_imm64(RAX, mask);
+                        // RCX = rd
+                        enc.emit_mov_rr64(RCX, rd);
+                        // RCX >>= sh
+                        enc.emit_shr_r64_imm8(RCX, sh);
+                        // RCX &= mask
+                        enc.emit_and_rr64(RCX, RAX);
+                        // rd &= mask
+                        enc.emit_and_rr64(rd, RAX);
+                        // rd <<= sh
+                        enc.emit_shl_r64_imm8(rd, sh);
+                        // rd |= RCX
+                        enc.emit_or_rr64(rd, RCX);
+                    }
+                    // Final BSWAP (byte-level reverse of the bit-swapped result).
+                    enc.emit_bswap_r64(rd);
+                    if !*sf {
+                        // W-form: bring the reversed low-32-bits back to the
+                        // low half so the W-write zero-extension reaches them.
+                        enc.emit_shr_r64_imm8(rd, 32);
+                    }
+                }
             }
             Rev { dst, a, bytes } => {
                 let rd = Self::gpr(alloc, *dst);
