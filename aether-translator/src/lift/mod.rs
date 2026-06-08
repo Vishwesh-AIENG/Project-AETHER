@@ -675,10 +675,98 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.write_reg(rd, v_res, sf);
         }
         Shift { sf, rd, rn, rm, kind } => {
-            let v_rn = cx.read_reg(rn, sf);
-            let v_rm = cx.read_reg(rm, sf);
+            // Phase-G correctness fix. ARM's `LSL/LSR/ASR/ROR (register)` uses
+            // a width-specific shift amount mask:
+            //   W-form: amount = Rm[4:0]      (mod 32)
+            //   X-form: amount = Rm[5:0]      (mod 64)
+            // The backend emits x86 `shl/shr/sar/ror r64, cl` which uses
+            // CL & 0x3F (mod 64). For sf=false (W-form) we must:
+            //   (a) mask the amount with 0x1F so it never exceeds 31
+            //       (otherwise r64 shift moves bits into the upper 32 →
+            //        WriteGpr W truncates them away → wrong result),
+            //   (b) for ASR: sign-extend Rn from 32 → 64 first so the sign
+            //       bit at position 31 propagates correctly when shifted
+            //       right (zero-extended Wn has upper 32 = 0, so r64 ASR
+            //       would shift in zeros instead of sign bits),
+            //   (c) for ROR: rotate within the 32-bit width; r64 ROR would
+            //       wrap bits into bits 32..63 (which get truncated). Use
+            //       `(Rn >> amt) | (Rn << (32 - amt))` masked to 32 bits.
+            //
+            // Real failure: kernel `kmalloc_index` already broken by the
+            // sibling CLZ-W bug (fixed in this commit); other W-shift sites
+            // (cpumask manipulation in build_sched_domains, BIT_WORD/
+            // BIT_MASK macros) hit the SAME class of miscompile.
+            let v_rn_raw = cx.read_reg(rn, sf);
+            let v_rm_raw = cx.read_reg(rm, sf);
+            // (a) Mask the amount.
+            let v_rm = if sf {
+                v_rm_raw
+            } else {
+                // Wm & 0x1F: only the low 5 bits of the amount matter.
+                let v_mask = cx.const_i64(0x1F);
+                let v_masked = cx.val(IrValueKind::I32);
+                cx.push(IrOp::And { dst: v_masked, a: v_rm_raw, b: v_mask });
+                v_masked
+            };
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
-            cx.push(shift_to_irop(kind)(v_res, v_rn, v_rm));
+            // For W-form ROR + ASR we need special handling. LSL/LSR with
+            // the masked amount (< 32) on a zero-extended Wn work correctly
+            // via plain r64 shift + W-write truncation.
+            if !sf {
+                use crate::decoder::ShiftKind;
+                match kind {
+                    ShiftKind::Lsl | ShiftKind::Lsr => {
+                        cx.push(shift_to_irop(kind)(v_res, v_rn_raw, v_rm));
+                    }
+                    ShiftKind::Asr => {
+                        // Sign-extend Wn from 32 → 64, then AShr, then the
+                        // W-write truncation drops the (sign-extended) upper
+                        // 32 leaving the correct low 32 result.
+                        let v_sext = cx.val(IrValueKind::I64);
+                        cx.push(IrOp::Sext {
+                            dst: v_sext, a: v_rn_raw,
+                            from_bits: 32, to_bits: 64,
+                        });
+                        cx.push(IrOp::AShr { dst: v_res, a: v_sext, b: v_rm });
+                    }
+                    ShiftKind::Ror => {
+                        // 32-bit rotate-right: low 32 = (Rn >> amt) | (Rn << (32 - amt)).
+                        // We synthesize via two shifts + mask.
+                        let v_lo = cx.val(IrValueKind::I64);
+                        cx.push(IrOp::LShr { dst: v_lo, a: v_rn_raw, b: v_rm });
+                        // hi = Rn << (32 - amt). Compute (32 - amt) carefully:
+                        //   when amt == 0, hi shift is 32 which would clobber
+                        //   the low 32 result. Mask the OR result to 32 bits.
+                        let v_thirtytwo = cx.const_i64(32);
+                        let v_comp = cx.val(IrValueKind::I64);
+                        cx.push(IrOp::Sub { dst: v_comp, a: v_thirtytwo, b: v_rm });
+                        // Mask comp to 0x1F so an amt=0 ROR (32-0=32) wraps
+                        // to 0 instead of going off the end. ARM ROR with
+                        // amount=0 is a no-op (Rn unchanged); 32-bit ROR
+                        // mask: comp & 0x1F when amt != 0; when amt == 0 we
+                        // want hi=0 so the OR gives Rn. Use a select via
+                        // mask: shift by 0 is a no-op anyway, but combined
+                        // with Rn that's the wrong value. Cleaner: branch on
+                        // amt == 0 ? Rn : (lo | hi).
+                        let v_comp_masked = cx.val(IrValueKind::I64);
+                        let v_lo5 = cx.const_i64(0x1F);
+                        cx.push(IrOp::And { dst: v_comp_masked, a: v_comp, b: v_lo5 });
+                        let v_hi = cx.val(IrValueKind::I64);
+                        cx.push(IrOp::Shl { dst: v_hi, a: v_rn_raw, b: v_comp_masked });
+                        // Combine. For amt==0: lo = Rn, hi = Rn << 0 = Rn.
+                        // OR gives Rn | Rn = Rn. Correct.
+                        // For amt > 0: lo = Rn>>amt, hi = Rn<<(32-amt). OR
+                        // is the 32-bit rotate; mask to 32 to drop the
+                        // overflow from hi.
+                        let v_or = cx.val(IrValueKind::I64);
+                        cx.push(IrOp::Or { dst: v_or, a: v_lo, b: v_hi });
+                        let v_mask32 = cx.const_i64(0xFFFF_FFFF);
+                        cx.push(IrOp::And { dst: v_res, a: v_or, b: v_mask32 });
+                    }
+                }
+            } else {
+                cx.push(shift_to_irop(kind)(v_res, v_rn_raw, v_rm));
+            }
             cx.write_reg(rd, v_res, sf);
         }
         DataOp1Src { sf, rd, rn, opcode } => {
