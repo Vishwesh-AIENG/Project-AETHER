@@ -3643,13 +3643,14 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                                 dual_puts(b"\n");
                             }
                         }
-                        // Also dump prog->len at x19+offset 4 (typical struct layout)
+                        // Also dump prog->len at x19+offset 4 (typical struct layout).
+                        // x19 holds the bpf_prog pointer (saved x0 at function entry).
                         let prog_va: u64 = g[19];
                         if prog_va != 0 {
                             let pa = aether_translator::runtime::mmu::aether_mmu_xlate(ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, prog_va, 0, 8);
                             if pa != 0 {
-                                dual_puts(b"[bpf_jit]   *prog[0..32] dump:\n");
-                                for i in 0..4u64 {
+                                dual_puts(b"[bpf_jit]   *prog[0..64] dump:\n");
+                                for i in 0..8u64 {
                                     let va = prog_va + i * 8;
                                     let p = aether_translator::runtime::mmu::aether_mmu_xlate(ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
                                     if p == 0 { continue; }
@@ -3660,6 +3661,23 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                                     dual_puthex64(v);
                                     dual_puts(b"\n");
                                 }
+                            }
+                        }
+                        // Also dump 8 eBPF insns centered on JIT's claimed i=20:
+                        // if insnsi starts at offset 0x30 (typical 6.1), then
+                        // insn[20] is at x19+0x30+20*8 = x19+0xd0.
+                        // Try multiple insnsi-offset candidates.
+                        if prog_va != 0 {
+                            for insnsi_off in [0x30u64, 0x38, 0x40, 0x48, 0x50] {
+                                let test_va = prog_va + insnsi_off + 20 * 8;
+                                let p = aether_translator::runtime::mmu::aether_mmu_xlate(ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, test_va, 0, 8);
+                                if p == 0 { continue; }
+                                let v = ptr::read_volatile(p as *const u64);
+                                dual_puts(b"[bpf_jit]   try insnsi_off=");
+                                dual_puthex64(insnsi_off);
+                                dual_puts(b" insn[20]=");
+                                dual_puthex64(v);
+                                dual_puts(b"\n");
                             }
                         }
                     }
