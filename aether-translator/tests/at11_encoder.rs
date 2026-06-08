@@ -35,9 +35,12 @@ fn at11_nop() {
 
 #[test]
 fn at11_ud2() {
+    // 6-byte sentinel (NOP4 + UD2 = 0F 1F 40 00 / 0F 0B) — ch7e23b86.
+    // The leading NOP4 prevents false-positive matches when ARM imm bytes
+    // happen to spell `0F 0B` (e.g. `add x_,x_,#0xB0F` lifts that pattern).
     let mut e = enc();
     e.emit_ud2();
-    assert_eq!(e.finish(), [0x0F, 0x0B]);
+    assert_eq!(e.finish(), [0x0F, 0x1F, 0x40, 0x00, 0x0F, 0x0B]);
 }
 
 // ── Barriers ─────────────────────────────────────────────────────────────────

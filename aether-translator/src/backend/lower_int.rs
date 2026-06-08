@@ -1754,28 +1754,29 @@ impl IntLower {
             }
             CondBranch { cond, flags: _, taken, fallthru: _ } => {
                 use crate::decoder::Cond as C;
-                let x86_cc = match cond {
-                    C::Eq => cc::Z,
-                    C::Ne => cc::NZ,
-                    C::Cs => cc::NB, // HS (unsigned >=)
-                    C::Cc => cc::B,  // LO (unsigned <)
-                    C::Mi => cc::S,
-                    C::Pl => cc::NS,
-                    C::Vs => cc::O,
-                    C::Vc => cc::NO,
-                    C::Hi => cc::NBE,
-                    C::Ls => cc::BE,
-                    C::Ge => cc::NL,
-                    C::Lt => cc::L,
-                    C::Gt => cc::NLE,
-                    C::Le => cc::LE,
-                    C::Al | C::Nv => {
-                        let patch = enc.emit_jmp_rel32();
-                        branch_patches.insert(patch, *taken);
-                        return;
-                    }
-                };
-                let patch = enc.emit_jcc_rel32(x86_cc);
+                // CRITICAL: Read ARM NZCV from memory, NOT x86 EFLAGS.
+                // ARM b.cond consumes the ARM C/Z/N/V flags committed by the
+                // last ARM flag-setting op (Cmp/SubS/AddS/Tst/etc.) via
+                // build_nzcv → [R15+NZCV]. Between that op and this b.cond,
+                // OTHER IR ops can run (Tbz/Tbnz lowers to `shr; test`; Cbz
+                // to `test`; Load to MMU helper calls that clobber every
+                // x86 flag). x86 EFLAGS are gone. We must rebuild the ARM
+                // condition from the in-memory NZCV byte.
+                //
+                // Pattern: load packed NZCV → bit-test → setcc bool → test
+                // bool, bool → jcc NZ.
+                if matches!(cond, C::Al | C::Nv) {
+                    let patch = enc.emit_jmp_rel32();
+                    branch_patches.insert(patch, *taken);
+                    return;
+                }
+                // Load packed NZCV word into SCRATCH0.
+                enc.emit_mov_r64_mem(SCRATCH0, CONTEXT_REG, NZCV_DISP);
+                // emit_arm_cond_to_bool: bit 0 of `out` reg = ARM condition.
+                Self::emit_arm_cond_to_bool(enc, SCRATCH0, SCRATCH1, *cond);
+                // test scratch1, scratch1 → ZF = (cond == 0).
+                enc.emit_test_rr64(SCRATCH1, SCRATCH1);
+                let patch = enc.emit_jcc_rel32(cc::NZ);
                 branch_patches.insert(patch, *taken);
                 // fallthru falls through — no emit needed.
             }

@@ -2252,6 +2252,89 @@ fn phase_e_smulh_negative_no_overflow_is_zero() {
     );
 }
 
+// ── Phase-G W-form shift edge-case audit ──────────────────────────────────
+//
+// ARM `LSL Wd, Wn, Wm` uses Wm[4:0] (mod 32) for shift amount.
+// ARM `LSL Xd, Xn, Xm` uses Xm[5:0] (mod 64).
+// Backend always emits r64 shift; x86 SHL r64 uses CL & 0x3F.
+// For shift amount >= 32 on W form, results diverge.
+
+/// LSL W0, W1, W2 with W1=1, W2=33: ARM does W1 << (33 % 32) = 1 << 1 = 2.
+#[test]
+fn phase_g_lsl_w_mod_32() {
+    // MOVZ W1, #1 ; MOVZ W2, #33 ; LSL W0, W1, W2
+    // LSL Wd, Wn, Wm encoding: 0001_1010_110m_mmmm_0010_00nn_nnnd_dddd
+    // For Wd=0, Wn=1, Wm=2: 0x1AC22020
+    const MOVZ_W1_1:  u32 = 0x5280_0021;
+    const MOVZ_W2_33: u32 = 0x5280_0422;
+    const LSL_W0_W1_W2: u32 = 0x1AC2_2020;
+    let words = [MOVZ_W1_1, MOVZ_W2_33, LSL_W0_W1_W2];
+    let code = translate_straight_line(&words, 0x17500);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 1, "W1 setup");
+    assert_eq!(ctx[2], 33, "W2 setup");
+    assert_eq!(
+        ctx[0], 2,
+        "LSL W(1, 33) must be 1<<1=2 (ARM uses Wm[4:0]); got 0x{:x}", ctx[0]
+    );
+}
+
+/// ASR W0, W1, W2 with W1=0x80000000 (negative), W2=1: ARM ASR-32 = 0xC0000000.
+#[test]
+fn phase_g_asr_w_sign_extend() {
+    // MOVZ W1, #0x8000, LSL #16 ; MOVZ W2, #1 ; ASR W0, W1, W2
+    // ASR Wd, Wn, Wm: 0001_1010_110m_mmmm_0010_10nn_nnnd_dddd
+    // 0x1AC22820
+    // MOVZ W1, #0x8000, LSL #16 → W1 = 0x80000000  (enc: 0x52B00001;
+    // capstone displays as `mov w1, #-0x80000000` due to signed-extend).
+    const MOVZ_W1_MSB: u32 = 0x52B0_0001;
+    const MOVZ_W2_1:   u32 = 0x5280_0022;
+    const ASR_W0_W1_W2: u32 = 0x1AC2_2820;
+    let words = [MOVZ_W1_MSB, MOVZ_W2_1, ASR_W0_W1_W2];
+    let code = translate_straight_line(&words, 0x17600);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 0x8000_0000, "W1 setup");
+    assert_eq!(ctx[2], 1, "W2 setup");
+    assert_eq!(
+        ctx[0], 0xC000_0000,
+        "ASR W(0x80000000, 1) must be 0xC0000000 (sign-extend in 32-bit); got 0x{:x}",
+        ctx[0]
+    );
+}
+
+/// ROR W0, W1, W2 with W1=0x12345678, W2=4: ARM ROR-32 = 0x81234567.
+#[test]
+fn phase_g_ror_w_wraps_32() {
+    // MOVZ W1 = 0x12345678; MOVZ W2 = 4; ROR W0, W1, W2
+    // 0x52A24681: movz w1, #0x1234, lsl #16
+    // 0x72A8ACF1: movk w1, #0x4567 -- wait need w1, #0x5678 first
+    // Just use MOVZ + MOVK pair to build 0x12345678.
+    // MOVZ W1, #0x5678         -> 0x5280ACF1
+    // MOVK W1, #0x1234, LSL #16 -> 0x72A24681
+    // MOVZ W2, #4              -> 0x52800082
+    // ROR W0, W1, W2: 0001_1010_110m_mmmm_0010_11nn_nnnd_dddd = 0x1AC22C20
+    const MOVZ_W1_LO: u32 = 0x528A_CF01;
+    const MOVK_W1_HI: u32 = 0x72A2_4681;
+    const MOVZ_W2_4:  u32 = 0x5280_0082;
+    const ROR_W0_W1_W2: u32 = 0x1AC2_2C20;
+    let words = [MOVZ_W1_LO, MOVK_W1_HI, MOVZ_W2_4, ROR_W0_W1_W2];
+    let code = translate_straight_line(&words, 0x17700);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 0x1234_5678, "W1 setup");
+    assert_eq!(ctx[2], 4, "W2 setup");
+    assert_eq!(
+        ctx[0], 0x8123_4567,
+        "ROR W(0x12345678, 4) must wrap within 32-bit = 0x81234567; got 0x{:x}",
+        ctx[0]
+    );
+}
+
 // ── Phase-E CLZ regression: kmalloc_index `fls` size class lookup ────────
 //
 // The prior Clz lowering always emitted `lzcnt_r64`. For the W-form
@@ -2320,7 +2403,7 @@ fn phase_e_clz_w_zero() {
 /// CLZ W0, W1 with W1=0x80000000 must produce 0 (MSB set → 0 leading zeros).
 #[test]
 fn phase_e_clz_w_msb_set() {
-    // MOVZ W1, #0x8000, LSL #16 → w1 = 0x8000_0000
+    // MOVZ W1, #0x8000, LSL #16 → w1 = 0x8000_0000  (enc: 0x52B00001)
     const MOVZ_W1_MSB: u32 = 0x52B0_0001;
     const CLZ_W0_W1:   u32 = 0x5AC0_1020;
     let words = [MOVZ_W1_MSB, CLZ_W0_W1];
@@ -2434,6 +2517,54 @@ fn phase_e_stxp_stores_pair() {
 ///   MOVZ X10, #0x8894 ; MOVK X10, #0x7d9e, LSL #16  ; X10 = 0x7d9e8894
 ///   MOVZ X11, #13                                   ; X11 = 13
 ///   ADD  X10, X10, X11, LSL #2                       ; X10 = 0x7d9e88c8
+/// Phase G fortify regression. build_sched_domains contains the pattern:
+///   cmp x2, #9         ← ARM C=0 when x2<9 (b.hs should NOT fire)
+///   tbnz w9, #4, ...   ← lowering: x86 `shr; test` — CLOBBERS EFLAGS
+///   b.hs target        ← MUST consume ARM NZCV from memory, NOT x86 CF
+///
+/// The prior CondBranch lowering used `jcc_rel32` against live x86 EFLAGS,
+/// so after tbnz's `test` (which leaves CF=0), `b.hs` (= jcc NB, CF==0)
+/// always took the branch — producing fortify_panic("memset") in
+/// build_sched_domains+0x15d8 even when nr_cpumask_bits == 64 (legal).
+///
+/// Encoded: PC=0x1000
+///   0x1000: MOVZ W2, #8        ; x2 = 8
+///   0x1004: MOVZ W9, #9        ; x9 = 9 (bit 4 = 0 → tbnz NOT taken)
+///   0x1008: CMP X2, #9         ; 8 < 9 unsigned → ARM C=0
+///   0x100C: TBNZ W9, #4, +0x10 ; fallthrough (w9 bit 4 == 0)
+///   0x1010: B.HS +0x14         ; if ARM C=1, jump to 0x1024 (taken)
+///   0x1014: MOVZ X10, #0x0AAA  ; fallthrough marker — only runs if b.hs NOT taken
+///   0x1018: RET (implicit end)
+/// We assert ctx[10] == 0x0AAA (proves b.hs was NOT taken).
+#[test]
+fn phase_g_bhs_after_tbnz_consumes_arm_nzcv() {
+    const MOVZ_W2_8:   u32 = 0x52800102; // movz w2, #8
+    const MOVZ_W9_9:   u32 = 0x52800129; // movz w9, #9
+    const CMP_X2_9:    u32 = 0xF100245F; // cmp x2, #9
+    // tbnz w9, #4, +0x10 (skip past the MOVZ marker if mistakenly taken):
+    //   b5(1)=0, opc(7)=0110111, b40(5)=0x04, imm14=4 (×4=0x10), Rt=9
+    const TBNZ_W9_4:   u32 = 0x37200089;
+    // b.hs +0x14 (= 0x1010 + 0x14 = 0x1024): cond=0b0010 (HS), imm19=5
+    const B_HS_14:     u32 = 0x540000A2;
+    // movz x10, #0x0AAA (fallthrough marker): sf=1, hw=0, imm16=0x0AAA, Rd=10
+    // Encoding: 0xD2800000 | (imm16 << 5) | Rd = 0xD2800000|0x15540|10
+    const MOVZ_X10:    u32 = 0xD281554A;
+    let words = [MOVZ_W2_8, MOVZ_W9_9, CMP_X2_9, TBNZ_W9_4, B_HS_14, MOVZ_X10];
+    let code = translate_straight_line(&words, 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = vec![0u64; CTX_U64S];
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[2], 8, "X2 = 8 (got 0x{:x})", ctx[2]);
+    assert_eq!(ctx[9], 9, "X9 = 9 (got 0x{:x})", ctx[9]);
+    assert_eq!(
+        ctx[10], 0x0AAA,
+        "B.HS must NOT take when ARM C=0 (cmp 8,9); got X10=0x{:x}. \
+         If the CondBranch lowering reads x86 EFLAGS after TBNZ clobbers \
+         them, b.hs (= jcc NB / CF==0) fires incorrectly and X10 stays 0.",
+        ctx[10]
+    );
+}
+
 #[test]
 fn phase_c_jump_table_dispatch_shifted_add() {
     const MOVZ_X10: u32 = 0xD291128A;
