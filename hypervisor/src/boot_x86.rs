@@ -3594,6 +3594,38 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puts(b"\n");
                     }
                 }
+                // Phase-G fortify-trigger diagnostic. build_sched_domains has
+                // 3 b.hs sites (0x1180c8, 0x118388, 0x118570) that all funnel
+                // to the memset-fortify thunk at 0x118c5c (adrp; add #0xced;
+                // bl fortify_panic; brk #1). When we reach 0x118c5c, fortify
+                // is about to fire — dump x2 (cmp source), x9 (canary),
+                // x20 (site-3 source), x24 (site-1/2 source), x26
+                // (site-3 base ptr) to identify which site fired and what
+                // value triggered the size > 8 check.
+                {
+                    static mut FORTIFY_FIRED: bool = false;
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    if !*ptr::addr_of!(FORTIFY_FIRED)
+                       && pc == 0xFFFF_FFC0_0811_8C5C
+                    {
+                        *ptr::addr_of_mut!(FORTIFY_FIRED) = true;
+                        dual_puts(b"[fortify] thunk reached pc=0xffffffc008118c5c iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n[fortify]   x2(cmp_src)=");
+                        dual_puthex64(g[2]);
+                        dual_puts(b" x9=");
+                        dual_puthex64(g[9]);
+                        dual_puts(b"\n[fortify]   x20=");
+                        dual_puthex64(g[20]);
+                        dual_puts(b" x24=");
+                        dual_puthex64(g[24]);
+                        dual_puts(b"\n[fortify]   x26=");
+                        dual_puthex64(g[26]);
+                        dual_puts(b" x28=");
+                        dual_puthex64(g[28]);
+                        dual_puts(b"\n");
+                    }
+                }
                 // Phase-D CRC32 fault diagnostics. The kernel hits a translation
                 // fault on a CRC32 table access; x8 should be the table base.
                 // Hook the CRC function entry (0xffffffc0_086cb014 ADRP x8) and
