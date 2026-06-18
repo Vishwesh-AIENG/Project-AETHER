@@ -41,6 +41,20 @@ impl X86Encoder {
         self.buf
     }
 
+    /// Reset for reuse: clear the byte buffer (KEEPS capacity) and the UD2 flag.
+    /// Lets one encoder serve every translation instead of allocating a fresh
+    /// `Vec<u8>` per cold block (a bump-heap leak). Pair with [`as_bytes`].
+    pub fn reset(&mut self) {
+        self.buf.clear();
+        self.ud2_emitted = false;
+    }
+
+    /// Borrow the emitted bytes WITHOUT consuming the encoder, so the caller can
+    /// copy them into the JIT code buffer and then `reset()` for the next block.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf
+    }
+
     /// Phase-E: did any `emit_ud2` happen during this encoder's lifetime?
     /// `block_bytes_are_safe` consults this through `finish_with_ud2_flag`.
     pub fn had_ud2(&self) -> bool { self.ud2_emitted }
@@ -1218,6 +1232,17 @@ impl X86Encoder {
         self.buf.push(0x0F); self.buf.push(0x3A); self.buf.push(0x20);
         self.modrm_rr(dst, src);
         self.buf.push(lane);
+    }
+
+    /// PALIGNR xmm, xmm, imm8 (SSSE3) — `dst = (CONCAT(dst, src) >> imm*8)[127:0]`
+    /// (dst is the HIGH operand). Used to lower ARM `EXT Vd,Vn,Vm,#imm`
+    /// (`CONCAT(Vm,Vn) >> imm*8`): load Vm→dst, Vn→src, then `palignr dst,src,imm`.
+    pub fn emit_palignr(&mut self, dst: u8, src: u8, imm: u8) {
+        self.buf.push(0x66);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F); self.buf.push(0x3A); self.buf.push(0x0F);
+        self.modrm_rr(dst, src);
+        self.buf.push(imm);
     }
 
     /// PINSRD xmm, r32, imm8 (SSE4.1).

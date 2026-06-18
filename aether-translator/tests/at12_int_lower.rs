@@ -7,7 +7,7 @@
 use aether_translator::backend::{X86Encoder, IntLower};
 use aether_translator::ir::{IrBlock, IrFunction, IrOp, BlockId};
 use aether_translator::ir::value::{IrValueId, IrValueKind};
-use aether_translator::regalloc::linear_scan::{AllocResult, Assignment};
+use aether_translator::regalloc::linear_scan::{AllocResult, AssignMap, Assignment};
 use aether_translator::regalloc::x86_regs::ALLOCATABLE_GPRS;
 
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 /// Build a trivial AllocResult that assigns value 0 → GPR[0] (RAX).
 fn alloc_single_gpr(vid: u32, gpr_idx: u8) -> AllocResult {
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(vid, Assignment::Gpr(gpr_idx));
     AllocResult { assignments, n_spill_slots: 0, n_intervals: 1, n_spilled: 0 }
 }
@@ -88,7 +88,7 @@ fn at12_hello_world_full_pipeline() {
     blk.push_op(IrOp::ConstI64 { dst: v0, val: 0 });
     blk.push_op(IrOp::Return { target: v1 });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(v0.0, Assignment::Gpr(0)); // RAX
     assignments.insert(v1.0, Assignment::Gpr(1)); // RCX (link register)
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
@@ -113,7 +113,7 @@ fn at12_add_two_regs() {
     let d = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::Add { dst: d, a, b });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(a.0, Assignment::Gpr(0)); // RAX
     assignments.insert(b.0, Assignment::Gpr(1)); // RCX
     assignments.insert(d.0, Assignment::Gpr(0)); // RAX (in-place)
@@ -134,7 +134,7 @@ fn at12_add_different_dst() {
     let d = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::Add { dst: d, a, b });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(a.0, Assignment::Gpr(0)); // RAX
     assignments.insert(b.0, Assignment::Gpr(1)); // RCX
     assignments.insert(d.0, Assignment::Gpr(2)); // RDX (different)
@@ -154,7 +154,7 @@ fn at12_sub() {
     let d = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::Sub { dst: d, a, b });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(a.0, Assignment::Gpr(0));
     assignments.insert(b.0, Assignment::Gpr(1));
     assignments.insert(d.0, Assignment::Gpr(0)); // in-place
@@ -172,7 +172,7 @@ fn at12_neg() {
     let d = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::Neg { dst: d, a });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(a.0, Assignment::Gpr(0));
     assignments.insert(d.0, Assignment::Gpr(0));
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
@@ -189,7 +189,7 @@ fn at12_xor_rax_rax() {
     let d = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::Xor { dst: d, a, b: a });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(a.0, Assignment::Gpr(0));
     assignments.insert(d.0, Assignment::Gpr(0));
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
@@ -228,7 +228,7 @@ fn at12_load_u64() {
     let dst  = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::Load { dst, addr, ty: LoadTy::U64, order: MemOrder::Relaxed });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(addr.0, Assignment::Gpr(2)); // RDX = address (real GPR)
     assignments.insert(dst.0,  Assignment::Gpr(3)); // RBX = loaded value
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
@@ -251,7 +251,7 @@ fn at12_store_u64() {
     let val  = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::Store { val, addr, ty: StoreTy::U64, order: MemOrder::Relaxed });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(addr.0, Assignment::Gpr(2)); // RDX = address
     assignments.insert(val.0,  Assignment::Gpr(3)); // RBX = value
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
@@ -283,7 +283,7 @@ fn at12_load_u8_zero_extend() {
     let dst  = blk.new_value(IrValueKind::I8);
     blk.push_op(IrOp::Load { dst, addr, ty: LoadTy::U8, order: MemOrder::Relaxed });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(addr.0, Assignment::Gpr(2)); // RDX = address
     assignments.insert(dst.0,  Assignment::Gpr(3)); // RBX = loaded byte
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
@@ -298,24 +298,37 @@ fn at12_load_u8_zero_extend() {
     );
 }
 
-/// M4b-2b: a SPILLED address must fail loud (UD2), not marshal a stale-scratch
-/// register into the MMU call. Mirrors the spilled-operand fail-loud rule the
-/// Csel arm already enforces.
+/// Phase-F superseded the M4b-2b fail-loud rule: a SPILLED address no longer
+/// lowers to UD2 — src_in reloads it from its context spill slot into SCRATCH0
+/// before the MMU call, so the access uses the real address, never a stale
+/// scratch register.
 #[test]
-fn at12_load_spilled_addr_fails_loud() {
+fn at12_load_spilled_addr_reloads_from_slot() {
     use aether_translator::ir::memory::{LoadTy, MemOrder};
     let mut blk = IrBlock::new(BlockId(0));
     let addr = blk.new_value(IrValueKind::Ptr);
     let dst  = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::Load { dst, addr, ty: LoadTy::U64, order: MemOrder::Relaxed });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(addr.0, Assignment::Spill(0)); // spilled address
     assignments.insert(dst.0,  Assignment::Gpr(3));
     let alloc = AllocResult { assignments, n_spill_slots: 1, n_intervals: 2, n_spilled: 1 };
 
     let bytes = lower(&blk, &alloc);
-    assert_eq!(bytes, [0x0F, 0x0B], "spilled-addr Load must be UD2");
+    // Head: reload the spilled addr from slot 0 = MOV RAX, [R15+0x528].
+    assert_eq!(
+        &bytes[..7],
+        &[0x49, 0x8B, 0x87, 0x28, 0x05, 0x00, 0x00],
+        "head = reload addr from spill slot 0"
+    );
+    assert!(has_mmu_xlate_scaffold(&bytes), "spilled-addr Load must call aether_mmu_xlate");
+    // Tail: MOV RBX, qword [RAX] — the load through the translated host PA.
+    assert_eq!(
+        &bytes[bytes.len() - 3..],
+        &[0x48, 0x8B, 0x18],
+        "tail = MOV RBX,qword[RAX]"
+    );
 }
 
 #[test]
@@ -350,7 +363,7 @@ fn at12_cmp_flags() {
     let f = blk.new_flags();
     blk.push_op(IrOp::Cmp { flags: f, a, b, sf: true });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(a.0, Assignment::Gpr(0));
     assignments.insert(b.0, Assignment::Gpr(1));
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
@@ -372,7 +385,7 @@ fn at12_sext_32_to_64() {
     let d = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::Sext { dst: d, a, from_bits: 32, to_bits: 64 });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(a.0, Assignment::Gpr(1)); // RCX
     assignments.insert(d.0, Assignment::Gpr(0)); // RAX
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
@@ -391,7 +404,7 @@ fn at12_shr_imm_pipeline() {
     let d = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::LShr { dst: d, a, b });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(a.0, Assignment::Gpr(0));
     assignments.insert(b.0, Assignment::Gpr(1));
     assignments.insert(d.0, Assignment::Gpr(0));
@@ -430,7 +443,7 @@ fn at12_cbz_emits_test_jz() {
     let a = blk.new_value(IrValueKind::I64);
     blk.push_op(IrOp::Cbz { a, taken: BlockId(2), fallthru: BlockId(3) });
 
-    let mut assignments = BTreeMap::new();
+    let mut assignments = AssignMap::new();
     assignments.insert(a.0, Assignment::Gpr(0));
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 1, n_spilled: 0 };
 

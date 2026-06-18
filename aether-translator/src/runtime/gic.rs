@@ -210,6 +210,22 @@ impl VirtualGic {
         ICC_SRE_SRE
     }
 
+    /// Read-only diagnostic snapshot of one INTID's distributor state plus the
+    /// CPU-interface running priority. Returns
+    /// `[enabled, group1, pending, priority, running_priority]` (all as `u64`).
+    pub fn diag_intid(&self, intid: u32) -> [u64; 5] {
+        match Self::idx(intid) {
+            Some(i) => [
+                self.enabled[i] as u64,
+                self.group1[i] as u64,
+                self.pending[i] as u64,
+                self.priority[i] as u64,
+                self.running_priority as u64,
+            ],
+            None => [0; 5],
+        }
+    }
+
     #[inline]
     fn idx(intid: u32) -> Option<usize> {
         let i = intid as usize;

@@ -71,11 +71,11 @@ fn samples() -> Vec<IrOp> {
         },
         IrOp::AtomicRmw {
             dst: v(0), op: AtomicOp::Add, addr: v(1), val: v(2),
-            order: MemOrder::AcqRel,
+            order: MemOrder::AcqRel, size: 8,
         },
         IrOp::AtomicCas {
             dst: v(0), addr: v(1), expected: v(2), new: v(3),
-            order: MemOrder::SeqCst,
+            order: MemOrder::SeqCst, size: 4,
         },
         IrOp::Branch { target: b(7) },
         IrOp::CondBranch {
@@ -91,6 +91,7 @@ fn samples() -> Vec<IrOp> {
         IrOp::Hvc { imm16: 0x42 },
         IrOp::Svc { imm16: 0 },
         IrOp::Smc { imm16: 0xFFFF },
+        IrOp::EretRt,
         IrOp::Brk { imm16: 0x1234 },
         IrOp::Hlt { imm16: 0 },
         IrOp::Dmb { domain: BarrierDomain::Ish },
@@ -149,15 +150,21 @@ fn at2_tag_smoke() {
 
 /// Stable tag uniqueness across the sample set (proxy for "no aliasing
 /// among implemented variants until next prompt covers the rest").
+/// Same-variant samples (Hint imm pairs, Rbit/Clz/Cls sf pairs) legitimately
+/// share their tag — aliasing is only a bug when two DIFFERENT variants map
+/// to the same tag, so uniqueness is checked per (tag -> variant).
 #[test]
 fn at2_implemented_tags_unique() {
+    use std::collections::HashMap;
     let s = samples();
-    let mut tags: Vec<u8> = s.iter().map(variant_tag).collect();
-    tags.sort_unstable();
-    let mut dedup = tags.clone();
-    dedup.dedup();
-    // Hint{imm: 0} and Hint{imm: 200} share their tag; account for one allowed dup.
-    assert!(tags.len() - dedup.len() <= 1, "duplicate tags: {:?}", tags);
+    let mut by_tag: HashMap<u8, core::mem::Discriminant<IrOp>> = HashMap::new();
+    for op in &s {
+        let t = variant_tag(op);
+        let d = core::mem::discriminant(op);
+        if let Some(prev) = by_tag.insert(t, d) {
+            assert_eq!(prev, d, "tag {t:#x} aliased by two different variants");
+        }
+    }
 }
 
 #[test]

@@ -257,6 +257,8 @@ mod tests {
             cmdline_len: 0,
             initrd_start: 0,
             initrd_end:   0,
+            pmem_base:    0,
+            pmem_size:    0,
         };
         cfg.cpu_mpidr[0] = 0;
         cfg

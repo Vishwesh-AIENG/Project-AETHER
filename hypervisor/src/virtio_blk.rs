@@ -164,11 +164,16 @@ impl VirtioBlkConfig {
 pub struct MemoryBackedSource {
     pub base_pa:    u64,
     pub size_bytes: u64,
+    /// On-demand backend selector (Phase 3): `-1` = memory-backed (read from
+    /// `base_pa`); `>= 0` = the [`crate::virtio_blk_pci`] disk index to read from
+    /// live (x86 only). Lets one device model serve either a RAM image or a real
+    /// host PCI disk without changing the MMIO/queue code.
+    pub pci_disk:   i16,
 }
 
 impl MemoryBackedSource {
     pub const fn empty() -> Self {
-        Self { base_pa: 0, size_bytes: 0 }
+        Self { base_pa: 0, size_bytes: 0, pci_disk: -1 }
     }
 
     pub fn is_configured(&self) -> bool {
@@ -314,7 +319,17 @@ impl VirtioBlkBackend {
     /// is staged at a known PA. Phase 4 replaces this with a sibling
     /// `register_nvme_backed()` that wires the NVMe IO queue.
     pub fn register_memory_backed(&mut self, base_pa: u64, size_bytes: u64) {
-        self.source = MemoryBackedSource { base_pa, size_bytes };
+        self.source = MemoryBackedSource { base_pa, size_bytes, pci_disk: -1 };
+        self.config = VirtioBlkConfig::for_bytes(size_bytes);
+    }
+
+    /// Bind an ON-DEMAND host PCI disk (Phase 3): reads route to
+    /// [`crate::virtio_blk_pci::read`] for `disk_idx` instead of a RAM copy.
+    /// `capacity_sectors` is the disk's 512-byte sector count (advertised to the
+    /// guest via the virtio-blk config space).
+    pub fn register_pci_backed(&mut self, disk_idx: u8, capacity_sectors: u64) {
+        let size_bytes = capacity_sectors.saturating_mul(VIRTIO_BLK_SECTOR_BYTES);
+        self.source = MemoryBackedSource { base_pa: 0, size_bytes, pci_disk: disk_idx as i16 };
         self.config = VirtioBlkConfig::for_bytes(size_bytes);
     }
 
@@ -628,16 +643,38 @@ impl VirtioBlkBackend {
         // the host side of `write_ipa` is `core::ptr::copy_nonoverlapping`.
         #[cfg(not(test))]
         {
-            let src = (self.source.base_pa + start_byte) as *const u8;
-            // We do the read in chunks via `write_ipa` so cache maintenance
-            // stays in the accessor; for memory-backed reads we copy directly.
-            // 4 KiB stride keeps the temporary stack frame bounded.
+            // Read in 4 KiB strides so the temporary stack frame stays bounded and
+            // cache maintenance lives in the `write_ipa` accessor. Each stride is
+            // either a direct RAM copy (memory-backed) or an on-demand host PCI
+            // disk read (Phase 3); both land in `buf`, then go to the guest IPA.
             let mut remaining = nbytes;
             let mut off: u64 = 0;
             let mut buf = [0u8; 4096];
             while remaining > 0 {
                 let chunk = remaining.min(buf.len() as u64) as usize;
-                unsafe { core::ptr::copy_nonoverlapping(src.add(off as usize), buf.as_mut_ptr(), chunk); }
+                if self.source.pci_disk >= 0 {
+                    // On-demand: read the stride's sectors from the host PCI disk.
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        let lba = start_sector + off / VIRTIO_BLK_SECTOR_BYTES;
+                        let mut sectors = (chunk as u64 / VIRTIO_BLK_SECTOR_BYTES) as u32;
+                        if (chunk as u64) % VIRTIO_BLK_SECTOR_BYTES != 0 {
+                            sectors += 1; // round up a partial tail (rare)
+                        }
+                        if !crate::virtio_blk_pci::read(
+                            self.source.pci_disk as usize, lba, sectors, buf.as_mut_ptr(),
+                        ) {
+                            return SourceReadResult::OutOfRange;
+                        }
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    {
+                        return SourceReadResult::NotConfigured;
+                    }
+                } else {
+                    let src = (self.source.base_pa + start_byte + off) as *const u8;
+                    unsafe { core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), chunk); }
+                }
                 write_ipa(dst_ipa + off, &buf[..chunk]);
                 off += chunk as u64;
                 remaining -= chunk as u64;

@@ -319,6 +319,193 @@ pub enum IrOp {
         addr: IrValueId,
         ty: StoreTy,
     },
+    /// NEON `MOVI`/`MVNI` — write a fully-resolved 128-bit immediate to the
+    /// ctx q-register file slot for V`d` (lo = bytes [0..8), hi = [8..16)). A
+    /// ctx-template op (no SSA operands); lowers to two `mov imm64` + store to
+    /// `[R15 + vec_disp(d)]`. Replaces the `Hint{200}`→UD2 path for vector
+    /// modified-immediate, which blocked /init (`movi v0.2d,#0`).
+    VecMoviImm {
+        d: u8,
+        lo: u64,
+        hi: u64,
+    },
+    /// NEON `DUP` (general): broadcast GPR `src`'s low `size` bytes to every lane
+    /// of the q-register ctx slot for V`d`. `q`=false zeroes the upper 64 bits.
+    /// A ctx-template op (writes `[R15 + vec_disp(d)]`); side-effecting in DCE.
+    VecDupGpr {
+        d: u8,
+        src: IrValueId,
+        size: u8,
+        q: bool,
+    },
+    /// NEON `UMOV`/`SMOV`: extract lane `lane` (element width `size` bytes) of
+    /// the q-register ctx slot for V`n` into GPR `dst`, zero- (`signed`=false) or
+    /// sign-extended to 64 bits. A value-producing op (defines `dst`).
+    VecExtractLane {
+        dst: IrValueId,
+        n: u8,
+        lane: u8,
+        size: u8,
+        signed: bool,
+    },
+    /// NEON `INS` (general): write GPR `src`'s low `size` bytes into lane `lane`
+    /// of the q-register ctx slot for V`d` (other lanes preserved).
+    /// Ctx-template op (writes ctx); side-effecting in DCE.
+    VecInsGpr {
+        d: u8,
+        lane: u8,
+        src: IrValueId,
+        size: u8,
+    },
+    /// NEON `CNT` — per-byte population count of V`n` into V`d` (each byte holds
+    /// the set-bit count, 0..8, of the source byte). `q`: false = .8b (zero the
+    /// upper 64 bits), true = .16b. Ctx-template op (writes ctx); side-effecting.
+    /// Lowered as a scalar SWAR per-byte popcount on each 64-bit half.
+    VecCnt {
+        d: u8,
+        n: u8,
+        q: bool,
+    },
+    /// NEON `UADDLV`/`SADDLV` — add (long) across all lanes of V`n`, reducing to a
+    /// single scalar in lane 0 of V`d` (the rest of the 128-bit reg zeroed). Each
+    /// lane is `esize` bytes; the result element is `2*esize` bytes. `q` selects
+    /// 8- vs 16-byte source; `signed` selects SADDLV. bionic's popcount idiom is
+    /// `cnt v0.8b; uaddlv h0, v0.8b`. Ctx-template op (writes ctx); side-effecting.
+    VecAddvLong {
+        d: u8,
+        n: u8,
+        esize: u8,
+        q: bool,
+        signed: bool,
+    },
+    /// NEON compare-against-zero (CMEQ/CMGT/CMGE/CMLE/CMLT `#0`): per-lane compare
+    /// of V`n` to 0, each lane → all-ones (true) or 0. `size`: 0=B,1=H,2=S,3=D.
+    /// Ctx-template op (writes ctx); lowered via SSE (pxor zero + pcmpeq). bionic
+    /// strchr/memchr use `cmeq v.16b, v.16b, #0`.
+    VecCmpZero {
+        op: VecCmpOp,
+        size: u8,
+        q: bool,
+        d: u8,
+        n: u8,
+    },
+    /// NEON `SHRN`/`SHRN2` — shift-right-narrow: each `2*esize_out`-byte lane of
+    /// V`n` is logically shifted right by `shift`, the low `esize_out` bytes form
+    /// the result lane. `high`=false writes the low 64 bits of V`d` (SHRN), true
+    /// writes the high 64 (SHRN2). bionic strchr: `shrn v5.8b, v2.8h, #4`.
+    VecShiftNarrow {
+        d: u8,
+        n: u8,
+        shift: u8,
+        esize_out: u8,
+        high: bool,
+    },
+    /// NEON `USHLL`/`SSHLL`/`UXTL`/`SXTL` — shift-left-long (widening). Widen each
+    /// `esize_in`-byte source element of V`n` to twice the width (zero-extend when
+    /// `signed`==false, sign-extend when true), then shift left by `shift`.
+    /// `high` selects V`n`'s high 64 bits (the `2` variants). Writes V`d` (full
+    /// 128-bit Q-form). Ctx-template op (writes ctx memory).
+    VecShiftLong {
+        d: u8,
+        n: u8,
+        shift: u8,
+        esize_in: u8,
+        high: bool,
+        signed: bool,
+    },
+    /// NEON `EXT` — `Vd = (CONCAT(Vm, Vn) >> imm*8)`. `q`=false is the 8-byte form
+    /// (upper 64 of Vd zeroed). Ctx-template op (writes ctx memory).
+    VecExt {
+        d: u8,
+        n: u8,
+        m: u8,
+        imm: u8,
+        q: bool,
+    },
+    /// NEON integer multiply-long (`UMULL`/`SMULL`/`UMLAL`/`SMLAL`/`UMLSL`/`SMLSL`).
+    /// Widen `size`-byte elements (`signed`) to 2×, multiply; `accum`+`sub` select
+    /// replace / add-to-Vd / subtract-from-Vd. `q` = high source half. Ctx-template.
+    VecMulLong {
+        d: u8,
+        n: u8,
+        m: u8,
+        size: u8,
+        q: bool,
+        signed: bool,
+        accum: bool,
+        sub: bool,
+    },
+    /// NEON `REV64`/`REV32`/`REV16` — reverse `size`-element groups (element
+    /// bytes = 1<<size) within each `container`-byte group (8/4/2) via a `pshufb`
+    /// mask. Ctx-template op (writes ctx memory).
+    VecRev64 {
+        d: u8,
+        n: u8,
+        size: u8,
+        q: bool,
+        container: u8,
+    },
+    /// ARMv8 SHA-256 crypto (`SHA256SU0`/`SU1`/`H`/`H2`). Ctx-template op: a Win64
+    /// CALL to `runtime::crypto_rt::aether_crypto_sha256` reads/writes the guest
+    /// q-registers `d`/`n`/`m` in ctx memory. `kind`: 0=SU0,1=SU1,2=H,3=H2.
+    CryptoSha256 {
+        kind: u8,
+        d: u8,
+        n: u8,
+        m: u8,
+    },
+    /// NEON `BIC`/`ORR` (vector, immediate) — read-modify-write V`d` with an
+    /// `AdvSIMDExpandImm`-expanded 64-bit `imm` pattern: BIC clears (`Vd &= ~imm`),
+    /// ORR sets (`Vd |= imm`). `q`=false is the 64-bit form (upper 64 zeroed).
+    /// bionic strchr: `bic v4.8h, #0xf0`. Ctx-template op (writes ctx).
+    VecBicOrrImm {
+        d: u8,
+        imm: u64,
+        is_bic: bool,
+        q: bool,
+    },
+    /// NEON `UADDLP`/`SADDLP` — add-long PAIRWISE within V`n`: adjacent
+    /// `esize_in`-byte element pairs sum into `2*esize_in`-byte result lanes (no
+    /// truncation). `q`=false is the 64-bit source form. bionic's NEON popcount
+    /// accumulates with `cnt; uaddlp .8h; uaddlp .4s; uaddlp .2d`. SSE: mask the
+    /// even lanes, shift the odd lanes down, widening-add.
+    VecAddLongPair {
+        d: u8,
+        n: u8,
+        esize_in: u8,
+        q: bool,
+        signed: bool,
+    },
+    /// NEON `UZP1`/`UZP2` — unzip: gather the even- (`odd`=false) or odd-indexed
+    /// (`odd`=true) `esize`-byte elements of the concatenation V`n`:V`m` into V`d`.
+    /// bionic NEON popcount finishes with `uzp1 v.4s, v.4s, v.4s`. Only the 32-bit
+    /// (.4s, shufps) and 64-bit (.2d, punpck) forms are wired.
+    VecUnzip {
+        d: u8,
+        n: u8,
+        m: u8,
+        esize: u8,
+        q: bool,
+        odd: bool,
+    },
+    /// NEON `ADDV` — reduce-add all lanes (same width) of V`n` to a scalar in
+    /// lane 0 of V`d` (rest zeroed). `esize` = element bytes. bionic NEON popcount
+    /// ends with `addv s0, v0.4s`.
+    VecReduceAdd {
+        d: u8,
+        n: u8,
+        esize: u8,
+        q: bool,
+    },
+    /// DC ZVA — zero the naturally-aligned 64-byte block containing `addr`.
+    /// Lowered to ONE MMU walk (write, 64 B) + 8 inline 8-byte zero stores to
+    /// the resolved host PA. Replaces the prior expansion into 8 separate
+    /// `Store` ops (8 Win64 store-CALLs + 9 SSA temps): that register pressure
+    /// spilled operands in the clear_page DC-ZVA loop block and was both a
+    /// severe TCG perf sink and a correctness hazard (see clear_page runaway).
+    ZeroBlock {
+        addr: IrValueId,
+    },
 
     // ----- Atomics (LSE) -----
     AtomicRmw {
@@ -327,6 +514,10 @@ pub enum IrOp {
         addr: IrValueId,
         val: IrValueId,
         order: MemOrder,
+        /// Access width in BYTES (1/2/4/8). LSE atomics come in B/H/word/dword
+        /// forms; the width must be honoured or a 64-bit op on a 32-bit lock
+        /// clobbers the adjacent word (e.g. bionic's lock at [x20] vs [x20+4]).
+        size: u8,
     },
     AtomicCas {
         dst: IrValueId,
@@ -334,6 +525,8 @@ pub enum IrOp {
         expected: IrValueId,
         new: IrValueId,
         order: MemOrder,
+        /// Access width in BYTES (1/2/4/8) — see [`IrOp::AtomicRmw::size`].
+        size: u8,
     },
 
     // ----- Control flow -----
@@ -690,6 +883,14 @@ pub enum IrOp {
     Hlt {
         imm16: u16,
     },
+    /// ERET via a runtime call (`aether_eret_enter`). Carries no operands: the
+    /// helper reads ELR_EL1/SPSR_EL1 from the ctx sysreg slots and applies the
+    /// full exception return — restore PC<-ELR, NZCV/DAIF<-SPSR, the target
+    /// exception level + SPSel from SPSR.M, and the SP_EL0/SP_EL1 bank swap.
+    /// Replaces the prior primitive sequence (Mrs/And/Msr/WritePc) which could
+    /// not model the EL change or the conditional SP-bank swap on a return to
+    /// EL0. A block terminator (the decoder already ends the block on ERET).
+    EretRt,
     Mrs {
         dst: IrValueId,
         reg: SysReg,
@@ -818,6 +1019,16 @@ pub enum IrOp {
     FpToGpr { d_gpr: u8, n: u8, bits: u8, high_half: bool },
     /// FMOV GPR -> FP-reg (bitwise). `high_half` => into V.D[1].
     FpFromGpr { d: u8, n_gpr: u8, bits: u8, high_half: bool },
+    /// SCVTF/UCVTF: convert integer in `src` (an already-resolved GPR SSA value)
+    /// to a scalar FP register V`d` (`to_dbl`=false → S/32-bit, true → D/64-bit).
+    /// Carries an `IrValueId` (unlike `FpFromInt`'s raw `n_gpr`) so the lowerer can
+    /// read the GPR's x86 register via the alloc map. `signed` selects SCVTF/UCVTF.
+    FpCvtIntScalar { d: u8, src: IrValueId, to_dbl: bool, signed: bool },
+    /// FCVT{N,P,M,Z,A}{S,U}: convert scalar FP reg `n` to an integer SSA value
+    /// `dst` (a GPR result, consumed by a following write_reg). `from_dbl` = S vs
+    /// D source; `to_64` = W vs X result; `round` selects the rounding mode.
+    /// Defines `dst` (mirrors `VecExtractLane`); lowered in IntLower.
+    FpCvtToIntScalar { dst: IrValueId, n: u8, from_dbl: bool, to_64: bool, round: RoundMode },
 
     /// AES round step. kind: 0=AESE 1=AESD 2=AESMC 3=AESIMC 4=FusedEnc 5=FusedDec.
     CryptoAesR { kind: u8, d: u8, n: u8, m: u8 },
@@ -846,6 +1057,10 @@ pub enum VecBinOp {
     // `size` field is ignored when lowering these). Append-only — discriminants
     // 0..=20 above are AOT-cache-stable.
     And, Or, Eor, Bic, Orn,
+    // Bitwise select (read-modify-write Vd): BSL Vd=Vd?Vn:Vm-select via Vd;
+    // BIT inserts Vn where Vm=1; BIF inserts Vn where Vm=0. lower_vecbin
+    // special-cases these (they read Vd, unlike the n-op-m forms). Append-only.
+    Bsl, Bit, Bif,
 }
 /// NEON 2-reg-misc single-source operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -907,6 +1122,7 @@ impl IrOp {
             IrOp::LoadPair { dst_a, dst_b, .. } => { f(dst_a); f(dst_b); }
             IrOp::StoreExclusive { status, .. } => f(status),
             IrOp::AtomicRmw { dst, .. } | IrOp::AtomicCas { dst, .. } => f(dst),
+            IrOp::VecExtractLane { dst, .. } | IrOp::FpCvtToIntScalar { dst, .. } => f(dst),
 
             IrOp::VAdd { dst, .. } | IrOp::VSub { dst, .. } | IrOp::VMul { dst, .. }
             | IrOp::VAnd { dst, .. } | IrOp::VOr { dst, .. } | IrOp::VXor { dst, .. }
@@ -977,6 +1193,9 @@ impl IrOp {
             IrOp::StoreExclusive { val, addr, .. } => { f(val); f(addr); }
             IrOp::LoadPair { addr, .. } => f(addr),
             IrOp::StorePair { val_a, val_b, addr, .. } => { f(val_a); f(val_b); f(addr); }
+            IrOp::ZeroBlock { addr } => f(addr),
+            IrOp::VecDupGpr { src, .. } | IrOp::VecInsGpr { src, .. }
+            | IrOp::FpCvtIntScalar { src, .. } => f(src),
             IrOp::AtomicRmw { addr, val, .. } => { f(addr); f(val); }
             IrOp::AtomicCas { addr, expected, new, .. } => { f(addr); f(expected); f(new); }
 
@@ -1149,10 +1368,11 @@ impl IrOp {
                 IrOp::LoadPair { dst_a, dst_b, addr: vr(addr), ty },
             IrOp::StorePair { val_a, val_b, addr, ty } =>
                 IrOp::StorePair { val_a: vr(val_a), val_b: vr(val_b), addr: vr(addr), ty },
-            IrOp::AtomicRmw { dst, op, addr, val, order } =>
-                IrOp::AtomicRmw { dst, op, addr: vr(addr), val: vr(val), order },
-            IrOp::AtomicCas { dst, addr, expected, new, order } =>
-                IrOp::AtomicCas { dst, addr: vr(addr), expected: vr(expected), new: vr(new), order },
+            IrOp::ZeroBlock { addr } => IrOp::ZeroBlock { addr: vr(addr) },
+            IrOp::AtomicRmw { dst, op, addr, val, order, size } =>
+                IrOp::AtomicRmw { dst, op, addr: vr(addr), val: vr(val), order, size },
+            IrOp::AtomicCas { dst, addr, expected, new, order, size } =>
+                IrOp::AtomicCas { dst, addr: vr(addr), expected: vr(expected), new: vr(new), order, size },
 
             // Control flow
             IrOp::Branch { .. } => self,
@@ -1238,9 +1458,25 @@ impl IrOp {
 
             // System / barriers (no value uses in most)
             IrOp::Hvc { .. } | IrOp::Svc { .. } | IrOp::Smc { .. }
-            | IrOp::Brk { .. } | IrOp::Hlt { .. }
+            | IrOp::Brk { .. } | IrOp::Hlt { .. } | IrOp::EretRt
+            | IrOp::VecMoviImm { .. }
+            | IrOp::VecExtractLane { .. }
+            | IrOp::FpCvtToIntScalar { .. }
+            | IrOp::VecCnt { .. } | IrOp::VecAddvLong { .. }
+            | IrOp::VecCmpZero { .. } | IrOp::VecShiftNarrow { .. }
+            | IrOp::VecShiftLong { .. } | IrOp::VecExt { .. }
+            | IrOp::VecMulLong { .. } | IrOp::VecRev64 { .. }
+            | IrOp::CryptoSha256 { .. }
+            | IrOp::VecBicOrrImm { .. } | IrOp::VecAddLongPair { .. }
+            | IrOp::VecUnzip { .. } | IrOp::VecReduceAdd { .. }
             | IrOp::Dmb { .. } | IrOp::Dsb { .. }
             | IrOp::Isb | IrOp::Sb | IrOp::Hint { .. } => self,
+            IrOp::VecDupGpr { d, src, size, q } =>
+                IrOp::VecDupGpr { d, src: vr(src), size, q },
+            IrOp::FpCvtIntScalar { d, src, to_dbl, signed } =>
+                IrOp::FpCvtIntScalar { d, src: vr(src), to_dbl, signed },
+            IrOp::VecInsGpr { d, lane, src, size } =>
+                IrOp::VecInsGpr { d, lane, src: vr(src), size },
             IrOp::TlbInval { va } => IrOp::TlbInval { va: va.map(&mut vr) },
             IrOp::AtS1E1 { va, is_write, at_el0 } =>
                 IrOp::AtS1E1 { va: vr(va), is_write, at_el0 },

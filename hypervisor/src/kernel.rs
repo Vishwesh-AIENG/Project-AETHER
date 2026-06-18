@@ -239,6 +239,15 @@ pub const GIC_SPI: u32 = 0;
 /// Interrupt type cell value: Private Peripheral Interrupt (INTID 16–31).
 pub const GIC_PPI: u32 = 1;
 
+/// Phandle assigned to the GICv3 `/interrupt-controller` node. Device nodes
+/// (timer, serial, …) resolve their interrupt parent to this value. Must be a
+/// nonzero u32 unique within the FDT; the root node carries
+/// `interrupt-parent = <GIC_PHANDLE>` so every node inherits it via the
+/// `of_irq_find_parent` walk. Without this, `irq_of_parse_and_map` returns 0
+/// for the timer PPIs ("arch_timer: No interrupt available") and the scheduler
+/// tick never fires.
+pub const GIC_PHANDLE: u32 = 1;
+
 /// Interrupt flags cell value: level-triggered, active high.
 /// Required for GICv3 SPIs on ARM (most devices use level-high).
 pub const IRQ_TYPE_LEVEL_HIGH: u32 = 4;
@@ -727,6 +736,15 @@ pub struct AndroidDtbConfig {
     pub initrd_start: u64,
     /// Exclusive end PA of the ramdisk (= initrd_start + ramdisk_size).
     pub initrd_end: u64,
+    /// Base IPA of a persistent-memory (`pmem-region`) block device, or 0 to
+    /// omit. The x86 tier stages the AOSP `system.raw` image into a fixed
+    /// high-RAM region via QEMU's generic loader; exposing it as a
+    /// `compatible = "pmem-region"` node makes the GKI kernel's `of_pmem`
+    /// driver create `/dev/pmem0`, which first-stage init mounts as `/system`
+    /// (the kernel has NO virtio-blk driver, so PMEM is the bring-up path).
+    pub pmem_base: u64,
+    /// Size in bytes of the `pmem-region` block device (0 when `pmem_base`==0).
+    pub pmem_size: u64,
 }
 
 impl AndroidDtbConfig {
@@ -791,6 +809,10 @@ pub fn build_android_dtb(
     b.prop_u32(b"#address-cells", 2)?;
     b.prop_u32(b"#size-cells", 2)?;
     b.prop_str(b"compatible", b"aether,android-partition")?;
+    // Global interrupt parent: every device node inherits the GICv3 as its
+    // interrupt controller via the of_irq_find_parent walk-up. Without this the
+    // /timer PPIs never map to a virq → the scheduler tick never fires.
+    b.prop_u32(b"interrupt-parent", GIC_PHANDLE)?;
 
     // ── /memory ───────────────────────────────────────────────────────────────
     {
@@ -868,6 +890,9 @@ pub fn build_android_dtb(
         // from root. The GIC redistributor region covers all assigned cores.
         b.prop_u32(b"#address-cells", 2)?;
         b.prop_u32(b"#size-cells", 2)?;
+        // Phandle so device nodes can name this controller as their
+        // interrupt-parent (the root node sets it globally).
+        b.prop_u32(b"phandle", GIC_PHANDLE)?;
         b.end_node()?; // /interrupt-controller
     }
 
@@ -905,7 +930,7 @@ pub fn build_android_dtb(
         // UART SPI: DT intid = absolute INTID − 32.
         let uart_dt_intid = cfg.uart_irq_spi.saturating_sub(32);
         b.prop_cells(b"interrupts", &[GIC_SPI, uart_dt_intid, IRQ_TYPE_LEVEL_HIGH])?;
-        b.prop_empty(b"interrupt-parent")?; // uses root interrupt-controller
+        b.prop_u32(b"interrupt-parent", GIC_PHANDLE)?; // GICv3 (also inherited from root)
         b.end_node()?; // /serial
     }
 
@@ -913,6 +938,22 @@ pub fn build_android_dtb(
     b.begin_node(b"chosen")?;
     // bootargs: kernel command line (null-terminated string property).
     b.prop_str(b"bootargs", &cfg.cmdline[..cfg.cmdline_len])?;
+
+    // rng-seed: seed the kernel CRNG from the "bootloader". Without an entropy
+    // source in the DBT environment the CRNG never initialises, so
+    // getrandom(GRND_NONBLOCK) returns -EAGAIN and bionic's fallback read of
+    // /dev/urandom BLOCKS — parking /init at ~7 syscalls, before it ever mounts
+    // anything (confirmed via the syscall-ring probe). CONFIG_RANDOM_TRUST_
+    // BOOTLOADER=y credits these bytes and marks the CRNG ready immediately.
+    // (Dev seed — a production bootloader MUST supply real hardware entropy here;
+    // a fixed seed makes guest randomness deterministic, a fingerprint hazard.)
+    const RNG_SEED: [u8; 32] = [
+        0x9e, 0x37, 0x79, 0xb9, 0x7f, 0x4a, 0x7c, 0x15,
+        0xf3, 0x9c, 0xc0, 0x60, 0x5c, 0xed, 0xc8, 0x34,
+        0x10, 0x64, 0xa7, 0x0b, 0x68, 0x2e, 0x3a, 0x21,
+        0x5b, 0xca, 0xfe, 0x48, 0xd1, 0x2c, 0x90, 0x6f,
+    ];
+    b.prop(b"rng-seed", &RNG_SEED)?;
 
     // linux,initrd-{start,end}: tells the kernel where the bootloader staged
     // the ramdisk. Without these, drivers/of/fdt.c::early_init_dt_check_for_initrd
@@ -964,6 +1005,62 @@ pub fn build_android_dtb(
         let intid_dt = crate::virtio::VIRTIO_BLK_SPI_INTID - 32;
         b.prop_cells(b"interrupts", &[GIC_SPI, intid_dt, IRQ_TYPE_LEVEL_HIGH])?;
         b.end_node()?;
+    }
+
+    // ── /pmem@<base> (Phase 3 PIVOT — system image as a PMEM block device) ────
+    //
+    // The GKI kernel has NO virtio-blk driver (CONFIG_VIRTIO_* all unset) but
+    // DOES have CONFIG_OF_PMEM=y. A root-level node with compatible
+    // "pmem-region" + a `reg` range is populated as a platform device by
+    // of_platform_default_populate; the of_pmem driver then creates /dev/pmem0
+    // backed by that physical memory. QEMU's generic loader stages system.raw
+    // into [pmem_base, pmem_base+pmem_size) before AETHER runs, so /dev/pmem0
+    // IS the read-only ext4 /system image. `volatile` marks it RAM-backed
+    // (raw namespace, no btt/pfn metadata writes — we never write to it).
+    if cfg.pmem_base != 0 && cfg.pmem_size != 0 {
+        let mut pmem_name = [0u8; 32];
+        let prefix = b"pmem@";
+        pmem_name[..prefix.len()].copy_from_slice(prefix);
+        let n = hex_u64(&mut pmem_name[prefix.len()..], cfg.pmem_base);
+        b.begin_node(&pmem_name[..prefix.len() + n])?;
+        b.prop_str(b"compatible", b"pmem-region")?;
+        b.prop_cells(b"reg", &[
+            (cfg.pmem_base >> 32) as u32,
+            cfg.pmem_base as u32,
+            (cfg.pmem_size >> 32) as u32,
+            cfg.pmem_size as u32,
+        ])?;
+        b.prop_empty(b"volatile")?;
+        b.end_node()?; // pmem@
+    }
+
+    // ── /firmware/android/fstab (Phase 3 — first-stage mount table) ───────────
+    //
+    // Android first-stage init reads /proc/device-tree/firmware/android/fstab
+    // BEFORE any ramdisk fstab file, so this overrides the boot.img's
+    // fstab.aether. For bring-up we mount the AOSP `system` image DIRECTLY off
+    // the PMEM block device (/dev/block/pmem0) — NO `logical` (no super/liblp),
+    // NO `avb` (vbmeta verification skipped), NO `slotselect` (no A/B) — the
+    // simplest path that gets /system mounted. (vendor/product follow as
+    // additional pmem regions once /system mounts.)
+    {
+        b.begin_node(b"firmware")?;
+        b.begin_node(b"android")?;
+        b.prop_str(b"compatible", b"android,firmware")?;
+        b.begin_node(b"fstab")?;
+        b.prop_str(b"compatible", b"android,fstab")?;
+        {
+            b.begin_node(b"system")?;
+            b.prop_str(b"compatible", b"android,system")?;
+            b.prop_str(b"dev", b"/dev/block/pmem0")?;
+            b.prop_str(b"type", b"ext4")?;
+            b.prop_str(b"mnt_flags", b"ro,barrier=1")?;
+            b.prop_str(b"fsmgr_flags", b"wait,first_stage_mount")?;
+            b.end_node()?; // system
+        }
+        b.end_node()?; // fstab
+        b.end_node()?; // android
+        b.end_node()?; // firmware
     }
 
     b.end_node()?; // root

@@ -41,7 +41,25 @@ mod global_alloc {
     // (with MEM=16G) easily satisfies both our 1 GiB BSS and the 1 GiB
     // AllocatePages handoff request. Trimming heap below 1 GiB shortens
     // the run dramatically once paging_init's larger code surface lands.
-    const HEAP_SIZE: usize = 1024 * 1024 * 1024;
+    //
+    // EL0/Phase-G: the never-freeing bump heap leaks ~KB per cold translated
+    // block; the FULL kernel boot (~100K+ unique blocks) exhausted 1 GiB right
+    // as userspace started ("768 bytes failed" at iter ~74M). Raised to 1.5 GiB
+    // so /init (linker64 + bionic) has ~0.5 GiB headroom.
+    //
+    // LAYOUT CONSTRAINT: the heap is .bss in hypervisor.efi; the guest-RAM
+    // window the probe pins sits just above it. The Android boot.img is staged
+    // at STAGED_BOOT_IMG_PA = 0x8000_0000 (2 GiB). At 2 GiB the window reached
+    // ~0x77e0_0000 and its top collided with the boot.img → "dispatch NOT armed
+    // (no handoff)" → VMRUN smoke path (no kernel boot). 1.5 GiB keeps the
+    // window top (~1.6 GiB) safely below 0x8000_0000. Do NOT exceed ~1.9 GiB.
+    //
+    // A bump RESET to reclaim the per-translation scratch was tried and reverted:
+    // resetting the GLOBAL pointer also frees lazily-initialised runtime statics
+    // allocated in the bracketed window -> BTreeMap use-after-free (panic at
+    // iter 0x2e0). The sustainable fix is a dedicated scratch arena (or
+    // pre-sized, reused translate buffers); deferred.
+    const HEAP_SIZE: usize = 3 * 512 * 1024 * 1024;
 
     #[repr(align(16))]
     struct AlignedHeap([u8; HEAP_SIZE]);
@@ -106,6 +124,22 @@ pub mod boot;        // ch07: UEFI handoff, ExitBootServices, ACPI discovery, gu
 #[cfg(target_arch = "x86_64")]
 pub mod boot_x86;     // x86_64 boot pipeline: ExitBootServices -> EPT/NPT build ->
                       //       init_vtx/svm_foundation -> VMLAUNCH/VMRUN -> first VMEXIT.
+#[cfg(target_arch = "x86_64")]
+pub mod virtio_blk_pci; // Phase 3: host virtio-blk-pci driver — AETHER drives the
+                      //       QEMU AOSP image disks (q35 ECAM) and serves sectors
+                      //       on-demand to the guest's virtio-mmio block model.
+pub mod dbgout {
+    //! Debug-print shim: boot_x86's dual-console printers on x86_64, no-ops on
+    //! every other target — keeps the cross-target spec modules (vtx / svm /
+    //! mmio_emu) compiling for the aarch64-unknown-uefi build, where
+    //! `boot_x86` does not exist.
+    #[cfg(target_arch = "x86_64")]
+    pub use crate::boot_x86::{dual_puthex64, dual_puts};
+    #[cfg(not(target_arch = "x86_64"))]
+    pub unsafe fn dual_puts(_s: &[u8]) {}
+    #[cfg(not(target_arch = "x86_64"))]
+    pub unsafe fn dual_puthex64(_v: u64) {}
+}
 #[cfg(target_arch = "x86_64")]
 pub mod host_idt;     // minimal host IDT: turns a fault during the host-mode JIT
                       //       CALL (M2 proof) into a readable post-mortem on the

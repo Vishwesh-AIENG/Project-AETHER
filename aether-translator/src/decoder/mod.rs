@@ -219,6 +219,9 @@ pub enum DecodedInsn {
         rn: Reg,
         rm: Reg,
         sub: bool,
+        /// `true` = ADCS/SBCS (write NZCV); `false` = ADC/SBC (NZCV preserved).
+        /// `NGC`/`NGCS` are the `Rn==xzr` aliases of `SBC`/`SBCS`.
+        set_flags: bool,
     },
     SubReg {
         sf: bool,
@@ -341,11 +344,19 @@ pub enum DecodedInsn {
         size: AccessSize,
         signed: bool,
         addr: AddrMode,
+        /// `rt` names an FP/SIMD register (V=1 encoding: `LDR Sn/Dn/Qn`), not a
+        /// GPR. The lift routes the loaded value into the ctx q-register file via
+        /// `WriteFpr` instead of `write_reg`; without this an `ldr d1,[..]` would
+        /// land in integer x1 and a later `mov x1,..` would silently clobber it.
+        is_fp: bool,
     },
     Str {
         rt: Reg,
         size: AccessSize,
         addr: AddrMode,
+        /// `rt` names an FP/SIMD register (V=1: `STR Sn/Dn/Qn`). The lift reads
+        /// the value from the ctx q-register file via `ReadFpr`, not `read_reg`.
+        is_fp: bool,
     },
     Ldp {
         rt1: Reg,
@@ -359,6 +370,225 @@ pub enum DecodedInsn {
         rt2: Reg,
         sf: bool,
         addr: AddrMode,
+    },
+    /// SIMD&FP load pair (`LDP {St,Dt,Qt}, ...`). `rt1`/`rt2` are SIMD&FP
+    /// register numbers (NOT GPRs); `access` is the element width (Word=S,
+    /// DoubleWord=D, QuadWord=Q). Distinct from `Ldp` because the destinations
+    /// are the q-register file, not GPRs — decoding these as integer `Ldp`
+    /// loaded the FP data into GPRs and, when a destination aliased the base
+    /// (e.g. `ldp q0,q1,[x0]`), clobbered the base mid-block → fpsimd faults.
+    LdpFp {
+        rt1: Reg,
+        rt2: Reg,
+        access: AccessSize,
+        addr: AddrMode,
+    },
+    /// SIMD&FP store pair (`STP {St,Dt,Qt}, ...`). See [`DecodedInsn::LdpFp`].
+    StpFp {
+        rt1: Reg,
+        rt2: Reg,
+        access: AccessSize,
+        addr: AddrMode,
+    },
+    /// NEON `MOVI` / `MVNI` (Advanced SIMD modified immediate, setting forms).
+    /// The 128-bit value is fully resolved at decode time (`lo`/`hi`); for the
+    /// Q=0 forms `hi` is 0 (upper lanes zeroed). Writes V`rd` only — no source
+    /// register. The register-modifying ORR/BIC and the FMOV-vector forms stay
+    /// the coarse `AdvSimd`.
+    SimdMoviImm {
+        rd: u8,
+        lo: u64,
+        hi: u64,
+    },
+    /// NEON `DUP` (general): broadcast GPR `rn`'s low element to every lane of
+    /// V`rd`. `size`: 0=B,1=H,2=S,3=D. `q`: false = 64-bit (8B/4H/2S), true =
+    /// 128-bit. bionic `__memset_aarch64` opens with `dup v0.16b, w1`.
+    SimdDupGen {
+        rd: VReg,
+        rn: Reg,
+        size: u8,
+        q: bool,
+    },
+    /// NEON `UMOV`/`SMOV`: V`rn`.<T>[`lane`] -> GPR `rd`. `signed` ⇒ SMOV
+    /// (sign-extend) else UMOV (zero-extend). `dst_x` ⇒ Xd (64-bit) else Wd.
+    /// `size`: 0=B,1=H,2=S,3=D. bionic memset uses `mov x1, v0.d[0]` (UMOV).
+    SimdMovToGen {
+        rd: Reg,
+        rn: VReg,
+        lane: u8,
+        size: u8,
+        signed: bool,
+        dst_x: bool,
+    },
+    /// NEON `INS` (general): GPR `rn` -> V`rd`.<T>[`lane`] (other lanes kept).
+    /// `size`: 0=B,1=H,2=S,3=D. Used by bionic `__memcpy` tail handling.
+    SimdInsGen {
+        rd: VReg,
+        lane: u8,
+        rn: Reg,
+        size: u8,
+    },
+    /// `FMOV` (general) — pure bit-move between a GPR and an FP/SIMD register
+    /// (no numeric conversion). Forms: `FMOV Sd,Wn`/`Dd,Xn` (GPR→FP lane 0,
+    /// zeroing the rest), `FMOV Wd,Sn`/`Xd,Dn` (FP lane 0→GPR), and the
+    /// 128-bit high-half `FMOV Vd.D[1],Xn` / `FMOV Xd,Vn.D[1]` (lane 1, no
+    /// zeroing). `to_gpr` selects direction; `rd` is the GPR, `vn` the FP reg;
+    /// `size` is bytes (4=S/W, 8=D/X); `zero_rest` clears the other lanes on a
+    /// GPR→FP lane-0 write. bionic FP setup emits `fmov d0, x8`.
+    FmovGen {
+        to_gpr: bool,
+        rd: Reg,
+        vn: VReg,
+        lane: u8,
+        size: u8,
+        zero_rest: bool,
+    },
+    /// NEON `CNT` — per-byte population count V`rn` → V`rd`. `q`: false=.8b,
+    /// true=.16b. bionic's popcount idiom opens with `cnt v0.8b, v0.8b`.
+    SimdCnt {
+        rd: VReg,
+        rn: VReg,
+        q: bool,
+    },
+    /// NEON `UADDLV`/`SADDLV` — add-long across all lanes of V`rn` → scalar in
+    /// V`rd` lane 0. `size`: 0=B,1=H,2=S (log2 element); result is 2× wide.
+    /// `signed` ⇒ SADDLV. The popcount idiom's `uaddlv h0, v0.8b` sums the bytes.
+    SimdAddvLong {
+        rd: VReg,
+        rn: VReg,
+        size: u8,
+        q: bool,
+        signed: bool,
+    },
+    /// NEON `CMEQ Vd, Vn, #0` — per-lane compare-against-zero. `size`: 0=B,1=H,
+    /// 2=S,3=D. bionic strchr/memchr: `cmeq v2.16b, v1.16b, #0`.
+    SimdCmeqZero {
+        rd: VReg,
+        rn: VReg,
+        size: u8,
+        q: bool,
+    },
+    /// NEON `SHRN`/`SHRN2` — shift-right-narrow. `shift` ∈ 1..=2*esize_out*8;
+    /// `esize_out` = result element bytes; `high` = SHRN2 (writes Vd high 64).
+    SimdShrn {
+        rd: VReg,
+        rn: VReg,
+        shift: u8,
+        esize_out: u8,
+        high: bool,
+    },
+    /// NEON `USHLL`/`SSHLL`/`USHLL2`/`SSHLL2` (also `UXTL`/`SXTL` when shift==0) —
+    /// shift-left-long: widen each source element (`esize_in` bytes) to twice the
+    /// width with zero (`signed=false`) or sign (`signed=true`) extension, then
+    /// shift left by `shift`. `high` selects the high 64 bits of Vn (the `2`
+    /// variants). Result is always a full 128-bit Q-form register.
+    SimdUshll {
+        rd: VReg,
+        rn: VReg,
+        shift: u8,
+        esize_in: u8,
+        high: bool,
+        signed: bool,
+    },
+    /// NEON `EXT` (extract) — `Vd = (CONCAT(Vm, Vn) >> imm*8)`, i.e. the 16 (`q`)
+    /// or 8 bytes starting at byte `imm` of the Vn:Vm concatenation. bionic
+    /// memmove/string routines use it heavily (e.g. `ext v7.16b, v1.16b, v1.16b, #8`).
+    SimdExt {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        imm: u8,
+        q: bool,
+    },
+    /// NEON integer multiply-long: `UMULL`/`SMULL` (replace), `UMLAL`/`SMLAL`
+    /// (`accum`, add), `UMLSL`/`SMLSL` (`accum`+`sub`, subtract). Widens each
+    /// `size`-byte source element (`signed`) to 2× and multiplies; `q` selects
+    /// the high source half (the `2` variant).
+    SimdMulLong {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        size: u8,
+        q: bool,
+        signed: bool,
+        accum: bool,
+        sub: bool,
+    },
+    /// NEON `REV64`/`REV32`/`REV16` — reverse the order of `size`-element groups
+    /// (element bytes = 1<<size) within each `container`-byte group (8=REV64,
+    /// 4=REV32, 2=REV16). `q`=false is the 64-bit (D) form.
+    SimdRev64 {
+        rd: VReg,
+        rn: VReg,
+        size: u8,
+        q: bool,
+        container: u8,
+    },
+    /// NEON `LD1`/`ST1` (multiple structures, no de-interleave). `regs` ∈ 1..=4
+    /// consecutive V-regs from/to [Xn]; `q` selects 16B (.16b) vs 8B (.8b) each.
+    /// `writeback` = post-index (rm==31 → += regs*bytes, else += X`rm`).
+    SimdLd1Multi {
+        is_load: bool,
+        regs: u8,
+        q: bool,
+        rt: VReg,
+        rn: Reg,
+        writeback: bool,
+        rm: u8,
+    },
+    /// NEON `LD1R` — load one `size`-byte element from `[Xn]` and replicate it to
+    /// every lane of V`t` (`q` = 16 vs 8 bytes); optional post-index writeback.
+    SimdLd1Rep {
+        rt: VReg,
+        rn: Reg,
+        size: u8,
+        q: bool,
+        writeback: bool,
+        rm: u8,
+    },
+    /// NEON `BIC`/`ORR` (vector, immediate): RMW V`rd` with the expanded 64-bit
+    /// `imm` pattern. `is_bic` clears (`&~imm`) else sets (`|imm`). bionic strchr
+    /// `bic v4.8h, #0xf0`.
+    SimdBicOrrImm {
+        rd: VReg,
+        imm: u64,
+        is_bic: bool,
+        q: bool,
+    },
+    /// NEON `UADDLP`/`SADDLP` — add-long pairwise within V`rn`. `size` (log2 of
+    /// the SOURCE element: 0=B,1=H,2=S) widens to a `2×` result element.
+    /// `signed` ⇒ SADDLP. bionic NEON popcount accumulation.
+    SimdAddLongPair {
+        rd: VReg,
+        rn: VReg,
+        size: u8,
+        q: bool,
+        signed: bool,
+    },
+    /// NEON `UZP1`/`UZP2` — unzip even/odd `size`-log2 elements of V`rn`:V`rm`.
+    SimdUnzip {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        size: u8,
+        q: bool,
+        odd: bool,
+    },
+    /// NEON `ADDV` — reduce-add all lanes (same width) of V`rn` to a scalar.
+    SimdReduceAdd {
+        rd: VReg,
+        rn: VReg,
+        size: u8,
+        q: bool,
+    },
+    /// NEON `INS` (element): V`rd`.<T>[`dst_lane`] <- V`rn`.<T>[`src_lane`].
+    /// `size`: 0=B,1=H,2=S,3=D (log2 element). bionic `mov v0.d[1], v1.d[0]`.
+    SimdInsElem {
+        rd: VReg,
+        rn: VReg,
+        dst_lane: u8,
+        src_lane: u8,
+        size: u8,
     },
 
     // ----- AT-4: branches / system / exceptions / barriers / atomics -----

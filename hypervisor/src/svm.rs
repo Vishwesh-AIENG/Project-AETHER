@@ -1335,20 +1335,20 @@ pub fn handle_vm_exit(vmcb: &mut VmcbRegion, state: &mut SvmFoundationState) -> 
                                 unsafe { crate::boot_x86::inject_pending_fetch_abort(pc) }
                             {
                                 unsafe {
-                                    crate::boot_x86::dual_puts(b"[dbt] inst-abort injected pc=");
-                                    crate::boot_x86::dual_puthex64(pc);
-                                    crate::boot_x86::dual_puts(b" -> handler=");
-                                    crate::boot_x86::dual_puthex64(handler);
-                                    crate::boot_x86::dual_puts(b"\n");
+                                    crate::dbgout::dual_puts(b"[dbt] inst-abort injected pc=");
+                                    crate::dbgout::dual_puthex64(pc);
+                                    crate::dbgout::dual_puts(b" -> handler=");
+                                    crate::dbgout::dual_puthex64(handler);
+                                    crate::dbgout::dual_puts(b"\n");
                                 }
                                 vmcb.set_guest_rip(handler);
                                 return SvmExitAction::Resume;
                             }
                         }
                         unsafe {
-                            crate::boot_x86::dual_puts(b"[dbt] fetch xlate fault pc=");
-                            crate::boot_x86::dual_puthex64(pc);
-                            crate::boot_x86::dual_puts(b" (no handler)\n");
+                            crate::dbgout::dual_puts(b"[dbt] fetch xlate fault pc=");
+                            crate::dbgout::dual_puthex64(pc);
+                            crate::dbgout::dual_puts(b" (no handler)\n");
                         }
                         state.gate.npt_fault_seen = true;
                         return SvmExitAction::Terminate;
@@ -1426,21 +1426,21 @@ pub fn handle_vm_exit(vmcb: &mut VmcbRegion, state: &mut SvmFoundationState) -> 
                     let (fpc, fw, fkind) =
                         aether_translator::dbt::aether_dbt_last_failure();
                     unsafe {
-                        crate::boot_x86::dual_puts(b"[dbt] TranslateFail pc=");
-                        crate::boot_x86::dual_puthex64(fpc);
-                        crate::boot_x86::dual_puts(b" word=");
-                        crate::boot_x86::dual_puthex64(fw as u64);
-                        crate::boot_x86::dual_puts(b" kind=");
-                        crate::boot_x86::dual_puthex64(fkind as u64);
-                        crate::boot_x86::dual_puts(b" (1=decode 2=lift 3=short 4=empty)\n");
+                        crate::dbgout::dual_puts(b"[dbt] TranslateFail pc=");
+                        crate::dbgout::dual_puthex64(fpc);
+                        crate::dbgout::dual_puts(b" word=");
+                        crate::dbgout::dual_puthex64(fw as u64);
+                        crate::dbgout::dual_puts(b" kind=");
+                        crate::dbgout::dual_puthex64(fkind as u64);
+                        crate::dbgout::dual_puts(b" (1=decode 2=lift 3=short 4=empty)\n");
                     }
                 } else {
                     unsafe {
-                        crate::boot_x86::dual_puts(b"[dbt] NPT window read failed pc=");
-                        crate::boot_x86::dual_puthex64(pc);
-                        crate::boot_x86::dual_puts(b" fetch_pa=");
-                        crate::boot_x86::dual_puthex64(fetch_pa);
-                        crate::boot_x86::dual_puts(b"\n");
+                        crate::dbgout::dual_puts(b"[dbt] NPT window read failed pc=");
+                        crate::dbgout::dual_puthex64(pc);
+                        crate::dbgout::dual_puts(b" fetch_pa=");
+                        crate::dbgout::dual_puthex64(fetch_pa);
+                        crate::dbgout::dual_puts(b"\n");
                     }
                 }
             }
@@ -1462,7 +1462,7 @@ pub fn handle_vm_exit(vmcb: &mut VmcbRegion, state: &mut SvmFoundationState) -> 
             // note in boot_x86.rs above the VMRUN loop. Don't loop;
             // terminate with a unique diagnostic.
             unsafe {
-                crate::boot_x86::dual_puts(
+                crate::dbgout::dual_puts(
                     b"[svm] SHUTDOWN (0x7F) - guest triple-faulted. Most likely \
                       cause: VMRUN executed raw ARM64 GKI bytes as x86. \
                       Translator-on-NPF model not yet wired.\n",

@@ -11,7 +11,7 @@
 //!   - LSE atomics (v8.1): CAS{,A,L,AL}, LD{ADD,CLR,EOR,SET,SMAX,SMIN,UMAX,UMIN}, SWP
 
 use super::bits::sext32;
-use super::{AccessSize, AddrMode, DecodeErr, DecodedInsn, ExtendKind, Reg};
+use super::{AccessSize, AddrMode, DecodeErr, DecodedInsn, ExtendKind, Reg, VReg};
 
 pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     // Structural classification per ARM ARM C4.1.4 — masks match Linux's
@@ -39,7 +39,86 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if (word & 0x3F200C00) == 0x38200000 {
         return decode_lse(word);
     }
+    // AdvSIMD LD1/ST1 multiple structures (no de-interleave). No-offset form pins
+    // [29:23]=0011000 + Rm[21:16]=0; post-index form [29:23]=0011001 + bit21=0.
+    if (word & 0xBFBF_0000) == 0x0C00_0000 {
+        return decode_simd_ldst_multi(word, false);
+    }
+    if (word & 0xBFA0_0000) == 0x0C80_0000 {
+        return decode_simd_ldst_multi(word, true);
+    }
+    // AdvSIMD load/store SINGLE structure (incl. LD1R replicate). Top byte
+    // 0Q001101 → (word & 0xBF000000) == 0x0D000000 (bit24=1 distinguishes it from
+    // the multiple-structures family above, bit24=0).
+    if (word & 0xBF00_0000) == 0x0D00_0000 {
+        return decode_simd_ldst_single(word);
+    }
     Err(DecodeErr::Unimplemented)
+}
+
+/// AdvSIMD load single structure and replicate (`LD1R`). Loads one `size`-byte
+/// element from `[Xn]` and broadcasts it to all lanes of V`t`; optional
+/// post-index writeback. Other single-structure forms (single-lane LD1/ST1,
+/// LD2R/3R/4R) stay Unimplemented until needed.
+fn decode_simd_ldst_single(word: u32) -> Result<DecodedInsn, DecodeErr> {
+    let q = (word >> 30) & 1;
+    let post_index = (word >> 23) & 1;
+    let l = (word >> 22) & 1; // 1 = load
+    let r = (word >> 21) & 1; // 0 = LD1R/LD3R, 1 = LD2R/LD4R
+    let opcode = (word >> 13) & 0x7;
+    let s = (word >> 12) & 1;
+    let size = (word >> 10) & 0x3;
+    let rm = ((word >> 16) & 0x1F) as u8;
+    let rn = ((word >> 5) & 0x1F) as u8;
+    let rt = (word & 0x1F) as u8;
+    // In the NO-offset form (post_index==0) the Rm field [20:16] is reserved and
+    // must be zero; a non-zero value there is an unallocated encoding (capstone
+    // rejects it) and is NOT a real LD1R.
+    if post_index == 0 && rm != 0 {
+        return Err(DecodeErr::Reserved);
+    }
+    // LD1R: load + replicate. opcode=110, L=1, R=0, S=0.
+    if l == 1 && opcode == 0b110 && r == 0 && s == 0 {
+        return Ok(DecodedInsn::SimdLd1Rep {
+            rt: VReg(rt),
+            rn: Reg(rn),
+            size: size as u8,
+            q: q == 1,
+            writeback: post_index == 1,
+            rm,
+        });
+    }
+    Err(DecodeErr::Unimplemented)
+}
+
+/// AdvSIMD `LD1`/`ST1` (multiple structures, contiguous — NOT the LD2/3/4
+/// de-interleaving forms). `opcode` bits[15:12] selects the register count for
+/// the LD1/ST1 patterns; the element `size` is irrelevant to the byte count
+/// (each register transfers Q?16:8 contiguous bytes). De-interleaving opcodes
+/// (LD2/3/4) and reserved values stay Unimplemented.
+fn decode_simd_ldst_multi(word: u32, post_index: bool) -> Result<DecodedInsn, DecodeErr> {
+    let q = (word >> 30) & 1;
+    let l = (word >> 22) & 1; // 1 = load
+    let opcode = (word >> 12) & 0xF;
+    let rn = ((word >> 5) & 0x1F) as u8;
+    let rt = (word & 0x1F) as u8;
+    let rm = ((word >> 16) & 0x1F) as u8; // post-index register/imm selector
+    let regs: u8 = match opcode {
+        0b0111 => 1,
+        0b1010 => 2,
+        0b0110 => 3,
+        0b0010 => 4,
+        _ => return Err(DecodeErr::Unimplemented), // LD2/3/4 de-interleave / reserved
+    };
+    Ok(DecodedInsn::SimdLd1Multi {
+        is_load: l == 1,
+        regs,
+        q: q == 1,
+        rt: VReg(rt),
+        rn: Reg(rn),
+        writeback: post_index,
+        rm,
+    })
 }
 
 fn size_from_2bits(size: u32, simd: bool) -> AccessSize {
@@ -99,9 +178,9 @@ fn decode_unsigned_offset(word: u32) -> Result<DecodedInsn, DecodeErr> {
     let imm = (imm12 << scale_of(access)) as i32;
     let addr = AddrMode::Offset { base: rn, imm };
     Ok(match opc {
-        0b00 => DecodedInsn::Str { rt, size: access, addr },
-        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr },
-        0b10 | 0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr },
+        0b00 => DecodedInsn::Str { rt, size: access, addr, is_fp: false },
+        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: false },
+        0b10 | 0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false },
         _ => unreachable!(),
     })
 }
@@ -137,9 +216,9 @@ fn decode_immediate_pre_post_unscaled(word: u32) -> Result<DecodedInsn, DecodeEr
         _ => unreachable!(),
     };
     Ok(match opc {
-        0b00 => DecodedInsn::Str { rt, size: access, addr },
-        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr },
-        0b10 | 0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr },
+        0b00 => DecodedInsn::Str { rt, size: access, addr, is_fp: false },
+        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: false },
+        0b10 | 0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false },
         _ => unreachable!(),
     })
 }
@@ -156,6 +235,13 @@ fn decode_register_offset(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if v != 0 {
         return decode_fp_simd_reg_offset(word, size, opc, rm, option, s, rn, rt);
     }
+    // PRFM (prefetch memory), register offset: size=11, opc=10, V=0. A pure
+    // micro-architectural hint with no architectural effect → no-op. (GCC-built
+    // kernels emit this `prfm <prfop>, [Xn, Xm]` form heavily; clang favoured the
+    // unsigned-offset form. Without this, check_ls_opc rejects size=11/opc=10.)
+    if size == 0b11 && opc == 0b10 {
+        return Ok(DecodedInsn::Nop);
+    }
     check_ls_opc(size, opc)?;
     let access = size_from_2bits(size, false);
     let extend = match option {
@@ -168,9 +254,9 @@ fn decode_register_offset(word: u32) -> Result<DecodedInsn, DecodeErr> {
     let shift = if s != 0 { scale_of(access) as u8 } else { 0 };
     let addr = AddrMode::RegOffset { base: rn, index: rm, extend, shift };
     Ok(match opc {
-        0b00 => DecodedInsn::Str { rt, size: access, addr },
-        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr },
-        0b10 | 0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr },
+        0b00 => DecodedInsn::Str { rt, size: access, addr, is_fp: false },
+        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: false },
+        0b10 | 0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false },
         _ => unreachable!(),
     })
 }
@@ -196,6 +282,7 @@ fn decode_literal(word: u32) -> Result<DecodedInsn, DecodeErr> {
         return Ok(DecodedInsn::Ldr {
             rt, size: access, signed: false,
             addr: AddrMode::Pcrel { offset: imm },
+            is_fp: true,
         });
     }
     let imm = sext32(imm19, 19) << 2;
@@ -208,6 +295,7 @@ fn decode_literal(word: u32) -> Result<DecodedInsn, DecodeErr> {
     Ok(DecodedInsn::Ldr {
         rt, size: access, signed,
         addr: AddrMode::Pcrel { offset: imm },
+        is_fp: false,
     })
 }
 
@@ -240,10 +328,14 @@ fn decode_pair(word: u32) -> Result<DecodedInsn, DecodeErr> {
             0b11 => AddrMode::PreIndex { base: rn, imm },
             _ => unreachable!(),
         };
+        // SIMD&FP pair: rt/rt2 are q/d/s register numbers, NOT GPRs. Emit the
+        // dedicated FP-pair variants so the lift targets the q-register file.
+        // (Folding these into integer Ldp/Stp loaded FP data into GPRs and could
+        // clobber the base — see DecodedInsn::LdpFp.)
         return Ok(if l != 0 {
-            DecodedInsn::Ldp { rt1: rt, rt2, sf: true, signed: false, addr }
+            DecodedInsn::LdpFp { rt1: rt, rt2, access, addr }
         } else {
-            DecodedInsn::Stp { rt1: rt, rt2, sf: true, addr }
+            DecodedInsn::StpFp { rt1: rt, rt2, access, addr }
         });
     }
     // opc=01 (LDPSW) is valid only with L=1 (load). STP with opc=01 is reserved
@@ -397,9 +489,9 @@ fn decode_fp_simd_unsigned(
     let addr = AddrMode::Offset { base: rn, imm };
     // opc bit 0 selects load (1) vs store (0).
     Ok(if opc & 1 != 0 {
-        DecodedInsn::Ldr { rt, size: access, signed: false, addr }
+        DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: true }
     } else {
-        DecodedInsn::Str { rt, size: access, addr }
+        DecodedInsn::Str { rt, size: access, addr, is_fp: true }
     })
 }
 
@@ -419,9 +511,9 @@ fn decode_fp_simd_imm(
         _ => unreachable!(),
     };
     Ok(if opc & 1 != 0 {
-        DecodedInsn::Ldr { rt, size: access, signed: false, addr }
+        DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: true }
     } else {
-        DecodedInsn::Str { rt, size: access, addr }
+        DecodedInsn::Str { rt, size: access, addr, is_fp: true }
     })
 }
 
@@ -440,9 +532,9 @@ fn decode_fp_simd_reg_offset(
     let shift = if s != 0 { scale_of(access) as u8 } else { 0 };
     let addr = AddrMode::RegOffset { base: rn, index: rm, extend, shift };
     Ok(if opc & 1 != 0 {
-        DecodedInsn::Ldr { rt, size: access, signed: false, addr }
+        DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: true }
     } else {
-        DecodedInsn::Str { rt, size: access, addr }
+        DecodedInsn::Str { rt, size: access, addr, is_fp: true }
     })
 }
 
@@ -496,6 +588,15 @@ fn decode_lse(word: u32) -> Result<DecodedInsn, DecodeErr> {
         0b0110 => DecodedInsn::LdAtomicRmw { size: access, op: 6, rs, rt, rn, acquire, release },
         0b0111 => DecodedInsn::LdAtomicRmw { size: access, op: 7, rs, rt, rn, acquire, release },
         0b1000 => DecodedInsn::Swp { size: access, rs, rt, rn, acquire, release },
+        // LDAPR/LDAPRH/LDAPRB — Load-Acquire RCpc Register. Shares the LSE
+        // atomic encoding space (opcode4=1100) but is a plain load-acquire, not
+        // an RMW: Rs=11111, A=1 (acquire), R=0. On our single-core x86-TSO host
+        // the RCpc acquire needs no fence, so it lifts via the same path as LDAR
+        // (a zero-extending load). bionic uses it for C++ atomic acquire loads
+        // (e.g. `ldaprb w9,[x8]` reached in /init userspace startup).
+        0b1100 if rs.idx() == 31 && a == 1 && r == 0 => {
+            DecodedInsn::Ldapr { size: access, rt, rn }
+        }
         _ => return Err(DecodeErr::Reserved),
     })
 }

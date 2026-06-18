@@ -110,6 +110,24 @@ fn is_side_effecting(op: &IrOp) -> bool {
         | IrOp::Smc { .. }
         | IrOp::Brk { .. }
         | IrOp::Hlt { .. }
+        | IrOp::EretRt
+        | IrOp::VecMoviImm { .. }
+        | IrOp::VecDupGpr { .. }
+        | IrOp::FpCvtIntScalar { .. }
+        | IrOp::VecInsGpr { .. }
+        | IrOp::VecCnt { .. }
+        | IrOp::VecAddvLong { .. }
+        | IrOp::VecCmpZero { .. }
+        | IrOp::VecShiftNarrow { .. }
+        | IrOp::VecShiftLong { .. }
+        | IrOp::VecExt { .. }
+        | IrOp::VecMulLong { .. }
+        | IrOp::VecRev64 { .. }
+        | IrOp::CryptoSha256 { .. }
+        | IrOp::VecBicOrrImm { .. }
+        | IrOp::VecAddLongPair { .. }
+        | IrOp::VecUnzip { .. }
+        | IrOp::VecReduceAdd { .. }
         | IrOp::Msr { .. }
         | IrOp::Dmb { .. }
         | IrOp::Dsb { .. }

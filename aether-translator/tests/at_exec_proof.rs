@@ -132,6 +132,47 @@ unsafe fn enter_block(code: *const u8, ctx: *mut u64) {
 }
 
 /// Same proof, but through the PUBLIC runtime API the hypervisor's boot_amd
+/// Mid-block memory access must PC-stamp so a demand-paging fault resumes at the
+/// faulting instruction, not the block start. Reproduces the /init NULL-write
+/// shape `mov x8,x0; mov w0,wzr; ldr x1,[x2]`: the LDR (index 2, pc+8) can fault,
+/// and restarting the whole block would re-run `mov x8,x0` on the already-zeroed
+/// x0. The translated block must therefore write `pc+8` to the PC slot before
+/// the LDR's MMU call (the LDR never references that value, so its presence in
+/// the stream is the stamp).
+#[test]
+fn mid_block_memop_pc_stamp() {
+    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
+    use aether_translator::dbt::{
+        aether_dbt_block_host_va, aether_dbt_init, aether_dbt_invalidate_all,
+        aether_dbt_translate_block, AetherDbtResult,
+    };
+    let program: [u8; 12] = [
+        0xe8, 0x03, 0x00, 0xaa, // mov x8, x0   (orr x8,xzr,x0)
+        0xe0, 0x03, 0x1f, 0x2a, // mov w0, wzr
+        0x41, 0x00, 0x40, 0xf9, // ldr x1, [x2]
+    ];
+    let pc: u64 = 0x10_0000;
+    let _ = aether_dbt_init(0, 16 * 1024 * 1024, 0, 1024 * 1024);
+    let _ = aether_dbt_invalidate_all();
+    assert_eq!(aether_dbt_translate_block(pc, &program), AetherDbtResult::Ok);
+    let (host_va, len) = aether_dbt_block_host_va(pc).expect("host va");
+    // SAFETY: runtime-owned code buffer, valid for `len` bytes.
+    let code: Vec<u8> = unsafe { core::slice::from_raw_parts(host_va as *const u8, len).to_vec() };
+    // ConstI64 emits the i32-fitting PC as a 4-byte imm32 (REX.W mov r64,imm32).
+    let stamp_ldr = (pc as u32 + 8).to_le_bytes(); // 0x100008 = the LDR's PC
+    assert!(
+        code.windows(4).any(|w| w == stamp_ldr),
+        "mid-block LDR must be preceded by a PC stamp of pc+8",
+    );
+    // The non-memory instruction at index 1 (mov w0,wzr, pc+4) must NOT be
+    // stamped — only memory accesses are, and only when not the block's first.
+    let stamp_mov = (pc as u32 + 4).to_le_bytes(); // 0x100004
+    assert!(
+        !code.windows(4).any(|w| w == stamp_mov),
+        "non-memory instructions must not be PC-stamped",
+    );
+}
+
 /// uses: aether_dbt_init -> aether_dbt_translate_block -> aether_dbt_block_host_va
 /// -> execute. This host-verifies the exact M2 integration path before it runs
 /// on real AMD silicon (where a wrong path = a blind triple-fault reset).
@@ -209,6 +250,386 @@ fn movz_then_add_executes_and_updates_regfile() {
     );
 }
 
+/// REGRESSION for the SLUB self-cycle deadlock (put_cpu_partial `slab->next = 0`
+/// @ 0x831e640). The store wrote `slab` instead of `0`: the predecessor block's
+/// `movz x0,#0` did not commit ctx[0]=0 because x0 is LIVE-OUT ONLY (written by
+/// movz, never read inside its own block, only by the successor). Reproduce: a
+/// movz whose result is unused in-block must STILL land in ctx.
+#[test]
+fn movz_liveout_only_commits_to_ctx() {
+    // movz x0, #0   = 0xD2800000  (x0 = 0; x0 NOT read again in this block)
+    // movz x1, #5   = 0xD28000A1  (independent — keeps x0 live-out-only)
+    let words = [0xD280_0000u32, 0xD280_00A1u32];
+    let code = translate_straight_line(&words, 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[0] = 0xCAFE_F00D_DEAD_BEEF; // stale "slab" value already in x0
+    // SAFETY: freshly translated RET-terminated block; ctx is full-size.
+    unsafe {
+        enter_block(exec, ctx.as_mut_ptr());
+    }
+    assert_eq!(ctx[1], 5, "x1 = 5 sanity");
+    assert_eq!(
+        ctx[0], 0,
+        "movz x0,#0 must commit ctx[0]=0 even when x0 is unused in-block \
+         (the slab->next=slab self-cycle bug)"
+    );
+}
+
+/// Same bug, the EXACT shape from the deadlock: `movz x0,#0` then a BRANCH
+/// terminator. x0 is consumed only by the branch's successor block, so the
+/// movz's WriteGpr must be committed to ctx before the block exits via the b.
+#[test]
+fn movz_then_branch_commits_to_ctx() {
+    // movz x0, #0   = 0xD2800000
+    // b   .+8       = 0x14000002  (unconditional branch — block terminator)
+    let words = [0xD280_0000u32, 0x1400_0002u32];
+    let code = translate_straight_line(&words, 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[0] = 0xCAFE_F00D_DEAD_BEEF;
+    // SAFETY: freshly translated RET-terminated block; ctx is full-size.
+    unsafe {
+        enter_block(exec, ctx.as_mut_ptr());
+    }
+    assert_eq!(
+        ctx[0], 0,
+        "movz x0,#0 before a branch must commit ctx[0]=0 (slab->next bug)"
+    );
+}
+
+/// bionic's power-of-2 / popcount idiom executed end-to-end:
+///   fmov d0, x8        (0x9E670100)
+///   cnt  v0.8b, v0.8b  (0x0E205800)
+///   uaddlv h0, v0.8b   (0x2E303800)
+///   fmov w9, s0        (0x1E260009)
+/// X9 must end == popcount(X8). Exec-proves FMOV (both directions) + CNT (SWAR
+/// per-byte popcount) + UADDLV (horizontal byte sum), the /init 0x31f800 block.
+#[test]
+fn popcount_idiom_cnt_uaddlv_executes() {
+    let words = [0x9E67_0100u32, 0x0E20_5800, 0x2E30_3800, 0x1E26_0009];
+    let code = translate_straight_line(&words, 0x1000);
+    assert_eq!(*code.last().unwrap(), 0xC3, "block must end in RET");
+    assert!(
+        !code.windows(2).any(|w| w == [0x0F, 0x0B]),
+        "translated popcount block must not contain UD2"
+    );
+    let exec = winexec::make_executable(&code);
+    for (x8, want) in [
+        (0x8001u64, 2u64),
+        (0xFFFF_FFFF_FFFF_FFFF, 64),
+        (0x0, 0),
+        (0x0F0F, 8),
+        (0x1, 1),
+        (0x8000_0000_0000_0000, 1),
+    ] {
+        let mut ctx = [0u64; CTX_U64S];
+        ctx[8] = x8;
+        // SAFETY: freshly translated RET-terminated block; ctx is register-file sized.
+        unsafe {
+            enter_block(exec, ctx.as_mut_ptr());
+        }
+        assert_eq!(ctx[9], want, "popcount(0x{x8:016x}) should be {want}, got 0x{:x}", ctx[9]);
+    }
+}
+
+/// alloc_large_system_hash's log2qty = ilog2(numentries), the EXACT instruction
+/// sequence from the new GCC kernel @ file 0x151d0e4 (dcache_init's d_hash_shift
+/// source). If CLZ X-form or the W-form arithmetic mistranslates, d_hash_shift is
+/// wrong → __d_lookup_rcu reads OOB → the dcache Oops. Executed on the host so we
+/// can confirm/rule-out the shift bug WITHOUT a QEMU boot.
+///   clz x7,x7 ; mov x23,#0x3f ; sub x23,x23,x7 ; add w23,w23,#1 ; sub w23,w23,#1 ; sxtw x23,w23
+/// For x7 = 2^k, result x23 must == k (ilog2).
+#[test]
+fn alloc_large_system_hash_log2qty_executes() {
+    let words = [
+        0xDAC010E7u32, // clz x7, x7
+        0xD28007F7,    // mov x23, #0x3f
+        0xCB0702F7,    // sub x23, x23, x7
+        0x110006F7,    // add w23, w23, #1
+        0x510006F7,    // sub w23, w23, #1
+        0x93407EF7,    // sxtw x23, w23
+    ];
+    let code = translate_straight_line(&words, 0x1000);
+    assert_eq!(*code.last().unwrap(), 0xC3, "block must end in RET");
+    assert!(!code.windows(2).any(|w| w == [0x0F, 0x0B]), "must not UD2");
+    let exec = winexec::make_executable(&code);
+    // 2^17 = the live dentry-cache table size (131072 entries) → ilog2 must be 17.
+    for k in [4u64, 8, 16, 17, 18, 23, 31] {
+        let mut ctx = [0u64; CTX_U64S];
+        ctx[7] = 1u64 << k;
+        // SAFETY: RET-terminated block; ctx is register-file sized.
+        unsafe {
+            enter_block(exec, ctx.as_mut_ptr());
+        }
+        assert_eq!(
+            ctx[23], k,
+            "ilog2(2^{k}) must be {k}, got {} — d_hash_shift mistranslation",
+            ctx[23] as i64
+        );
+    }
+}
+
+/// LSRV W-form (`lsr w4, w11, w4`) — variable right shift, 32-bit. The operand
+/// MUST be the low 32 bits of Xn (zero-extended result), NOT the full 64-bit Xn.
+/// This is THE dcache Oops bug: __d_lookup_rcu does `lsr w4, w11, w4` where x11 =
+/// hashlen (hash in low 32, string LEN in high 32). With the 64-bit operand the
+/// `len` bits leak into the bucket index → OOB hashtable read → corruption Oops.
+/// Real value: x11 = 0xc_2fe13f6b, shift 15 → correct 0x5fc2, bug 0x185fc2.
+#[test]
+fn lsrv_wform_masks_operand_to_32bit() {
+    let words = [0x1AC4_2564u32]; // lsr w4, w11, w4
+    let code = translate_straight_line(&words, 0x1000);
+    let exec = winexec::make_executable(&code);
+    for (x11, shift, want) in [
+        (0x0000_000C_2FE1_3F6Bu64, 15u64, 0x5FC2u64), // hashlen: len=0xC must NOT leak
+        (0xFFFF_FFFF_8000_0000, 31, 0x1),             // high half must be ignored
+        (0x0000_0001_0000_0001, 0, 0x1),              // shift 0: low 32 only, zero-ext
+        (0x0000_00FF_DEAD_BEEF, 4, 0x0DEA_DBEE),      // generic
+    ] {
+        let mut ctx = [0u64; CTX_U64S];
+        ctx[11] = x11;
+        ctx[4] = shift;
+        // SAFETY: RET-terminated block; ctx is register-file sized.
+        unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+        assert_eq!(
+            ctx[4], want,
+            "lsr w4,w11,w4: x11=0x{x11:016x} shift={shift} must be 0x{want:x} (32-bit operand, zero-ext), got 0x{:x}",
+            ctx[4]
+        );
+    }
+}
+
+/// bionic strchr/memchr NEON ops executed end-to-end on the host: CMEQ #0 (SSE
+/// pcmpeq vs zero), BIT (bitwise select identity), SHRN (psrlw + mask + pack).
+/// Proves the lower_simd_ctx SSE templates numerically, not just no-UD2.
+#[test]
+fn strchr_neon_ops_execute() {
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8; // u64 index of V<r>[63:0]; +1 = [127:64]
+
+    // CMEQ v2.16b, v1.16b, #0 — zero byte → 0xFF, non-zero → 0x00.
+    let code = translate_straight_line(&[0x4E20_9822u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S]; // v1 = 0 (all bytes zero)
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(2)], u64::MAX, "cmeq#0: all-zero → all-ones (lo)");
+    assert_eq!(ctx[vd(2) + 1], u64::MAX, "cmeq#0: all-zero → all-ones (hi)");
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(1)] = u64::MAX;
+    ctx[vd(1) + 1] = u64::MAX; // all bytes non-zero
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(2)], 0, "cmeq#0: non-zero → 0 (lo)");
+    assert_eq!(ctx[vd(2) + 1], 0, "cmeq#0: non-zero → 0 (hi)");
+
+    // BIT v2.16b, v3.16b, v4.16b — v2 = (v2 & ~v4) | (v3 & v4). v4=all-ones ⇒ v2:=v3.
+    let code = translate_straight_line(&[0x6EA4_1C62u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(2)] = 0xAAAA_AAAA_AAAA_AAAA;
+    ctx[vd(2) + 1] = 0xAAAA_AAAA_AAAA_AAAA;
+    ctx[vd(3)] = 0x5555_5555_5555_5555;
+    ctx[vd(3) + 1] = 0x5555_5555_5555_5555;
+    ctx[vd(4)] = u64::MAX;
+    ctx[vd(4) + 1] = u64::MAX;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(2)], 0x5555_5555_5555_5555, "bit: v4=1 ⇒ v2:=v3 (lo)");
+    assert_eq!(ctx[vd(2) + 1], 0x5555_5555_5555_5555, "bit: v4=1 ⇒ v2:=v3 (hi)");
+
+    // SHRN v5.8b, v2.8h, #4 — each halfword 0x0120 >>4 = 0x12 → low byte 0x12.
+    let code = translate_straight_line(&[0x0F0C_8445u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(2)] = 0x0120_0120_0120_0120;
+    ctx[vd(2) + 1] = 0x0120_0120_0120_0120;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(5)], 0x1212_1212_1212_1212, "shrn: low 8 bytes = 0x12 each");
+    assert_eq!(ctx[vd(5) + 1], 0, "shrn: upper 64 zeroed");
+}
+
+/// bionic strchr main-loop NEON ops executed on the host: BIC vector-immediate
+/// (scalar and-not), ADDP / UMAXP byte-pairwise (SSE deinterleave + pack).
+#[test]
+fn strchr_loop_neon_ops_execute() {
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+
+    // bic v4.8h, #0xf0 — each halfword &= ~0x00f0. all-ones → 0xff0f per halfword.
+    let code = translate_straight_line(&[0x6F07_9604u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(4)] = u64::MAX;
+    ctx[vd(4) + 1] = u64::MAX;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(4)], 0xFF0F_FF0F_FF0F_FF0F, "bic .8h #0xf0 (lo)");
+    assert_eq!(ctx[vd(4) + 1], 0xFF0F_FF0F_FF0F_FF0F, "bic .8h #0xf0 (hi)");
+
+    // addp v5.16b, v2.16b, v2.16b — every byte 0x01 ⇒ pairwise sums all 0x02.
+    let code = translate_straight_line(&[0x4E22_BC45u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(2)] = 0x0101_0101_0101_0101;
+    ctx[vd(2) + 1] = 0x0101_0101_0101_0101;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(5)], 0x0202_0202_0202_0202, "addp .16b (lo)");
+    assert_eq!(ctx[vd(5) + 1], 0x0202_0202_0202_0202, "addp .16b (hi)");
+
+    // umaxp v5.16b, v2.16b, v2.16b — bytes alternate 0x01/0x03 ⇒ pairwise max 0x03.
+    let code = translate_straight_line(&[0x6E22_A445u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(2)] = 0x0301_0301_0301_0301;
+    ctx[vd(2) + 1] = 0x0301_0301_0301_0301;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(5)], 0x0303_0303_0303_0303, "umaxp .16b (lo)");
+    assert_eq!(ctx[vd(5) + 1], 0x0303_0303_0303_0303, "umaxp .16b (hi)");
+}
+
+/// bionic NEON popcount accumulation — UADDLP (add-long pairwise, widening) at
+/// byte→half, half→word, word→dword, executed on the host.
+#[test]
+fn uaddlp_widening_executes() {
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+
+    // uaddlp v2.8h, v2.16b — every byte 0x05 ⇒ each halfword = 0x0A (10).
+    let code = translate_straight_line(&[0x6E20_2842u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(2)] = 0x0505_0505_0505_0505;
+    ctx[vd(2) + 1] = 0x0505_0505_0505_0505;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(2)], 0x000A_000A_000A_000A, "uaddlp .8h (lo)");
+    assert_eq!(ctx[vd(2) + 1], 0x000A_000A_000A_000A, "uaddlp .8h (hi)");
+
+    // uaddlp v2.4s, v2.8h — each halfword 0x0A ⇒ each word = 0x14 (20).
+    let code = translate_straight_line(&[0x6E60_2842u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(2)] = 0x000A_000A_000A_000A;
+    ctx[vd(2) + 1] = 0x000A_000A_000A_000A;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(2)], 0x0000_0014_0000_0014, "uaddlp .4s (lo)");
+    assert_eq!(ctx[vd(2) + 1], 0x0000_0014_0000_0014, "uaddlp .4s (hi)");
+
+    // uaddlp v3.2d, v3.4s — each word 0x14 ⇒ each dword = 0x28 (40).
+    let code = translate_straight_line(&[0x6EA0_2863u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(3)] = 0x0000_0014_0000_0014;
+    ctx[vd(3) + 1] = 0x0000_0014_0000_0014;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(3)], 0x0000_0000_0000_0028, "uaddlp .2d (lo)");
+    assert_eq!(ctx[vd(3) + 1], 0x0000_0000_0000_0028, "uaddlp .2d (hi)");
+}
+
+/// bionic NEON popcount tail: UZP1 .4s (shufps) + ADDV .4s (lane reduce-add).
+#[test]
+fn uzp1_addv_execute() {
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+
+    // uzp1 v2.4s, v2.4s, v3.4s — even 32-bit lanes of v2:v3 = [v2.0,v2.2,v3.0,v3.2].
+    let code = translate_straight_line(&[0x4E83_1842u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    // v2 lanes = [0x11,0x22,0x33,0x44] (lo=0x0000002200000011, hi=0x0000004400000033)
+    ctx[vd(2)] = 0x0000_0022_0000_0011;
+    ctx[vd(2) + 1] = 0x0000_0044_0000_0033;
+    // v3 lanes = [0x55,0x66,0x77,0x88]
+    ctx[vd(3)] = 0x0000_0066_0000_0055;
+    ctx[vd(3) + 1] = 0x0000_0088_0000_0077;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    // even lanes: [v2.0=0x11, v2.2=0x33, v3.0=0x55, v3.2=0x77]
+    assert_eq!(ctx[vd(2)], 0x0000_0033_0000_0011, "uzp1 .4s (lo)");
+    assert_eq!(ctx[vd(2) + 1], 0x0000_0077_0000_0055, "uzp1 .4s (hi)");
+
+    // addv s0, v0.4s — sum the four 32-bit lanes → s0 (rest zeroed).
+    let code = translate_straight_line(&[0x4EB1_B800u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(0)] = 0x0000_0002_0000_0001; // lanes 1,2
+    ctx[vd(0) + 1] = 0x0000_0004_0000_0003; // lanes 3,4  → sum = 10 = 0xA
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(0)], 0x0000_0000_0000_000A, "addv .4s sum (lo)");
+    assert_eq!(ctx[vd(0) + 1], 0, "addv result upper zeroed");
+}
+
+/// SHRN .2s (`.2d→.2s`) + SHRN2 (high-half narrow) executed on the host.
+#[test]
+fn shrn_2s_and_shrn2_execute() {
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+
+    // shrn v4.2s, v4.2d, #4 — each 64-bit lane >>4, low 32 → .2s, upper zeroed.
+    let code = translate_straight_line(&[0x0F3C_8484u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(4)] = 0x100; // qword0 >>4 = 0x10
+    ctx[vd(4) + 1] = 0x200; // qword1 >>4 = 0x20
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(4)], 0x0000_0020_0000_0010, "shrn .2s [0x10,0x20] (lo)");
+    assert_eq!(ctx[vd(4) + 1], 0, "shrn .2s upper zeroed");
+
+    // shrn2 v4.4s, v5.2d, #4 — result → v4[127:64], v4[63:0] preserved.
+    let code = translate_straight_line(&[0x4F3C_84A4u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(4)] = 0xAAAA_BBBB_CCCC_DDDD; // preserved low 64
+    ctx[vd(4) + 1] = 0x1111_1111_1111_1111; // overwritten
+    ctx[vd(5)] = 0x100;
+    ctx[vd(5) + 1] = 0x200;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(4)], 0xAAAA_BBBB_CCCC_DDDD, "shrn2 preserves low 64");
+    assert_eq!(ctx[vd(4) + 1], 0x0000_0020_0000_0010, "shrn2 writes high 64");
+}
+
+/// INS (element) — vector lane→lane copy: `mov v0.d[1], v1.d[0]`, host-executed.
+#[test]
+fn ins_element_execute() {
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    let code = translate_straight_line(&[0x6E18_0420u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(0)] = 0x1111_1111_1111_1111; // v0.d[0] — preserved
+    ctx[vd(0) + 1] = 0x2222_2222_2222_2222; // v0.d[1] — overwritten
+    ctx[vd(1)] = 0xDEAD_BEEF_CAFE_F00D; // v1.d[0] — source
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(0)], 0x1111_1111_1111_1111, "ins elem preserves v0.d[0]");
+    assert_eq!(ctx[vd(0) + 1], 0xDEAD_BEEF_CAFE_F00D, "ins elem v0.d[1] := v1.d[0]");
+}
+
+/// CMHS (unsigned vector compare ≥) — the bionic strcmp/memcmp op. Uses the
+/// UNSIGNED max trick, so 0x80 ≥ 0x7F must be true (a SIGNED compare would say
+/// false: -128 < 127). Host-executed.
+#[test]
+fn cmhs_unsigned_execute() {
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    // cmhs v2.16b, v3.16b, v1.16b  (a=v3, b=v1) → per-byte (a >= b unsigned).
+    let code = translate_straight_line(&[0x6E21_3C62u32], 0x1000);
+    let exec = winexec::make_executable(&code);
+    // v3 = 0x80 (128), v1 = 0x7F (127): 128 >= 127 unsigned → all 0xFF.
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(3)] = 0x8080_8080_8080_8080;
+    ctx[vd(3) + 1] = 0x8080_8080_8080_8080;
+    ctx[vd(1)] = 0x7F7F_7F7F_7F7F_7F7F;
+    ctx[vd(1) + 1] = 0x7F7F_7F7F_7F7F_7F7F;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(2)], u64::MAX, "cmhs 0x80>=0x7F unsigned (lo)");
+    assert_eq!(ctx[vd(2) + 1], u64::MAX, "cmhs 0x80>=0x7F unsigned (hi)");
+    // reverse: 0x7F >= 0x80 unsigned → false → 0.
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[vd(3)] = 0x7F7F_7F7F_7F7F_7F7F;
+    ctx[vd(3) + 1] = 0x7F7F_7F7F_7F7F_7F7F;
+    ctx[vd(1)] = 0x8080_8080_8080_8080;
+    ctx[vd(1) + 1] = 0x8080_8080_8080_8080;
+    unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[vd(2)], 0, "cmhs 0x7F>=0x80 unsigned false (lo)");
+    assert_eq!(ctx[vd(2) + 1], 0, "cmhs 0x7F>=0x80 unsigned false (hi)");
+}
+
 /// M3 — multi-block host dispatch + memory STORE/LOAD, through the public API.
 /// Mirrors the hypervisor's boot_amd dispatch loop exactly (translate -> resolve
 /// -> copy-to-RWX -> CALL -> read pc-slot -> repeat) so M3 is host-verified
@@ -217,8 +638,10 @@ fn movz_then_add_executes_and_updates_regfile() {
 fn m3_multiblock_store_load_dispatch() {
     let _rt = GLOBAL_RT_LOCK.lock().unwrap(); // serialize global-runtime access
     use aether_translator::dbt::{
-        aether_dbt_block_host_va, aether_dbt_init, aether_dbt_translate_block, AetherDbtResult,
+        aether_dbt_block_host_va, aether_dbt_init, aether_dbt_invalidate_all,
+        aether_dbt_translate_block, AetherDbtResult,
     };
+    use aether_translator::runtime::mmu::aether_mmu_set_window;
     const PC_SLOT: usize = 0x100 / 8;
     const BASE: u64 = 0x1000;
     // Contiguous 24-byte (0x18) program, two basic blocks:
@@ -235,6 +658,14 @@ fn m3_multiblock_store_load_dispatch() {
         0xFB, 0x03, 0x00, 0x14, // 0x1014 B -> 0x2000 (offset +0xFEC)
     ];
     let _ = aether_dbt_init(0, 16 * 1024 * 1024, 0, 1024 * 1024);
+    // The runtime is process-global and dbt_init no-ops when already live:
+    // m3_cbz_cbnz_next_pc translates DIFFERENT code at these same PCs
+    // (0x1000/0x2000), so flush its blocks or the cache serves them here.
+    let _ = aether_dbt_invalidate_all();
+    // MMU off → flat path; the No-Boundary clamp on the WRITE primitive
+    // (default window GUEST_PA_BASE..) would reject the host &obs address,
+    // so open the window wide — same as the newer M4b proofs do.
+    aether_mmu_set_window(0, u64::MAX);
 
     let mut ctx = [0u64; CTX_U64S];
     let mut obs: u64 = 0;
@@ -908,6 +1339,42 @@ fn m4b_flat_access_when_mmu_off() {
     assert_eq!(slot, 0x0123_4567_89AB_CDEF, "flat STR wrote through the raw VA");
     assert_eq!(ctx[2], 0x0123_4567_89AB_CDEF, "flat LDR read it back");
     assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "no fault when MMU off");
+}
+
+/// Regression: a scalar FP load/store (`LDR Dn` / `STR Dn`) must use the FP
+/// register file, NOT the integer register that shares the same number. The old
+/// size-only routing lifted `ldr d1` as `ldr x1`; a legitimate intervening
+/// `mov x1,..` then silently clobbered the value before `str d1` read it back.
+/// That is exactly how bionic's `vsnprintf` lost the `__SSTR` flag of its stack
+/// FILE (the `_flags` constant was loaded into d-reg, clobbered in x1, stored as
+/// garbage), so the FILE's NULL `_write` fp got called → /init SIGSEGV.
+/// Program: `ldr d1,[x0]` ; `movz x1,#0x1234` (clobber x1) ; `str d1,[x2]`.
+#[test]
+fn ldr_str_d_uses_fp_reg_not_gpr() {
+    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    aether_mmu_set_window(0, u64::MAX);
+    aether_mmu_flush_all();
+    let mut src: u64 = 0xFFFF_FFFF_0000_0208; // bionic vsnprintf _flags|_file|_r const
+    let mut dst: u64 = 0;
+    let src_addr = (&mut src as *mut u64) as u64;
+    let dst_addr = (&mut dst as *mut u64) as u64;
+    // ldr d1,[x0] (0xFD400001) ; movz x1,#0x1234 (0xD2824681) ; str d1,[x2] (0xFD000041)
+    let words = [0xFD40_0001u32, 0xD282_4681u32, 0xFD00_0041u32];
+    let code = translate_straight_line(&words, 0xC000);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[0] = src_addr; // x0 = source
+    ctx[2] = dst_addr; // x2 = dest
+    // SAFETY: RWX RET-terminated block; src/dst are live stack u64s the flat
+    // (MMU-off) accesses read/write.
+    unsafe {
+        enter_block(exec, ctx.as_mut_ptr());
+    }
+    assert_eq!(
+        dst, 0xFFFF_FFFF_0000_0208,
+        "LDR/STR d1 must carry the value in the FP reg; the intervening `mov x1` must NOT clobber it"
+    );
+    assert_eq!(ctx[1], 0x1234, "x1 is the independent clobber target");
 }
 
 // ── M4b-5: MMIO interception in the data path ────────────────────────────────
@@ -2058,7 +2525,12 @@ fn m4b2_unmapped_va_after_enable_mmu_faults() {
 }
 
 /// Phase C debug: dump the emitted x86 for MOVZ+MOVK AND run it + report ctx[10].
+// NOT an assertion — ends in an unconditional panic! to print the bytes, and a
+// panicking test poisons GLOBAL_RT_LOCK, cascade-failing every later test in
+// the binary. Run explicitly via `--ignored` when the dump is needed; the
+// assertion version is phase_c_movk_preserves_low_bits below.
 #[test]
+#[ignore = "debug dump tool — panics by design to print the emitted x86"]
 fn phase_c_dump_movk_emitted_x86() {
     const MOVZ_X10: u32 = 0xD291128A;
     const MOVK_X10: u32 = 0xF2AFB3CA;

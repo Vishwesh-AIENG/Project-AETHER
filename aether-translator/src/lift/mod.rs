@@ -40,11 +40,25 @@ pub enum LiftErr {
 pub struct LiftCtx<'a> {
     pub block: &'a mut IrBlock,
     pub pc: u64,
+    /// Deferred pre/post-index base-register writeback. `lift_addr_mode` records
+    /// `(base, new_base)` here instead of emitting the write eagerly; the memory
+    /// op's caller flushes it with `flush_wb()` AFTER the load/store, so a faulting
+    /// access leaves the base register unchanged and the kernel-handled retry
+    /// recomputes the same address (eager writeback double-applied on retry → the
+    /// `stp x29,x30,[sp,#-N]!` prologue corrupted `sp` → saved-x30=0 → RET-to-0).
+    pending_wb: Option<(Reg, IrValueId)>,
 }
 
 impl<'a> LiftCtx<'a> {
     pub fn new(block: &'a mut IrBlock, pc: u64) -> Self {
-        Self { block, pc }
+        Self { block, pc, pending_wb: None }
+    }
+
+    /// Emit a deferred pre/post-index writeback (if any) AFTER the memory access.
+    fn flush_wb(&mut self) {
+        if let Some((base, v)) = self.pending_wb.take() {
+            self.write_reg_or_sp(base, v, true, true);
+        }
     }
 
     fn val(&mut self, kind: IrValueKind) -> IrValueId {
@@ -133,27 +147,24 @@ impl<'a> LiftCtx<'a> {
                 }
             }
             AddrMode::PreIndex { base, imm } => {
+                // Pre-index: access uses base+imm; base writes back to base+imm.
+                // DEFER the writeback (recorded in pending_wb, flushed AFTER the
+                // access) so a faulting access leaves base unchanged for the retry.
                 let v_base = self.read_reg_or_sp(base, true, true);
                 let v_imm = self.const_i64(imm as i64);
                 let v_addr = self.val(IrValueKind::I64);
                 self.push(IrOp::Add { dst: v_addr, a: v_base, b: v_imm });
-                // Writeback first (pre-index): base = base + imm
-                self.write_reg_or_sp(base, v_addr, true, true);
+                self.pending_wb = Some((base, v_addr));
                 v_addr
             }
             AddrMode::PostIndex { base, imm } => {
+                // Post-index: access uses the original base; base writes back to
+                // base+imm AFTER the access (deferred — same fault-safety reason).
                 let v_base = self.read_reg_or_sp(base, true, true);
-                // Access uses original base; writeback happens after, caller-coordinated.
-                // We emit the writeback eagerly here since lift_addr_mode is called
-                // BEFORE the load/store op — that's wrong for post-index. Returning
-                // the base value and leaving writeback to the caller would be safer.
-                // For Phase A clarity we emit it eagerly; semantics for the access
-                // and base-update commute (no aliasing because base != target reg
-                // in well-formed code; rare aliasing cases get refined in Phase B).
                 let v_imm = self.const_i64(imm as i64);
                 let v_new_base = self.val(IrValueKind::I64);
                 self.push(IrOp::Add { dst: v_new_base, a: v_base, b: v_imm });
-                self.write_reg_or_sp(base, v_new_base, true, true);
+                self.pending_wb = Some((base, v_new_base));
                 v_base
             }
             AddrMode::RegOffset { base, index, extend: _, shift } => {
@@ -179,6 +190,18 @@ impl<'a> LiftCtx<'a> {
                 self.const_i64((self.pc as i64).wrapping_add(offset as i64))
             }
         }
+    }
+}
+
+/// Access width in BYTES for an LSE atomic (`AtomicRmw`/`AtomicCas`).
+/// QuadWord (128-bit CASP) is not modelled by the scalar atomic path → 8.
+fn atomic_bytes(size: AccessSize) -> u8 {
+    match size {
+        AccessSize::Byte => 1,
+        AccessSize::HalfWord => 2,
+        AccessSize::Word => 4,
+        AccessSize::DoubleWord => 8,
+        AccessSize::QuadWord => 8,
     }
 }
 
@@ -402,17 +425,26 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.write_reg(rd, v_res, sf);
         }
         Extr { sf, rd, rn, rm, lsb } => {
-            // EXTR: rd = (rm:rn) >> lsb (concatenated, then take low width bits)
+            // EXTR Xd, Xn, Xm, #lsb : rd = (Xn:Xm) >> lsb, where Xn (rn) is the
+            // HIGH half and Xm (rm) the LOW half of the 128-bit concatenation.
+            // => rd = (rn << (width - lsb)) | (rm >> lsb).
+            //
+            // The prior code swapped rn/rm (computed (rm:rn) >> lsb), which
+            // corrupted the dcache `hash_name` funnel-shift: `extr x8,x8,x9,#0x20`
+            // produced a garbage `hashlen`, so `link_path_walk` advanced its name
+            // pointer by a bogus ~1 GiB length and Oops'd (DABT on a wild VA)
+            // during `unpack_to_rootfs` of the initramfs. Correct operand roles:
+            //   low  half = rm >> lsb           (right-shifted low operand)
+            //   high half = rn << (width - lsb) (left-shifted high operand)
             let v_rn = cx.read_reg(rn, sf);
             let v_rm = cx.read_reg(rm, sf);
-            // For Phase A, model as: (rm << (width-lsb)) | (rn >> lsb)
             let width = if sf { 64 } else { 32 };
             let v_lsb = cx.const_i64(lsb as i64);
             let v_complement = cx.const_i64((width - lsb as u8) as i64);
             let v_lo = cx.val(IrValueKind::I64);
-            cx.push(IrOp::LShr { dst: v_lo, a: v_rn, b: v_lsb });
+            cx.push(IrOp::LShr { dst: v_lo, a: v_rm, b: v_lsb });
             let v_hi = cx.val(IrValueKind::I64);
-            cx.push(IrOp::Shl { dst: v_hi, a: v_rm, b: v_complement });
+            cx.push(IrOp::Shl { dst: v_hi, a: v_rn, b: v_complement });
             let v_res = cx.val(IrValueKind::I64);
             cx.push(IrOp::Or { dst: v_res, a: v_lo, b: v_hi });
             cx.write_reg(rd, v_res, sf);
@@ -447,12 +479,26 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             }
             cx.write_reg(rd, v_res, sf);
         }
-        AdcSub { sf, rd, rn, rm, sub } => {
-            // ADCS / SBCS: result = a ± b ± carry-in, then set NZCV. The
-            // carry-in is the live ARM C bit; the lowering reads it straight
-            // from the in-memory NZCV (BT [R15+NZCV],29), so `c_in` only needs
-            // to be a defined flags id — ReadFlags supplies that. WriteFlags is
-            // a no-op in lowering (flags live in memory via build_nzcv).
+        AdcSub { sf, rd, rn, rm, sub, set_flags } => {
+            // ADCS/SBCS (set_flags): result = a ± b ± carry-in, then set NZCV.
+            // ADC/SBC (!set_flags, incl. the NGC/NGCS Rn==xzr aliases): same
+            // result but NZCV is PRESERVED. The carry-in is the live ARM C bit;
+            // the lowering reads it from the in-memory NZCV (BT [R15+NZCV],29).
+            //
+            // For the no-flags form we reuse the Adcs/Sbcs IR op (it computes
+            // the carried result) and bracket it with Mrs/Msr NzcvEl0 to save +
+            // restore the architectural NZCV. Order is safe: Mrs only READS the
+            // live NZCV, the Adcs/Sbcs lowering reads its carry-in from that
+            // still-intact NZCV BEFORE overwriting it, and the trailing Msr
+            // restores the original flags — net effect: result with correct
+            // carry-in, NZCV untouched. (Same NZCV-bracketing idiom as Cbz/Tbz.)
+            let v_saved = if !set_flags {
+                let v = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Mrs { dst: v, reg: crate::decoder::sysreg::SysReg::NzcvEl0 });
+                Some(v)
+            } else {
+                None
+            };
             let v_rn = cx.read_reg(rn, sf);
             let v_rm = cx.read_reg(rm, sf);
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
@@ -465,6 +511,9 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 cx.push(IrOp::Adcs { dst: v_res, flags: f, a: v_rn, b: v_rm, c_in, sf });
             }
             cx.push(IrOp::WriteFlags { src: f });
+            if let Some(v) = v_saved {
+                cx.push(IrOp::Msr { reg: crate::decoder::sysreg::SysReg::NzcvEl0, val: v });
+            }
             cx.write_reg(rd, v_res, sf);
         }
         LogicalReg { sf, opc, rd, rn, rm, shift, amount, invert } => {
@@ -716,7 +765,18 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 use crate::decoder::ShiftKind;
                 match kind {
                     ShiftKind::Lsl | ShiftKind::Lsr => {
-                        cx.push(shift_to_irop(kind)(v_res, v_rn_raw, v_rm));
+                        // THE DCACHE BUG: read_reg returns the FULL 64-bit Xn, and
+                        // the "zero-extended Wn" assumption is FALSE when Rn was
+                        // last written as 64 bits (e.g. `ldp x11,x14,[x1]` loading a
+                        // qstr hashlen with the string LEN in the high 32). For LSR,
+                        // a 64-bit shift then leaks those high bits into the low-32
+                        // result (`__d_lookup_rcu`: lsr w4,w11,w4 → OOB hash bucket →
+                        // dentry-cache corruption Oops). Mask Rn to 32 bits first.
+                        // (LSL is unaffected by the high bits, but masking is safe.)
+                        let v_rn32 = cx.val(IrValueKind::I32);
+                        let v_lowmask = cx.const_i64(0xFFFF_FFFF);
+                        cx.push(IrOp::And { dst: v_rn32, a: v_rn_raw, b: v_lowmask });
+                        cx.push(shift_to_irop(kind)(v_res, v_rn32, v_rm));
                     }
                     ShiftKind::Asr => {
                         // Sign-extend Wn from 32 → 64, then AShr, then the
@@ -731,7 +791,15 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                     }
                     ShiftKind::Ror => {
                         // 32-bit rotate-right: low 32 = (Rn >> amt) | (Rn << (32 - amt)).
-                        // We synthesize via two shifts + mask.
+                        // We synthesize via two shifts + mask. Rn must be masked to
+                        // 32 bits first (same high-bit leak as LSR above; the >>amt
+                        // term would otherwise pull Rn's high 32 into the result).
+                        let v_rn_raw = {
+                            let v32 = cx.val(IrValueKind::I32);
+                            let v_lowmask = cx.const_i64(0xFFFF_FFFF);
+                            cx.push(IrOp::And { dst: v32, a: v_rn_raw, b: v_lowmask });
+                            v32
+                        };
                         let v_lo = cx.val(IrValueKind::I64);
                         cx.push(IrOp::LShr { dst: v_lo, a: v_rn_raw, b: v_rm });
                         // hi = Rn << (32 - amt). Compute (32 - amt) carefully:
@@ -811,38 +879,60 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
         }
 
         // ===== Load / Store =====
-        Ldr { rt, size, signed, addr } => {
+        Ldr { rt, size, signed, addr, is_fp } => {
             let v_addr = cx.lift_addr_mode(&addr, true);
-            let dst_kind = match size {
-                AccessSize::QuadWord => IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 },
-                _ => IrValueKind::I64,
-            };
-            let v_data = cx.val(dst_kind);
-            cx.push(IrOp::Load {
-                dst: v_data, addr: v_addr,
-                ty: load_ty_for(size, signed),
-                order: MemOrder::Relaxed,
-            });
-            if size == AccessSize::QuadWord {
+            // FP/SIMD destination (LDR Sn/Dn/Qn) must land in the ctx q-register
+            // file via WriteFpr, NOT in the integer register. QuadWord is always
+            // FP; S/D are FP only when the V=1 encoding said so. Routing an
+            // `ldr d1,[..]` to GPR x1 (the old size-only rule) let a later
+            // `mov x1,..` clobber it — exactly the bionic vsnprintf _flags
+            // corruption (lost __SSTR) that NULL'd a stdio FILE's _write fp.
+            // (Byte/HalfWord FP element loads are rare and have no F8/F16 LoadTy;
+            // they keep the GPR path until a real case needs them.)
+            let fp = size == AccessSize::QuadWord
+                || (is_fp && matches!(size, AccessSize::Word | AccessSize::DoubleWord));
+            if fp {
+                let v_data = cx.val(IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 });
+                let ty = match size {
+                    AccessSize::Word => LoadTy::F32,
+                    AccessSize::DoubleWord => LoadTy::F64,
+                    _ => LoadTy::Vec128,
+                };
+                cx.push(IrOp::Load { dst: v_data, addr: v_addr, ty, order: MemOrder::Relaxed });
                 cx.push(IrOp::WriteFpr { reg: rt.0, src: v_data });
             } else {
+                let v_data = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Load {
+                    dst: v_data, addr: v_addr,
+                    ty: load_ty_for(size, signed),
+                    order: MemOrder::Relaxed,
+                });
                 cx.write_reg(rt, v_data, true);
             }
+            cx.flush_wb();
         }
-        Str { rt, size, addr } => {
+        Str { rt, size, addr, is_fp } => {
             let v_addr = cx.lift_addr_mode(&addr, true);
-            let v_data = if size == AccessSize::QuadWord {
+            let fp = size == AccessSize::QuadWord
+                || (is_fp && matches!(size, AccessSize::Word | AccessSize::DoubleWord));
+            if fp {
                 let v = cx.val(IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 });
                 cx.push(IrOp::ReadFpr { dst: v, reg: rt.0 });
-                v
+                let ty = match size {
+                    AccessSize::Word => StoreTy::F32,
+                    AccessSize::DoubleWord => StoreTy::F64,
+                    _ => StoreTy::Vec128,
+                };
+                cx.push(IrOp::Store { val: v, addr: v_addr, ty, order: MemOrder::Relaxed });
             } else {
-                cx.read_reg(rt, true)
-            };
-            cx.push(IrOp::Store {
-                val: v_data, addr: v_addr,
-                ty: store_ty_for(size),
-                order: MemOrder::Relaxed,
-            });
+                let v_data = cx.read_reg(rt, true);
+                cx.push(IrOp::Store {
+                    val: v_data, addr: v_addr,
+                    ty: store_ty_for(size),
+                    order: MemOrder::Relaxed,
+                });
+            }
+            cx.flush_wb();
         }
         Ldp { rt1, rt2, sf, signed, addr } => {
             let v_addr = cx.lift_addr_mode(&addr, sf);
@@ -868,6 +958,7 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             });
             cx.write_reg(rt1, v_a, sf);
             cx.write_reg(rt2, v_b, sf);
+            cx.flush_wb();
         }
         Stp { rt1, rt2, sf, addr } => {
             let v_addr = cx.lift_addr_mode(&addr, sf);
@@ -877,6 +968,230 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.push(IrOp::StorePair {
                 val_a: v_a, val_b: v_b, addr: v_addr, ty,
             });
+            cx.flush_wb();
+        }
+        // SIMD&FP load pair — destinations are the q-register file, not GPRs.
+        // Each element reuses the proven single-LDR-{Q,D,S} mechanism (Load into
+        // VFP/xmm15 then WriteFpr commits to the ctx q-slot); element 2 sits at
+        // `effective_addr + element_width`. Decoding these as integer Ldp loaded
+        // FP bytes into GPRs and, for `ldp q0,q1,[x0]`, clobbered the base x0
+        // (rt1 aliases the base) mid-block — the fpsimd_restore_current_state
+        // fault. The address (incl. any pre/post-index writeback) is lifted ONCE
+        // via lift_addr_mode; the q-register file and the GPR base are distinct
+        // register files so rt1/rt2 never alias the base.
+        DecodedInsn::LdpFp { rt1, rt2, access, addr } => {
+            let (ty, width) = match access {
+                AccessSize::Word => (LoadTy::F32, 4i64),
+                AccessSize::DoubleWord => (LoadTy::F64, 8),
+                AccessSize::QuadWord => (LoadTy::Vec128, 16),
+                _ => return Err(LiftErr::Unimplemented(0)),
+            };
+            let kind = IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 };
+            let v_addr = cx.lift_addr_mode(&addr, true);
+            let v1 = cx.val(kind);
+            cx.push(IrOp::Load { dst: v1, addr: v_addr, ty, order: MemOrder::Relaxed });
+            cx.push(IrOp::WriteFpr { reg: rt1.0, src: v1 });
+            let v_w = cx.const_i64(width);
+            let v_addr2 = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Add { dst: v_addr2, a: v_addr, b: v_w });
+            let v2 = cx.val(kind);
+            cx.push(IrOp::Load { dst: v2, addr: v_addr2, ty, order: MemOrder::Relaxed });
+            cx.push(IrOp::WriteFpr { reg: rt2.0, src: v2 });
+            cx.flush_wb();
+        }
+        DecodedInsn::StpFp { rt1, rt2, access, addr } => {
+            let (ty, width) = match access {
+                AccessSize::Word => (StoreTy::F32, 4i64),
+                AccessSize::DoubleWord => (StoreTy::F64, 8),
+                AccessSize::QuadWord => (StoreTy::Vec128, 16),
+                _ => return Err(LiftErr::Unimplemented(0)),
+            };
+            let kind = IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 };
+            let v_addr = cx.lift_addr_mode(&addr, true);
+            let v1 = cx.val(kind);
+            cx.push(IrOp::ReadFpr { dst: v1, reg: rt1.0 });
+            cx.push(IrOp::Store { val: v1, addr: v_addr, ty, order: MemOrder::Relaxed });
+            let v_w = cx.const_i64(width);
+            let v_addr2 = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Add { dst: v_addr2, a: v_addr, b: v_w });
+            let v2 = cx.val(kind);
+            cx.push(IrOp::ReadFpr { dst: v2, reg: rt2.0 });
+            cx.push(IrOp::Store { val: v2, addr: v_addr2, ty, order: MemOrder::Relaxed });
+            cx.flush_wb();
+        }
+        DecodedInsn::SimdMoviImm { rd, lo, hi } => {
+            // NEON MOVI/MVNI — the 128-bit value was resolved at decode time;
+            // write it straight to the q-register file slot for V`rd`.
+            cx.push(IrOp::VecMoviImm { d: rd, lo, hi });
+        }
+        DecodedInsn::SimdDupGen { rd, rn, size, q } => {
+            // DUP (general): broadcast GPR `rn` to every lane of V`rd`.
+            // The decoder's `size` is the log2 element code (0=B..3=D); the IR
+            // carries element WIDTH IN BYTES (1/2/4/8).
+            let v_src = cx.read_reg(rn, true);
+            cx.push(IrOp::VecDupGpr { d: rd.0, src: v_src, size: 1u8 << size, q });
+        }
+        DecodedInsn::SimdMovToGen { rd, rn, lane, size, signed, dst_x } => {
+            // UMOV/SMOV: extract V`rn`.<T>[lane] into GPR `rd`. The extract op
+            // z/sext's to 64 bits; write_reg's sf (dst_x) selects Wd vs Xd.
+            let v = cx.val(IrValueKind::I64);
+            cx.push(IrOp::VecExtractLane { dst: v, n: rn.0, lane, size: 1u8 << size, signed });
+            cx.write_reg(rd, v, dst_x);
+        }
+        DecodedInsn::SimdInsGen { rd, lane, rn, size } => {
+            // INS (general): GPR `rn` into V`rd`.<T>[lane].
+            let v_src = cx.read_reg(rn, true);
+            cx.push(IrOp::VecInsGpr { d: rd.0, lane, src: v_src, size: 1u8 << size });
+        }
+        DecodedInsn::FmovGen { to_gpr, rd, vn, lane, size, zero_rest } => {
+            // FMOV (general): pure bit-move GPR <-> FP reg, no conversion.
+            // `size` is already in bytes (4=S/W, 8=D/X). Lifts entirely through
+            // the existing q-register-file ctx ops.
+            if to_gpr {
+                // FP lane -> GPR (zero-extend; a Wd write auto-clears bits 63:32).
+                let v = cx.val(IrValueKind::I64);
+                cx.push(IrOp::VecExtractLane { dst: v, n: vn.0, lane, size, signed: false });
+                cx.write_reg(rd, v, size == 8);
+            } else {
+                // GPR -> FP lane. Lane-0 forms zero the rest of the 128-bit reg
+                // (FP register-write semantics); the D[1] high-half keeps lane 0.
+                if zero_rest {
+                    cx.push(IrOp::VecMoviImm { d: vn.0, lo: 0, hi: 0 });
+                }
+                let v_src = cx.read_reg(rd, true);
+                cx.push(IrOp::VecInsGpr { d: vn.0, lane, src: v_src, size });
+            }
+        }
+        DecodedInsn::SimdCnt { rd, rn, q } => {
+            // CNT — per-byte popcount V`rn` → V`rd` (ctx-template op).
+            cx.push(IrOp::VecCnt { d: rd.0, n: rn.0, q });
+        }
+        DecodedInsn::SimdAddvLong { rd, rn, size, q, signed } => {
+            // UADDLV/SADDLV — add-long across all lanes → scalar in V`rd` lane 0.
+            // `size` is log2 element; the IR op carries element BYTES.
+            cx.push(IrOp::VecAddvLong { d: rd.0, n: rn.0, esize: 1u8 << size, q, signed });
+        }
+        DecodedInsn::SimdCmeqZero { rd, rn, size, q } => {
+            // CMEQ Vd, Vn, #0 — per-lane compare-against-zero.
+            cx.push(IrOp::VecCmpZero {
+                op: crate::ir::ops::VecCmpOp::Eq,
+                size,
+                q,
+                d: rd.0,
+                n: rn.0,
+            });
+        }
+        DecodedInsn::SimdShrn { rd, rn, shift, esize_out, high } => {
+            // SHRN/SHRN2 — shift-right-narrow.
+            cx.push(IrOp::VecShiftNarrow { d: rd.0, n: rn.0, shift, esize_out, high });
+        }
+        DecodedInsn::SimdUshll { rd, rn, shift, esize_in, high, signed } => {
+            // USHLL/SSHLL/UXTL/SXTL — shift-left-long (widening).
+            cx.push(IrOp::VecShiftLong { d: rd.0, n: rn.0, shift, esize_in, high, signed });
+        }
+        DecodedInsn::SimdExt { rd, rn, rm, imm, q } => {
+            // EXT — extract from the Vn:Vm concatenation.
+            cx.push(IrOp::VecExt { d: rd.0, n: rn.0, m: rm.0, imm, q });
+        }
+        DecodedInsn::SimdMulLong { rd, rn, rm, size, q, signed, accum, sub } => {
+            // UMULL/SMULL/UMLAL/SMLAL/UMLSL/SMLSL — integer multiply-long.
+            cx.push(IrOp::VecMulLong { d: rd.0, n: rn.0, m: rm.0, size, q, signed, accum, sub });
+        }
+        DecodedInsn::SimdRev64 { rd, rn, size, q, container } => {
+            // REV64/REV32/REV16 — reverse element groups within each container.
+            cx.push(IrOp::VecRev64 { d: rd.0, n: rn.0, size, q, container });
+        }
+        DecodedInsn::SimdBicOrrImm { rd, imm, is_bic, q } => {
+            // BIC/ORR vector immediate — RMW Vd.
+            cx.push(IrOp::VecBicOrrImm { d: rd.0, imm, is_bic, q });
+        }
+        DecodedInsn::SimdAddLongPair { rd, rn, size, q, signed } => {
+            // UADDLP/SADDLP — add-long pairwise (source element BYTES = 1<<size).
+            cx.push(IrOp::VecAddLongPair { d: rd.0, n: rn.0, esize_in: 1u8 << size, q, signed });
+        }
+        DecodedInsn::SimdUnzip { rd, rn, rm, size, q, odd } => {
+            // UZP1/UZP2 — element BYTES = 1<<size.
+            cx.push(IrOp::VecUnzip { d: rd.0, n: rn.0, m: rm.0, esize: 1u8 << size, q, odd });
+        }
+        DecodedInsn::SimdReduceAdd { rd, rn, size, q } => {
+            // ADDV — reduce-add (element BYTES = 1<<size).
+            cx.push(IrOp::VecReduceAdd { d: rd.0, n: rn.0, esize: 1u8 << size, q });
+        }
+        DecodedInsn::SimdInsElem { rd, rn, dst_lane, src_lane, size } => {
+            // INS (element) — lane→lane copy via a GPR temp (size ≤ 8 bytes):
+            // extract Vn's src lane, insert into Vd's dst lane (others preserved).
+            let bytes = 1u8 << size;
+            let v = cx.val(IrValueKind::I64);
+            cx.push(IrOp::VecExtractLane { dst: v, n: rn.0, lane: src_lane, size: bytes, signed: false });
+            cx.push(IrOp::VecInsGpr { d: rd.0, lane: dst_lane, src: v, size: bytes });
+        }
+        DecodedInsn::SimdLd1Multi { is_load, regs, q, rt, rn, writeback, rm } => {
+            // LD1/ST1 multiple structures: `regs` consecutive V-regs from/to [Xn]
+            // (each Q?16:8 contiguous bytes), optional post-index writeback. Mirrors
+            // the per-element LdpFp/StpFp path (Load→WriteFpr / ReadFpr→Store).
+            let width: i64 = if q { 16 } else { 8 };
+            let kind = IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 };
+            let v_base = cx.read_reg_or_sp(rn, true, true); // [Xn] base (Rn=31 ⇒ SP)
+            let mut cur = v_base;
+            let mut i = 0u8;
+            while i < regs {
+                let reg = (rt.0 + i) & 0x1F; // V-regs wrap mod 32
+                if is_load {
+                    let v = cx.val(kind);
+                    let ty = if q { LoadTy::Vec128 } else { LoadTy::F64 };
+                    cx.push(IrOp::Load { dst: v, addr: cur, ty, order: MemOrder::Relaxed });
+                    cx.push(IrOp::WriteFpr { reg, src: v });
+                } else {
+                    let v = cx.val(kind);
+                    cx.push(IrOp::ReadFpr { dst: v, reg });
+                    let ty = if q { StoreTy::Vec128 } else { StoreTy::F64 };
+                    cx.push(IrOp::Store { val: v, addr: cur, ty, order: MemOrder::Relaxed });
+                }
+                if i + 1 < regs {
+                    let w = cx.const_i64(width);
+                    let next = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Add { dst: next, a: cur, b: w });
+                    cur = next;
+                }
+                i += 1;
+            }
+            if writeback {
+                // Post-index: Xn += (rm==31 ? regs*width : X[rm]).
+                let inc = if rm == 31 {
+                    cx.const_i64((regs as i64) * width)
+                } else {
+                    cx.read_reg(Reg(rm), true)
+                };
+                let newbase = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Add { dst: newbase, a: v_base, b: inc });
+                cx.write_reg_or_sp(rn, newbase, true, true);
+            }
+        }
+        DecodedInsn::SimdLd1Rep { rt, rn, size, q, writeback, rm } => {
+            // LD1R: load one `size`-byte element from [Xn] (zero-extended into a
+            // GPR), then broadcast it to all lanes via VecDupGpr; optional
+            // post-index writeback (rm==31 ⇒ += element bytes, else += X[rm]).
+            let elem_bytes = 1u8 << size;
+            let addr = cx.read_reg_or_sp(rn, true, true);
+            let ty = match size {
+                0 => LoadTy::U8,
+                1 => LoadTy::U16,
+                2 => LoadTy::U32,
+                _ => LoadTy::U64,
+            };
+            let v = cx.val(IrValueKind::I64);
+            cx.push(IrOp::Load { dst: v, addr, ty, order: MemOrder::Relaxed });
+            cx.push(IrOp::VecDupGpr { d: rt.0, src: v, size: elem_bytes, q });
+            if writeback {
+                let inc = if rm == 31 {
+                    cx.const_i64(elem_bytes as i64)
+                } else {
+                    cx.read_reg(Reg(rm), true)
+                };
+                let newbase = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Add { dst: newbase, a: addr, b: inc });
+                cx.write_reg_or_sp(rn, newbase, true, true);
+            }
         }
         Ldxr { size, rt, rn, acquire, pair, rt2 } => {
             // Phase-E correctness fix. The prior lifter discarded `pair` +
@@ -991,10 +1306,9 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             };
             cx.push(IrOp::AtomicCas {
                 dst: v_loaded, addr: v_addr,
-                expected: v_expected, new: v_new, order,
+                expected: v_expected, new: v_new, order, size: atomic_bytes(size),
             });
             cx.write_reg(rs, v_loaded, true);
-            let _ = size;
         }
         LdAtomicRmw { size, op, rs, rt, rn, acquire, release } => {
             let v_addr = cx.read_reg(rn, true);
@@ -1018,10 +1332,9 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             };
             let v_loaded = cx.val(IrValueKind::I64);
             cx.push(IrOp::AtomicRmw {
-                dst: v_loaded, op: aop, addr: v_addr, val: v_val, order,
+                dst: v_loaded, op: aop, addr: v_addr, val: v_val, order, size: atomic_bytes(size),
             });
             cx.write_reg(rt, v_loaded, true);
-            let _ = size;
         }
         Swp { size, rs, rt, rn, acquire, release } => {
             let v_addr = cx.read_reg(rn, true);
@@ -1034,10 +1347,9 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             };
             let v_loaded = cx.val(IrValueKind::I64);
             cx.push(IrOp::AtomicRmw {
-                dst: v_loaded, op: AtomicOp::Swp, addr: v_addr, val: v_val, order,
+                dst: v_loaded, op: AtomicOp::Swp, addr: v_addr, val: v_val, order, size: atomic_bytes(size),
             });
             cx.write_reg(rt, v_loaded, true);
-            let _ = size;
         }
 
         // ===== Branches =====
@@ -1091,37 +1403,22 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.push(IrOp::WritePc { src: v_target });
         }
         Eret => {
-            // ERET — block terminator. Two architectural effects matter to the
-            // DBT register-file model:
-            //   1. PC      <- ELR_EL1
-            //   2. PSTATE  <- SPSR_EL1   (only the NZCV condition flags are
-            //                             modeled in the GPR-file; bits [31:28])
+            // ERET — block terminator. A single runtime call (`aether_eret_enter`
+            // via IrOp::EretRt) applies the full architectural exception return:
+            //   PC   <- ELR_EL1
+            //   NZCV <- SPSR_EL1[31:28]   (the live flag word the lowering aliases)
+            //   DAIF <- SPSR_EL1[9:6]
+            //   target EL + SPSel <- SPSR_EL1.M[4:0]
+            //   SP_EL0/SP_EL1 bank swap when the active bank changes
             //
-            // Composed entirely from already-proven ops (Mrs read of a modeled
-            // sysreg slot, And, Msr write that aliases the NZCV word):
-            //   v_elr   = Mrs ELR_EL1            ; read return address
-            //   v_spsr  = Mrs SPSR_EL1           ; read saved PSTATE
-            //   v_mask  = 0xF000_0000            ; NZCV bit mask
-            //   v_nzcv  = v_spsr & v_mask        ; isolate N/Z/C/V (already aligned
-            //                                      with the packed NZCV word format)
-            //   Msr NZCV_EL0, v_nzcv             ; aliases [R15+0x108] in lowering
-            //   WritePc v_elr                    ; next PC for the dispatcher
-            //
-            // ORDER: the ELR read happens first so the WritePc value is computed
-            // before the Msr; the Msr to NZCV_EL0 lowers to a plain store to
-            // [R15+0x108] and does not disturb PC. WritePc is emitted last so the
-            // block's final architectural side effect is the next-PC write, the
-            // same convention every other terminator (Ret/Br/Bcond) follows.
-            use crate::decoder::sysreg::SysReg;
-            let v_elr = cx.val(IrValueKind::I64);
-            cx.push(IrOp::Mrs { dst: v_elr, reg: SysReg::ElrEl1 });
-            let v_spsr = cx.val(IrValueKind::I64);
-            cx.push(IrOp::Mrs { dst: v_spsr, reg: SysReg::SpsrEl1 });
-            let v_mask = cx.const_i64(0xF000_0000);
-            let v_nzcv = cx.val(IrValueKind::I64);
-            cx.push(IrOp::And { dst: v_nzcv, a: v_spsr, b: v_mask });
-            cx.push(IrOp::Msr { reg: SysReg::NzcvEl0, val: v_nzcv });
-            cx.push(IrOp::WritePc { src: v_elr });
+            // This replaces the old primitive sequence (Mrs ELR / Mrs SPSR / And
+            // / Msr NZCV / WritePc), which restored only PC + NZCV and so could
+            // not model a return to EL0 (the kernel→userspace handoff): the EL
+            // change and the conditional SP-bank swap both need a runtime
+            // decision on SPSR.M, which a straight-line op sequence cannot
+            // express. The helper sets the ctx PC slot, so no separate WritePc is
+            // emitted; the block's RET hands the new PC back to the dispatcher.
+            cx.push(IrOp::EretRt);
         }
         // Phase-G NZCV-preservation fix. ARM CBZ/CBNZ/TBZ/TBNZ DO NOT modify
         // NZCV. The Cmp+Csel sequence we use to materialize next-PC corrupts
@@ -1204,7 +1501,18 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
         }
 
         // ===== Exception generation =====
-        Svc { imm16 } => cx.push(IrOp::Svc { imm16 }),
+        // SVC — a synchronous EL0→EL1 (or EL1→EL1) syscall. Block terminator.
+        // First stage the return address (PC of SVC + 4) into the PC slot via
+        // WritePc; the SVC runtime call (`aether_svc_enter`) then takes a
+        // synchronous exception, saving that staged PC as ELR_EL1 and vectoring
+        // to VBAR + the source-EL sync offset (0x400 from EL0). Without the
+        // WritePc, ELR_EL1 would capture a stale PC and the handler's ERET would
+        // resume at the wrong address.
+        Svc { imm16 } => {
+            let v_ret = cx.const_i64(cx.pc as i64 + 4);
+            cx.push(IrOp::WritePc { src: v_ret });
+            cx.push(IrOp::Svc { imm16 });
+        }
         // M4b-4: HVC/SMC are the PSCI conduit (the guest DT uses method="hvc").
         // The lowering services PSCI synchronously (a runtime call that reads
         // x0..x3, runs PSCI, writes x0) and returns to the NEXT instruction, so
@@ -1345,22 +1653,15 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // store path as a normal STR (RAM write + No-Boundary window clamp +
             // MMIO routing), reusing lowering that is already proven.
             if op1 == 0b011 && crm == 0b0100 && op2 == 0b001 {
+                // ZeroBlock lowers to ONE MMU walk + 8 inline 8-byte zero stores
+                // to the resolved host PA (64-byte DCZID block; alignment done in
+                // the backend). The prior expansion into 8 separate Store ops
+                // emitted 8 Win64 store-CALLs and 9 SSA temps per ZVA — crippling
+                // under TCG (clear_page does 64 ZVAs/page) and the register
+                // pressure spilled operands in the loop block, corrupting the
+                // `tst x0,#0xfff; b.ne` exit so clear_page ran away across pages.
                 let v_xt = cx.read_reg(rt, true);
-                let v_mask = cx.const_i64(!63i64); // align down to the 64-byte block
-                let v_base = cx.val(IrValueKind::I64);
-                cx.push(IrOp::And { dst: v_base, a: v_xt, b: v_mask });
-                let v_zero = cx.const_i64(0);
-                for i in 0..8i64 {
-                    let v_off = cx.const_i64(i * 8);
-                    let v_addr = cx.val(IrValueKind::I64);
-                    cx.push(IrOp::Add { dst: v_addr, a: v_base, b: v_off });
-                    cx.push(IrOp::Store {
-                        val: v_zero,
-                        addr: v_addr,
-                        ty: StoreTy::U64,
-                        order: MemOrder::Relaxed,
-                    });
-                }
+                cx.push(IrOp::ZeroBlock { addr: v_xt });
             } else {
                 // DC CVAC / CIVAC / IVAC / CSW / CISW / ... — cache maintenance
                 // no-ops against the software MMU model.
@@ -1399,9 +1700,85 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.push(IrOp::Hint { imm: 200 });
         }
         FpScalar { raw } => {
-            let v = cx.val(IrValueKind::I32);
-            cx.push(IrOp::ConstI32 { dst: v, val: raw as i32 });
-            cx.push(IrOp::Hint { imm: 201 });
+            // Re-decode the scalar-FP word (the decoders return the coarse
+            // FpScalar{raw}). Handle the common single/double forms; unhandled
+            // forms (FP16, FMAX/MIN variants, FP→int convert, etc.) still UD2.
+            use crate::ir::ops::FpBinOp;
+            let w = raw;
+            let ftype = (w >> 22) & 0x3;          // 00=S(32) 01=D(64) 11=H(16)
+            let rd = (w & 0x1F) as u8;
+            let rn = ((w >> 5) & 0x1F) as u8;
+            let rm = ((w >> 16) & 0x1F) as u8;
+            let mut done = false;
+            if ftype == 0 || ftype == 1 {
+                let dbl = ftype == 1;
+                // FP data-processing (2 source): bits[28:21]=11110_x1, bits[11:10]=10.
+                if (w & 0x5F20_0C00) == 0x1E20_0800 {
+                    let opcode = (w >> 12) & 0xF;
+                    let op = match opcode {
+                        0b0000 => Some(FpBinOp::Mul),
+                        0b0001 => Some(FpBinOp::Div),
+                        0b0010 => Some(FpBinOp::Add),
+                        0b0011 => Some(FpBinOp::Sub),
+                        0b0100 => Some(FpBinOp::Max),
+                        0b0101 => Some(FpBinOp::Min),
+                        0b1000 => Some(FpBinOp::NMul),
+                        _ => None, // FMAXNM/FMINNM — Tier 1
+                    };
+                    if let Some(op) = op {
+                        cx.push(IrOp::FpBin { op, dbl, d: rd, n: rn, m: rm });
+                        done = true;
+                    }
+                }
+                // FP compare: bits[15:14]=00, bits[13:10]=1000.
+                else if (w & 0x5F20_3C00) == 0x1E20_2000 {
+                    let opcode2 = w & 0x1F;
+                    // opcode2 bit3 => compare with zero; bit4 => FCMPE (same NZCV).
+                    let zero = (opcode2 & 0b01000) != 0;
+                    cx.push(IrOp::FpCmpN { n: rn, m: rm, dbl, zero });
+                    done = true;
+                }
+                // SCVTF/UCVTF (int→FP): bits[21]=1, rmode[20:19]=00,
+                // opcode[18:16]=010(SCVTF)/011(UCVTF), bits[15:10]=000000.
+                else if (w & 0x5F3E_FC00) == 0x1E22_0000 {
+                    let opc = (w >> 16) & 0x7;
+                    if opc == 0b010 || opc == 0b011 {
+                        let signed = opc == 0b010;
+                        let sf = (w >> 31) & 1; // GPR width: 0=W(32) 1=X(64)
+                        let gv = cx.read_reg(Reg(rn), sf == 1);
+                        cx.push(IrOp::FpCvtIntScalar { d: rd, src: gv, to_dbl: dbl, signed });
+                        done = true;
+                    }
+                }
+                // FP→int convert FCVT{N,P,M,Z,A}{S,U}: bit21=1, bits[15:10]=0,
+                // opcode[18:16] ∈ {000,001,100,101} with rmode[20:19] selecting
+                // the rounding. (opcode 010/011 = SCVTF/UCVTF handled above;
+                // 110/111 = FMOV handled as FmovGen in the decoder.)
+                else if (w & 0x5F20_FC00) == 0x1E20_0000 {
+                    use crate::ir::ops::RoundMode;
+                    let rmode = (w >> 19) & 0x3;
+                    let opc = (w >> 16) & 0x7;
+                    if matches!(opc, 0b000 | 0b001 | 0b100 | 0b101) {
+                        let to_64 = (w >> 31) & 1 == 1; // sf: GPR result width
+                        let round = match (rmode, opc) {
+                            (0b00, 0b000 | 0b001) => RoundMode::Nearest,        // FCVTN
+                            (0b00, _)             => RoundMode::NearestTiesAway, // FCVTA
+                            (0b01, _)             => RoundMode::PosInf,          // FCVTP
+                            (0b10, _)             => RoundMode::NegInf,          // FCVTM
+                            _                     => RoundMode::Zero,            // FCVTZ (rmode 11)
+                        };
+                        let dst = cx.val(if to_64 { IrValueKind::I64 } else { IrValueKind::I32 });
+                        cx.push(IrOp::FpCvtToIntScalar { dst, n: rn, from_dbl: dbl, to_64, round });
+                        cx.write_reg(Reg(rd), dst, to_64);
+                        done = true;
+                    }
+                }
+            }
+            if !done {
+                let v = cx.val(IrValueKind::I32);
+                cx.push(IrOp::ConstI32 { dst: v, val: raw as i32 });
+                cx.push(IrOp::Hint { imm: 201 });
+            }
         }
         CryptoAes { op, rd, rn } => {
             let v_in = cx.val(IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 });
@@ -1414,9 +1791,34 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.push(IrOp::WriteFpr { reg: rd.0, src: v_out });
         }
         CryptoSha { op, raw } => {
-            let v = cx.val(IrValueKind::I32);
-            cx.push(IrOp::ConstI32 { dst: v, val: raw as i32 });
-            cx.push(IrOp::Hint { imm: 200u8.wrapping_add(op) });
+            // SHA-256 family → ctx-template runtime helper. Distinguish the 2-reg
+            // (SHA256SU0) and 3-reg (SHA256H/H2/SU1) encodings; SHA-1 + anything
+            // else stays fail-loud (Hint → UD2) — never a silent wrong hash.
+            let d = (raw & 0x1F) as u8;
+            let n = ((raw >> 5) & 0x1F) as u8;
+            let m = ((raw >> 16) & 0x1F) as u8;
+            let is_2reg = (raw & 0xFFFE_0C00) == 0x5E28_0800;
+            let is_3reg = (raw & 0xFF20_8C00) == 0x5E00_0000;
+            // kind: 0=SU0, 1=SU1, 2=H, 3=H2 (matches crypto_rt::SHA256_*).
+            let kind = if is_2reg && op == 2 {
+                Some(0u8) // SHA256SU0 (m unused)
+            } else if is_3reg && op == 4 {
+                Some(2u8) // SHA256H
+            } else if is_3reg && op == 5 {
+                Some(3u8) // SHA256H2
+            } else if is_3reg && op == 6 {
+                Some(1u8) // SHA256SU1
+            } else {
+                None
+            };
+            match kind {
+                Some(k) => cx.push(IrOp::CryptoSha256 { kind: k, d, n, m }),
+                None => {
+                    let v = cx.val(IrValueKind::I32);
+                    cx.push(IrOp::ConstI32 { dst: v, val: raw as i32 });
+                    cx.push(IrOp::Hint { imm: 200u8.wrapping_add(op) });
+                }
+            }
         }
 
         // ===== Sentinels =====
@@ -1465,10 +1867,12 @@ fn lift_simd_3same(
             2 => B::Or,
             _ => B::Orn,
         })),
-        (true, 0b00011) => match size {
-            0 => Some(vb(B::Eor)),
-            _ => None, // BSL/BIT/BIF — Tier 1
-        },
+        (true, 0b00011) => Some(vb(match size {
+            0 => B::Eor,
+            1 => B::Bsl,
+            2 => B::Bit,
+            _ => B::Bif,
+        })),
         // compares
         (false, 0b00110) => Some(vc(C::SGt)),
         (true, 0b00110) => Some(vc(C::UGt)),
@@ -1617,36 +2021,93 @@ mod tests {
     }
 
     #[test]
-    fn lift_eret_reads_elr_spsr_and_writes_pc() {
-        use crate::decoder::sysreg::SysReg;
-        // ERET = 0xD69F03E0.
+    fn lift_eret_emits_eret_runtime_call() {
+        // ERET = 0xD69F03E0. The lift now emits a single IrOp::EretRt — a
+        // runtime call (aether_eret_enter) that applies the full architectural
+        // exception return (PC/NZCV/DAIF/EL/SPSel + SP bank swap), replacing the
+        // old Mrs/And/Msr/WritePc primitive sequence which could not model an
+        // EL change or the SP-bank swap on a return to EL0.
         let insn = decode_instruction(0xD69F_03E0).expect("decode ERET");
         assert_eq!(insn, DecodedInsn::Eret);
         let mut blk = fresh_block();
         lift(&insn, &mut blk).expect("lift ERET");
 
-        // Must read ELR_EL1 and SPSR_EL1 via Mrs.
+        assert_eq!(blk.ops.len(), 1, "ERET lifts to a single op: {:?}", blk.ops);
         assert!(
-            blk.ops.iter().any(|o| matches!(o, IrOp::Mrs { reg: SysReg::ElrEl1, .. })),
-            "ERET must MRS ELR_EL1: {:?}", blk.ops
+            matches!(blk.ops[0], IrOp::EretRt),
+            "ERET must lift to IrOp::EretRt: {:?}", blk.ops
         );
+    }
+
+    #[test]
+    fn lift_ngc_decodes_and_preserves_nzcv() {
+        use crate::decoder::sysreg::SysReg;
+        // `ngc x8, xzr` = 0xDA1F03E8 = SBC x8, xzr, xzr (S=0). The kernel's
+        // syscall dispatcher uses it as a Spectre-v1 mask; it MUST decode and
+        // must NOT clobber the architectural NZCV.
+        let insn = decode_instruction(0xDA1F_03E8).expect("decode NGC");
         assert!(
-            blk.ops.iter().any(|o| matches!(o, IrOp::Mrs { reg: SysReg::SpsrEl1, .. })),
-            "ERET must MRS SPSR_EL1: {:?}", blk.ops
+            matches!(insn, DecodedInsn::AdcSub { sub: true, set_flags: false, rd, rn, .. }
+                if rd.0 == 8 && rn.0 == 31),
+            "NGC -> AdcSub{{sub,!set_flags,rd=8,rn=xzr}}: {insn:?}",
         );
-        // Must mask the SPSR NZCV bits then MSR the NZCV alias.
+        let mut blk = fresh_block();
+        lift(&insn, &mut blk).expect("lift NGC");
+        // Carried result via Sbcs.
         assert!(
-            blk.ops.iter().any(|o| matches!(o, IrOp::And { .. })),
-            "ERET must mask SPSR NZCV bits: {:?}", blk.ops
+            blk.ops.iter().any(|o| matches!(o, IrOp::Sbcs { .. })),
+            "NGC uses Sbcs for the carried result: {:?}", blk.ops,
         );
+        // NZCV saved (Mrs) before and restored (Msr) after — preservation.
+        let mrs = blk.ops.iter().position(|o| matches!(o, IrOp::Mrs { reg: SysReg::NzcvEl0, .. }));
+        let msr = blk.ops.iter().position(|o| matches!(o, IrOp::Msr { reg: SysReg::NzcvEl0, .. }));
+        assert!(mrs.is_some() && msr.is_some() && mrs < msr,
+            "NGC must bracket Sbcs with Mrs/Msr NzcvEl0 (preserve NZCV): {:?}", blk.ops);
+        // ADCS (S=1) must NOT get the brackets. adcs x0,x1,x2 = 0xBA020020.
+        let mut blk2 = fresh_block();
+        lift(&decode_instruction(0xBA02_0020).unwrap(), &mut blk2).unwrap();
         assert!(
-            blk.ops.iter().any(|o| matches!(o, IrOp::Msr { reg: SysReg::NzcvEl0, .. })),
-            "ERET must MSR NZCV_EL0 to restore flags: {:?}", blk.ops
+            !blk2.ops.iter().any(|o| matches!(o, IrOp::Mrs { reg: SysReg::NzcvEl0, .. })),
+            "ADCS (S=1) sets flags, no NZCV save: {:?}", blk2.ops,
         );
-        // The terminating side effect is WritePc (next guest PC from ELR).
+    }
+
+    #[test]
+    fn lift_ldaprb_zero_extending_load() {
+        use crate::decoder::AccessSize;
+        use crate::ir::memory::LoadTy;
+        // ldaprb w9, [x8] = 0x38BFC109 — RCpc load-acquire byte (bionic atomics,
+        // reached in /init userspace). Decodes as Ldapr (byte) and lifts to a
+        // zero-extending byte Load (acquire is a no-op on the x86-TSO host).
+        let insn = decode_instruction(0x38BF_C109).expect("decode LDAPRB");
         assert!(
-            matches!(blk.ops.last().unwrap(), IrOp::WritePc { .. }),
-            "ERET must end with WritePc: {:?}", blk.ops
+            matches!(insn, DecodedInsn::Ldapr { size: AccessSize::Byte, rt, rn }
+                if rt.0 == 9 && rn.0 == 8),
+            "LDAPRB -> Ldapr{{Byte, rt=9, rn=8}}: {insn:?}",
         );
+        let mut blk = fresh_block();
+        lift(&insn, &mut blk).expect("lift LDAPRB");
+        assert!(
+            blk.ops.iter().any(|o| matches!(o, IrOp::Load { ty: LoadTy::U8, .. })),
+            "LDAPRB loads a zero-extended byte: {:?}", blk.ops,
+        );
+    }
+
+    #[test]
+    fn lift_svc_stages_return_pc_then_svc() {
+        // SVC #0 = 0xD4000001. The lift stages the return address (PC+4) via
+        // WritePc so aether_svc_enter can save it as ELR_EL1, then emits the
+        // Svc op (the runtime exception-entry call).
+        let insn = decode_instruction(0xD400_0001).expect("decode SVC");
+        assert_eq!(insn, DecodedInsn::Svc { imm16: 0 });
+        let mut blk = fresh_block();
+        lift_at(&insn, &mut blk, 0x2000).expect("lift SVC");
+
+        // WritePc(pc+4) must precede the Svc op.
+        let svc_idx = blk.ops.iter().position(|o| matches!(o, IrOp::Svc { .. }));
+        let wpc_idx = blk.ops.iter().position(|o| matches!(o, IrOp::WritePc { .. }));
+        assert!(svc_idx.is_some(), "SVC must emit an Svc op: {:?}", blk.ops);
+        assert!(wpc_idx.is_some(), "SVC must stage return PC via WritePc: {:?}", blk.ops);
+        assert!(wpc_idx < svc_idx, "WritePc must precede Svc: {:?}", blk.ops);
     }
 }

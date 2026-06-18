@@ -37,7 +37,7 @@ fn at14_lock_prefix_present_in_cas() {
         addr: IrValueId(0),
         expected: IrValueId(1),
         new: IrValueId(2),
-        order: MemOrder::SeqCst,
+        order: MemOrder::SeqCst, size: 8,
     }];
     // RAX=0, RCX=1, RDX=2 in ALLOCATABLE_GPRS indices
     let alloc = make_alloc(&[
@@ -60,7 +60,7 @@ fn at14_lock_cmpxchg_count_one_per_cas() {
         addr: IrValueId(0),
         expected: IrValueId(1),
         new: IrValueId(2),
-        order: MemOrder::SeqCst,
+        order: MemOrder::SeqCst, size: 8,
     }];
     let alloc = make_alloc(&[
         (0, Assignment::Gpr(0)),
@@ -82,14 +82,14 @@ fn at14_two_cas_two_lock_cmpxchg() {
             addr: IrValueId(0),
             expected: IrValueId(1),
             new: IrValueId(2),
-            order: MemOrder::SeqCst,
+            order: MemOrder::SeqCst, size: 8,
         },
         IrOp::AtomicCas {
             dst: IrValueId(11),
             addr: IrValueId(0),
             expected: IrValueId(3),
             new: IrValueId(4),
-            order: MemOrder::SeqCst,
+            order: MemOrder::SeqCst, size: 8,
         },
     ];
     let alloc = make_alloc(&[
@@ -156,7 +156,7 @@ fn at14_atomic_rmw_add_emits_lock_xadd() {
         op: AtomicOp::Add,
         addr: IrValueId(1),
         val: IrValueId(2),
-        order: MemOrder::SeqCst,
+        order: MemOrder::SeqCst, size: 8,
     }];
     let alloc = make_alloc(&[
         (0, Assignment::Gpr(0)),
@@ -179,7 +179,7 @@ fn at14_atomic_rmw_xchg_emits_xchg() {
         op: AtomicOp::Swp,
         addr: IrValueId(1),
         val: IrValueId(2),
-        order: MemOrder::SeqCst,
+        order: MemOrder::SeqCst, size: 8,
     }];
     let alloc = make_alloc(&[
         (0, Assignment::Gpr(0)),
@@ -200,7 +200,7 @@ fn at14_atomic_rmw_eor_emits_lock_cmpxchg() {
         op: AtomicOp::Eor,
         addr: IrValueId(1),
         val: IrValueId(2),
-        order: MemOrder::SeqCst,
+        order: MemOrder::SeqCst, size: 8,
     }];
     let alloc = make_alloc(&[
         (0, Assignment::Gpr(0)),
@@ -221,7 +221,7 @@ fn at14_atomic_rmw_set_emits_lock_cmpxchg() {
         op: AtomicOp::Set,
         addr: IrValueId(1),
         val: IrValueId(2),
-        order: MemOrder::SeqCst,
+        order: MemOrder::SeqCst, size: 8,
     }];
     let alloc = make_alloc(&[
         (0, Assignment::Gpr(0)),
@@ -242,7 +242,7 @@ fn at14_atomic_rmw_clr_emits_lock_cmpxchg() {
         op: AtomicOp::Clr,
         addr: IrValueId(1),
         val: IrValueId(2),
-        order: MemOrder::SeqCst,
+        order: MemOrder::SeqCst, size: 8,
     }];
     let alloc = make_alloc(&[
         (0, Assignment::Gpr(0)),
@@ -302,7 +302,7 @@ fn at14_rmw_eor_has_backward_branch() {
         op: AtomicOp::Eor,
         addr: IrValueId(1),
         val: IrValueId(2),
-        order: MemOrder::SeqCst,
+        order: MemOrder::SeqCst, size: 8,
     }];
     let alloc = make_alloc(&[
         (0, Assignment::Gpr(0)),
@@ -326,7 +326,7 @@ fn at14_rmw_smin_has_lock_cmpxchg() {
         op: AtomicOp::Smin,
         addr: IrValueId(1),
         val: IrValueId(2),
-        order: MemOrder::SeqCst,
+        order: MemOrder::SeqCst, size: 8,
     }];
     let alloc = make_alloc(&[
         (0, Assignment::Gpr(0)),
@@ -348,7 +348,7 @@ fn at14_rmw_umax_has_lock_cmpxchg() {
         op: AtomicOp::Umax,
         addr: IrValueId(1),
         val: IrValueId(2),
-        order: MemOrder::SeqCst,
+        order: MemOrder::SeqCst, size: 8,
     }];
     let alloc = make_alloc(&[
         (0, Assignment::Gpr(0)),
@@ -375,7 +375,7 @@ fn at14_stress_surrogate_64_cas_all_have_lock() {
             addr: IrValueId(0),
             expected: IrValueId(1),
             new: IrValueId(2),
-            order: MemOrder::SeqCst,
+            order: MemOrder::SeqCst, size: 8,
         });
     }
     let alloc = make_alloc(&[

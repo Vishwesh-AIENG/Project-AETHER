@@ -441,11 +441,24 @@ fn emulate_virtio_blk(access: &MmioAccess) -> MmioResult {
 
     if access.is_write {
         let r = crate::virtio_blk::with_backend_mut(|be| {
-            be.handle_mmio_write(offset, access.value as u32)
+            let res = be.handle_mmio_write(offset, access.value as u32);
+            // After processing (e.g. a QUEUE_NOTIFY that completed a request),
+            // the device sets its used-buffer-notification bit. The guest's
+            // virtio-blk driver WFIs waiting for the completion IRQ, so we must
+            // raise the virtio-blk SPI; without it the guest sleeps forever and
+            // the dispatch loop stalls (iter frozen). INTERRUPT_STATUS stays set
+            // until the guest's handler ACKs it, and the SPI is level-high, so
+            // re-raising while already pending is idempotent.
+            (res, be.interrupt != 0)
         });
         match r {
-            Some(Ok(())) => MmioResult::Ok { value: 0 },
-            _            => MmioResult::Unhandled,
+            Some((Ok(()), raise_irq)) => {
+                if raise_irq {
+                    aether_gic_raise(crate::virtio::VIRTIO_BLK_SPI_INTID);
+                }
+                MmioResult::Ok { value: 0 }
+            }
+            _ => MmioResult::Unhandled,
         }
     } else {
         let r = crate::virtio_blk::with_backend_mut(|be| be.handle_mmio_read(offset));

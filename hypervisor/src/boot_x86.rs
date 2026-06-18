@@ -234,8 +234,8 @@ use crate::vtx::{
 use crate::dbt_integration::install_dbt_ept_callbacks;
 use aether_translator::dbt::{
     aether_dbt_init as translator_dbt_init, JIT_CACHE_BYTES as TRANSLATOR_JIT_BYTES,
-    aether_dbt_block_host_va, aether_dbt_last_failure, aether_dbt_translate_block,
-    block_bytes_are_safe, AetherDbtResult,
+    aether_dbt_block_host_va, aether_dbt_block_host_va_safe, aether_dbt_last_failure,
+    aether_dbt_translate_block, block_bytes_are_safe, AetherDbtResult,
 };
 use aether_translator::runtime::GuestRegisterFile;
 use crate::x86_hw_validation::CpuVendor;
@@ -1108,7 +1108,30 @@ pub unsafe fn boot_x86_hypervisor(
         // enough through pcpu_embed_first_chunk (the next blocker is
         // the pcpu_setup_first_chunk BUG_ON, a memory write-doesn't-
         // persist inside that window — a separate probe-quality issue).
-        const STAGE_PAGES: usize = (STAGED_BOOT_IMG_SIZE / 4096) as usize;
+        // Allocate a LARGER reliable guest-RAM region than just the boot.img:
+        // the kernel hands physical pages out of this whole span during /init's
+        // library loading, and the old 64 MiB alloc forced it to use ~50 MiB of
+        // BORROWED (probe-extended, not AllocatePages'd) memory near the
+        // PCI-hole/OVMF-reserved top — those writes silently drop → the
+        // intermittent EL0-write SIGSEGV (handle_mm_fault can't get a good page).
+        // 256 MiB is well within the QEMU MEM=16G low-4-GiB budget alongside the
+        // hypervisor heap (the 1 GiB ask failed for contiguity, not capacity).
+        // The boot.img still stages into the first STAGED_BOOT_IMG_SIZE bytes.
+        //
+        // Phase 3 (/system mount): bumped 256 -> 512 MiB. The 256 MiB UEFI
+        // allocation was RELIABLE only for its 256 MiB; the probe then BORROWED
+        // ~50 MiB of un-tagged pages past it to reach ~306 MiB. Android
+        // first-stage init's VMAP exception stacks + vmalloc page-table pages
+        // landed in those borrowed top pages, which carry sub-page UEFI holes
+        // (writes silently drop -> the kernel's vmalloc PTE reads back 0 -> the
+        // software MMU walker reports a translation fault -> nested-abort loop on
+        // the exception stack, far=0xffffff80_3eea_xxxx). Doubling the GENUINELY
+        // UEFI-backed allocation keeps those allocations in hole-free RAM. 512 MiB
+        // still fits below the q35 ~2.75 GiB PCI hole given the ~1.8 GiB alloc base
+        // (1.5 GiB heap BSS sits below it); the 1 GiB ask failed only on
+        // contiguity, and 512 MiB has comfortable margin.
+        const GUEST_RAM_ALLOC_SIZE: u64 = 512 * 1024 * 1024;
+        const STAGE_PAGES: usize = (GUEST_RAM_ALLOC_SIZE / 4096) as usize;
         const MAX_PA_4GIB: u64 = 0xFFFF_FFFF;
         // SAFETY: image_handle + system_table came from efi_main and are
         // still valid before ExitBootServices.
@@ -1326,14 +1349,29 @@ pub unsafe fn boot_x86_hypervisor(
     // truncate `region_size` to the first hole. Telemetry on the first
     // hole is emitted by the probe.
     let probed_writable = unsafe { probe_handoff_writable_extent(stage_pa, region_size) };
-    let safe_region_size = probed_writable & !0x1F_FFFFu64; // 2-MiB-align down
+    // Back off a safety margin from the probed top. The write/read-back probe
+    // passes some pages near the top of advertised RAM that are NOT reliable
+    // guest RAM at dispatch time — the q35 2 GiB PCI-hole boundary and OVMF's
+    // reserved top-of-low-RAM echo writes (so the probe's MAGIC reads back) yet
+    // a later kernel read of the same PA host-#PFs (not-present). The kernel
+    // places its `struct page` array (mem_map) and early page tables at the TOP
+    // of advertised RAM, so it lands exactly in this over-reported zone:
+    // observed as a caught #PF cr2=0x7fffffa8 (≈130 MiB in) reading mem_section
+    // for a top PFN, while the probe claimed 146 MiB writable. Trimming 32 MiB
+    // keeps mem_map within the genuinely-mapped region. (Diagnosed via the
+    // now-working host IDT: rip in code_buf/.data, guest x8/x20 sane.)
+    const TOP_SAFETY_MARGIN: u64 = 32 * 1024 * 1024;
+    let trimmed = probed_writable.saturating_sub(TOP_SAFETY_MARGIN);
+    let safe_region_size = trimmed & !0x1F_FFFFu64; // 2-MiB-align down
     if safe_region_size < region_size {
         unsafe {
             dual_puts(b"[x86] handoff: truncating advertised RAM from 0x");
             dual_puthex64(region_size);
             dual_puts(b" to 0x");
             dual_puthex64(safe_region_size);
-            dual_puts(b" (UEFI-reserved holes)\n");
+            dual_puts(b" (probe=0x");
+            dual_puthex64(probed_writable);
+            dual_puts(b" - 32M top margin; PCI-hole/OVMF-reserved)\n");
         }
     }
     let region_size = safe_region_size;
@@ -1434,6 +1472,44 @@ pub unsafe fn boot_x86_hypervisor(
                     dual_puts(b"\n");
                 } else {
                     dual_puts(b"[android] kernel uncompressed (in-place Image)\n");
+                }
+                // ── Kernel hot-patches (NEW GCC 6.1.79 simpledrm kernel) ──
+                // The prior Phase-G band-aids (bpf_int_jit/__stack_chk_fail/
+                // rcu_barrier) were keyed to the OLD clang 6.1.60 kernel's VAs
+                // AND guarded only loosely (one unguarded, two on PACIASP which
+                // nearly every function starts with) — on this kernel they would
+                // patch WRONG, unrelated functions. They are REMOVED: the
+                // underlying old-kernel DBT miscompiles (canary-slot store, UBSAN
+                // value) were the LSRV-W / writeback-defer bug class, now fixed.
+                //
+                // ONE patch remains: skip the BUG_ON in ptp_classifier_init.
+                // bpf_prog_create() fails for the PTP classic filter (a DBT
+                // convert_filter miscompile → -ENOTSUPP), so its BUG_ON BRK fires
+                // at +0x48. PTP packet classification is unused on the path to
+                // /init, so make the success-check branch UNCONDITIONAL (the
+                // function then returns cleanly, ignoring the error). Layout:
+                //   +0x40 bl bpf_prog_create
+                //   +0x44 cbz w0, +0x4c   (0x34000040 — skip BUG on success)
+                //   +0x48 brk #0x800      (BUG)
+                // Patch +0x44 cbz -> `b +0x4c` (0x14000002). Keyed off the file
+                // OFFSET (text base differs per build) + GUARDED on the exact cbz
+                // encoding, so a kernel rebuild that moves the function simply
+                // skips the patch rather than corrupting an unrelated one.
+                {
+                    const PTP_CBZ_FOFF: u64 = 0x154_219C; // ptp_classifier_init+0x44
+                    let pa = h.layout.kernel_pa.wrapping_add(PTP_CBZ_FOFF);
+                    let p = pa as *mut u32;
+                    let cur = ptr::read_volatile(p);
+                    dual_puts(b"[hotpatch] ptp_classifier_init cbz@PA=");
+                    dual_puthex64(pa);
+                    dual_puts(b" current=");
+                    dual_puthex64(cur as u64);
+                    if cur == 0x3400_0040 {
+                        ptr::write_volatile(p, 0x1400_0002); // b +0x4c (skip BUG)
+                        dual_puts(b" -> b +0x4c (BUG_ON skipped; ptp returns cleanly)\n");
+                    } else {
+                        dual_puts(b" -> SKIPPED (not the expected cbz)\n");
+                    }
                 }
                 Some(h)
             }
@@ -1542,6 +1618,42 @@ pub unsafe fn boot_x86_hypervisor(
         .map(|h| (h.region_pa, h.region_size));
     let _ = fex_ok; // intentionally not gating the dispatch path
 
+    // WHPX host-mode fast path. The live Android DBT runs ENTIRELY in host mode
+    // (`run_android_dispatch_loop` CALLs RET-terminated translated x86 with a
+    // software MMU; it never VMLAUNCHes, never reads VMCS/EPT). VMXON is the only
+    // thing forcing hardware virtualisation, and the dispatch loop does not need
+    // it. Skipping VMXON/init_*_foundation/EPT lets AETHER run under QEMU
+    // `-accel whpx` (which does NOT expose nested VMX) as a plain ring-0 UEFI app
+    // — ~10-100x faster than TCG, which is what makes the Android display gate
+    // reachable. The UEFI identity-mapped host CR3 (extended for the PMEM window
+    // inside the dispatch loop) + the host IDT carry all memory + fault handling.
+    // Feature-gated so the production/TCG VMX path stays byte-for-byte unchanged.
+    #[cfg(feature = "whpx_hostmode")]
+    unsafe {
+        let _ = (vmxon_pa, vmcs_pa, ept_pml4_pa, vmcb_pa, hsave_pa, npt_pml4_pa,
+                 host_stack_top, host_rip, guest_ram_pa, kernel_entry_pa, extra_region);
+        if crate::dbt_dispatch::is_armed() {
+            dual_puts(b"[x86] WHPX host-mode: VMXON skipped, DBT runs directly.\n");
+            // Replicate the boot_intel/boot_amd pre-dispatch setup MINUS all VMX/
+            // SVM/EPT/NPT: (1) identity-map the translator JIT/bump-arena region
+            // (8 GiB — above the UEFI low-4-GiB identity map) into the active host
+            // CR3 so any deref of host_pa_base is reachable, and (2) initialise the
+            // translator runtime (DbtRuntime::init) — without this the very first
+            // block translation fails and the dispatch loop exits after 1 iter.
+            const JIT_BASE: u64 = 0x2_0000_0000;
+            const BUMP_BASE: u64 = 0x2_0100_0000;
+            const BUMP_BYTES: usize = 1 * 1024 * 1024;
+            host_pt_map_identity_1g(JIT_BASE, 1);
+            let _ = translator_dbt_init(JIT_BASE, TRANSLATOR_JIT_BYTES, BUMP_BASE, BUMP_BYTES);
+            crate::host_idt::install_host_idt();
+            let regs = crate::dbt_dispatch::with_global_mut(|s| s.regs);
+            run_android_dispatch_loop(regs);
+        }
+        dual_puts(b"[x86] WHPX host-mode: Android handoff NOT armed -- halting.\n");
+        halt();
+    }
+
+    #[cfg(not(feature = "whpx_hostmode"))]
     match vendor {
         Some(CpuVendor::Intel) => unsafe { boot_intel(
             vmxon_pa, vmcs_pa, ept_pml4_pa, guest_ram_pa,
@@ -2510,15 +2622,21 @@ unsafe fn boot_amd(
         dual_puts(b" size=");
         dual_puthex64(win_size);
         dual_puts(b"\n");
-        // Phase-G: TIGHT range over just the eBPF buffer. Captures all
-        // writes (direct + STP via xlate) to slot insn[*] including any
-        // post-memcpy clobber of insn[20]. Ring at 8192 is way more than
-        // we need for ~256 stores into a 512B buffer.
-        aether_translator::runtime::mmu::aether_arm_ebpf_store_trace(
-            0xFFFF_FFC0_0A0F_5000,
-            0xFFFF_FFC0_0A0F_5200,
-        );
-        dual_puts(b"[mmu] eBPF store tracker armed: [0xa0f5000, 0xa0f5200)\n");
+        // Phase-G stack-corruption hunt (commented out — produced data
+        // pinning a STRH at PC 0xffffffc009a28830 writing 0x42 to address
+        // 0xffffffc00800ba68; that's the kernel's intended local-variable
+        // write, not a lifter bug. The actual lifter bug that loads 0x42
+        // as x30 in a later function's epilogue requires load-tracking
+        // instrumentation that's not yet wired up. Tracker remains
+        // available; re-arm here when running another hunt iteration.
+        // aether_translator::runtime::mmu::aether_arm_ebpf_store_trace(
+        //     0xFFFF_FFC0_0800_8000,
+        //     0xFFFF_FFC0_0800_C000,
+        // );
+        // aether_translator::runtime::mmu::aether_arm_ebpf_store_value_max(
+        //     0x0001_0000,
+        // );
+        // dual_puts(b"[mmu] x30-clobber tracker armed: stack [0x8008000, 0x800c000), value_max=0x10000\n");
         if crate::dbt_dispatch::is_armed() {
             dual_puts(b"[x86] dispatch armed (handoff staged) - host-mode dispatch loop\n");
             // M4b-5: a real kernel runs through the vendor-neutral HOST-MODE
@@ -2739,7 +2857,7 @@ const NPF_PC_SLOT: usize = 0x100 / 8;
 /// (GuestRegisterFile + sysreg array + spill area). Seeded once with the RO ID
 /// sysregs on first NPF entry, then carried forward across blocks so guest
 /// register state (and PC) persists across the translate/dispatch loop.
-static mut NPF_GUEST_CTX: [u64; aether_translator::runtime::context::CTX_U64S] =
+pub(crate) static mut NPF_GUEST_CTX: [u64; aether_translator::runtime::context::CTX_U64S] =
     [0u64; aether_translator::runtime::context::CTX_U64S];
 
 /// True once `NPF_GUEST_CTX` has been seeded with `seed_sysregs`.
@@ -2871,15 +2989,47 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
         // the guest's 24 MHz CNTFRQ_EL0, so CNTVCT_EL0 (and the guest's delay
         // loops / scheduler tick) track roughly-real wall-clock time instead of
         // running ~125× fast off the raw ~3 GHz RDTSC.
-        sysreg_rt::aether_timer_set_now(host_virtual_count());
+        // VIRTUAL-TIME CNTVCT (icount-style). Advance the guest counter by a
+        // FIXED increment per dispatched block instead of wall-clock RDTSC.
+        //
+        // Wall-clock timing is pathological under slow TCG: a HZ=250 tick is due
+        // every 4 ms of REAL time = only ~460 dispatches apart, but each timer-IRQ
+        // handler (scheduler tick + softirqs) costs far MORE than 460 dispatches.
+        // So the kernel drowns servicing back-to-back timer interrupts and barely
+        // advances (observed live: IRQ-log budget exhausted, PCs oscillating into
+        // the scheduler-exit path, 150M+ dispatches with zero forward printk).
+        //
+        // Tying guest time to WORK DONE makes the timer fire at a sane rate vs DBT
+        // speed: VIRT_TICKS_PER_BLOCK=64 at the 24 MHz CNTFRQ → one tick
+        // (CNTFRQ/HZ = 96000 ticks) every ~1500 blocks, so the handler is a small
+        // fraction of forward progress — no storm. Every timing source
+        // (sched_clock / vsync / choreographer / udelay) derives from this same
+        // counter, so they scale together and stay self-consistent; the guest's
+        // clock simply runs slower than wall-clock (fine — and reversible).
+        // Updated every 16 dispatches to amortize the runtime call; a plain add
+        // (no RDTSC / u128 divide) keeps it cheap.
+        {
+            const VIRT_TICKS_PER_BLOCK: u64 = 64;
+            static mut TIMER_TICK: u32 = 0;
+            let t = *ptr::addr_of!(TIMER_TICK);
+            if t == 0 {
+                let n = (*ptr::addr_of!(VIRT_NOW)).wrapping_add(16 * VIRT_TICKS_PER_BLOCK);
+                *ptr::addr_of_mut!(VIRT_NOW) = n;
+                sysreg_rt::aether_timer_set_now(n);
+            }
+            *ptr::addr_of_mut!(TIMER_TICK) = (t + 1) & 0xF;
+        }
 
         // Point the block at the faulting PC. A correctly-lifted block reads its
         // own constant PC at terminators, but seeding it keeps the context's PC
         // slot coherent for any block that consults PC mid-stream.
         (*ptr::addr_of_mut!(NPF_GUEST_CTX))[NPF_PC_SLOT] = pc;
 
-        let (host_va, len) = aether_dbt_block_host_va(pc)?;
-        if !block_is_safe_to_enter(host_va, len) {
+        // Use the CACHED safety verdict (computed once at translation) instead
+        // of rescanning the block bytes on every entry — the prior
+        // `block_is_safe_to_enter` was O(len) softmmu reads per dispatch.
+        let (host_va, _len, safe) = aether_dbt_block_host_va_safe(pc)?;
+        if !safe {
             return None;
         }
         enter_host_block(host_va as *const u8, ctx);
@@ -2899,6 +3049,12 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
         // take_pending_abort consumes them, so the log shows the real fault.
         let pend_far = ctx_slice[SYSREG_SLOT0 + 57];
         let pend_esr = ctx_slice[SYSREG_SLOT0 + 58];
+        // Source EL captured BEFORE take_pending_abort runs inject() (which sets
+        // CURRENTEL=1). For an EL0 /init demand fault this must read 0 —
+        // inject's EC correction (same-EL 0x25 -> lower-EL 0x24) only fires when
+        // cur_el==0; a wrong same-EL ESR makes the kernel's el0_sync take
+        // bad_el0_sync and never run do_page_fault (so the page is never mapped).
+        let cur_el_at_fault = (ctx_slice[SYSREG_SLOT0 + 42] >> 2) & 0b11; // SR_CURRENTEL
 
         // (Phase-D linear-map fault handling has moved into the walker's
         // kernel-image fallback path — see aether_mmu_set_kimg_fallback.)
@@ -2912,6 +3068,139 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
                 dual_puts(b" esr=");
                 dual_puthex64(pend_esr);
                 dual_puts(b"\n");
+            }
+            // Stuck-user-fault classifier: a data abort that REPEATS on the
+            // same USER (TTBR0, bit55=0) VA means /init's demand page never
+            // resolves. On the 6th repeat dump the live page-table walk for that
+            // VA. desc bit0 clear at faultL => the PTE is genuinely absent (the
+            // kernel never mapped it — a fault-delivery/handler problem); a
+            // resolved pa!=0 (faultL=0xFF..) while we keep faulting => a stale
+            // TLB/block-cache entry serving a dead translation. (Reading the
+            // guest tables here is safe: inject() only touched ctx registers.)
+            if pend_far >= 0x1000 && (pend_far >> 55) & 1 == 0 {
+                static mut UF_DUMPS: u32 = 0;
+                let dumps = *ptr::addr_of!(UF_DUMPS);
+                // Dump the first 40 user-VA aborts. 0x514d5c dominates the fault
+                // stream (~68/80), so 40 dumps capture MANY of its faults — the
+                // L3 desc across them answers "does the kernel ever map it?":
+                // always 0 => kernel never maps (fault-delivery / handler), a
+                // flip to valid while we keep faulting => walker coherence.
+                // injESR + cur_el + elr confirm delivery: cur_el=0 and
+                // injESR=...x92.. (EC=0x24 lower-EL) mean delivery is correct.
+                if dumps < 40 {
+                    *ptr::addr_of_mut!(UF_DUMPS) = dumps + 1;
+                    let is_w = (pend_esr >> 6) & 1 == 1;
+                    let wd = aether_translator::runtime::mmu::walk_debug(
+                        ctx_slice, pend_far, is_w,
+                    );
+                    dual_puts(b"[uflt] far=");
+                    dual_puthex64(pend_far);
+                    dual_puts(b" esr=");
+                    dual_puthex64(pend_esr);
+                    dual_puts(b" injESR=");
+                    dual_puthex64(ctx_slice[SYSREG_SLOT0 + 12]); // SR_ESR (post-inject)
+                    dual_puts(b" curEL=");
+                    dual_puthex64(cur_el_at_fault);
+                    dual_puts(b" elr=");
+                    dual_puthex64(ctx_slice[SYSREG_SLOT0 + 13]); // SR_ELR = faulting /init PC
+                    dual_puts(b" wnr=");
+                    dual_puthex64((pend_esr >> 6) & 1);
+                    dual_puts(b" ttbr0=");
+                    dual_puthex64(wd.ttbr);
+                    dual_puts(b" tcr=");
+                    dual_puthex64(wd.tcr);
+                    dual_puts(b" startL=");
+                    dual_puthex64(wd.start_level as u64);
+                    dual_puts(b" faultL=");
+                    dual_puthex64(wd.fault_level as u64); // 0xFFFF..FF = resolved
+                    dual_puts(b" pa=");
+                    dual_puthex64(wd.out_pa);
+                    dual_puts(b"\n");
+                    let mut lv = 0usize;
+                    while lv < 4 {
+                        let (dpa, d) = wd.levels[lv];
+                        dual_puts(b"[uflt]  L");
+                        dual_puthex64(lv as u64);
+                        dual_puts(b" descpa=");
+                        dual_puthex64(dpa);
+                        dual_puts(b" desc=");
+                        dual_puthex64(d);
+                        dual_puts(b"\n");
+                        lv += 1;
+                    }
+                    // mmap probe: the last anonymous mmap's request + the kernel's
+                    // actual return (x0 captured at the ERET back to EL0), printed
+                    // next to `far`. If ret == far & ~0xfff the kernel handed /init
+                    // this address but installed no VMA (kernel/walker bug); if it
+                    // differs, x0 was mangled after the syscall (lowering bug).
+                    if *ptr::addr_of!(exceptions::MMAP_RET_VALID) {
+                        let req = *ptr::addr_of!(exceptions::MMAP_REQ);
+                        dual_puts(b"[uflt] mmap req_addr=");
+                        dual_puthex64(req[0]);
+                        dual_puts(b" len=");
+                        dual_puthex64(req[1]);
+                        dual_puts(b" flags=");
+                        dual_puthex64(req[3]);
+                        dual_puts(b" -> ret=");
+                        dual_puthex64(*ptr::addr_of!(exceptions::MMAP_RET));
+                        dual_puts(b"\n");
+                    }
+                }
+            }
+            // NULL-deref chase: when the faulting address is near-NULL (the
+            // SIGSEGV that kills /init), dump the faulting block PC (ELR), the
+            // saved PSTATE (SPSR — confirms EL0 source), and the full GPR file.
+            // One GPR will hold ~0 (the bad base pointer); disassembling /init
+            // at the ELR shows the store + the register chain that produced the
+            // NULL — telling syscall-return (x0) from a miscompiled value. Own
+            // counter (not the event-log budget) so it always prints.
+            if pend_far < 0x1000 || (pend_far >= 0x4000_0000 && pend_far < 0x0001_0000_0000_0000) {
+                static mut NULL_DUMP_COUNT: u32 = 0;
+                let c = *ptr::addr_of!(NULL_DUMP_COUNT);
+                if c < 4 {
+                    *ptr::addr_of_mut!(NULL_DUMP_COUNT) = c + 1;
+                    dual_puts(b"[null] far=");
+                    dual_puthex64(pend_far);
+                    dual_puts(b" esr=");
+                    dual_puthex64(pend_esr);
+                    dual_puts(b" elr=");
+                    dual_puthex64(ctx_slice[SYSREG_SLOT0 + 13]); // SR_ELR
+                    dual_puts(b" spsr=");
+                    dual_puthex64(ctx_slice[SYSREG_SLOT0 + 14]); // SR_SPSR
+                    dual_puts(b" sp=");
+                    dual_puthex64(ctx_slice[31]); // active SP (kernel SP_EL1 post-inject)
+                    dual_puts(b" sp_el0=");
+                    dual_puthex64(ctx_slice[SYSREG_SLOT0 + 16]); // banked user SP at fault
+                    dual_puts(b"\n");
+                    let mut r = 0usize;
+                    while r < 31 {
+                        dual_puts(b"[null] x");
+                        dual_puthex64(r as u64);
+                        dual_puts(b"=");
+                        dual_puthex64(ctx_slice[r]);
+                        dual_puts(b"\n");
+                        r += 1;
+                    }
+                    // Recent syscalls — reveals what /init did just before wedging
+                    // (a clone/mmap/mprotect that set up a custom non-GROWSDOWN
+                    // stack would explain a stack-region write the kernel refuses).
+                    let ring = &*ptr::addr_of!(exceptions::SYSCALL_RING);
+                    let idx = *ptr::addr_of!(exceptions::SYSCALL_RING_IDX);
+                    let mut k = 0usize;
+                    while k < 12 {
+                        let row = ring[(idx + 32 - 12 + k) % 32];
+                        dual_puts(b"[null] svc nr=");
+                        dual_puthex64(row[0]);
+                        dual_puts(b" x0=");
+                        dual_puthex64(row[1]);
+                        dual_puts(b" x1=");
+                        dual_puthex64(row[2]);
+                        dual_puts(b" x30=");
+                        dual_puthex64(row[4]);
+                        dual_puts(b"\n");
+                        k += 1;
+                    }
+                }
             }
             return Some(ctx_slice[NPF_PC_SLOT]);
         }
@@ -2934,19 +3223,65 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
         // the GICD/GICR MMIO config (the documented integration boundary) — until
         // then `aether_pending_irq` is spurious and this is a no-op.
         let pending_irq = sysreg_rt::aether_pending_irq();
-        if exceptions::irqs_unmasked(ctx_slice) && pending_irq != gic::SPURIOUS_INTID {
+        if exceptions::irqs_unmasked(ctx_slice) && pending_irq != gic::SPURIOUS_INTID
+            && irq_deliverable_now(exceptions::guest_el(ctx_slice))
+        {
+            let _pre_sp = ctx_slice[31]; // active SP (x31 slot)
             exceptions::inject_irq(ctx_slice);
-            if dbt_event_log_ok() {
-                dual_puts(b"[irq] INJECT intid=");
-                dual_puthex64(pending_irq as u64);
-                dual_puts(b" -> EL1 vector=");
-                dual_puthex64(ctx_slice[NPF_PC_SLOT]);
-                dual_puts(b"\n");
-            }
+            // [irq] INJECT logging silenced: at ~27 Hz it floods + drains the
+            // shared event-log budget that the informative [exc]/[uflt] fault
+            // lines (init's demand-paging trajectory) need. The [sys] heartbeat
+            // below tracks IRQ/timer health indirectly (syscall progress).
             return Some(ctx_slice[NPF_PC_SLOT]);
         }
 
         Some((*ptr::addr_of!(NPF_GUEST_CTX))[NPF_PC_SLOT])
+    }
+}
+
+/// EL1 (kernel-mode) timer-preemption rate limiter.
+///
+/// Delivering a timer IRQ that preempts a kernel-mode task mid-critical-section
+/// (e.g. while it holds a sleeping mutex) exposes a racy lost-wakeup in the DBT
+/// scheduler path: nd_async_device_register (the PMEM /system device probe)
+/// wedges forever in `mutex_lock` on the global kernfs `iattr_mutex`, the
+/// async_synchronize_full() in the root-mount path never returns, and the
+/// system never reaches init. The CONFIG_PREEMPT kernel preempts mutex holders
+/// freely; AETHER's preempt-path wakeup loses the wake under a specific
+/// interleaving (~50% of boots). Userspace (EL0) preemption is harmless to that
+/// kernel-mutex race, so deliver freely at EL0; at EL1 deliver only once per
+/// `EL1_IRQ_DEFER` eligible dispatches so a kernel-mode critical section runs to
+/// completion uninterrupted (≈ PREEMPT_VOLUNTARY), while jiffies/RCU still
+/// advance at a reduced rate (~1–2 Hz EL1 tick, far under the ~21 s RCU stall
+/// threshold). Proper fix: PREEMPT_VOLUNTARY kernel rebuild or pin the lost wake.
+static mut EL1_IRQ_DEFER_CTR: u32 = 0;
+// EL1 preemption is rate-limited to roughly one delivery per EL1_IRQ_DEFER
+// kernel-mode dispatches. At ~110k dispatch/s that is ~27 Hz when the guest
+// sits in the kernel idle/WFI loop — fast enough that kernel-side timed waits
+// (epoll/schedule_timeout/RCU) still progress, ~9× rarer than the native 250 Hz
+// tick so a timer rarely lands inside a kernel mutex critical section. The
+// counter is NOT reset on EL0 transitions: an earlier version reset it every
+// EL0 visit, so during init's rapid EL0⇄EL1 bouncing it never reached the
+// threshold and EL1 ticks essentially never fired → kernel-side timeouts
+// starved and init crawled. EL0 (userspace) preemption is delivered freely and
+// is harmless to the kernel-mutex race.
+const EL1_IRQ_DEFER: u32 = 4096;
+#[inline]
+fn irq_deliverable_now(cur_el: u64) -> bool {
+    // SAFETY: EL2-private, single-vCPU dispatch loop — no concurrent access.
+    unsafe {
+        if cur_el == 0 {
+            true // EL0/userspace: deliver freely (does not touch the EL1 budget)
+        } else {
+            let c = (*ptr::addr_of!(EL1_IRQ_DEFER_CTR)).wrapping_add(1);
+            if c >= EL1_IRQ_DEFER {
+                *ptr::addr_of_mut!(EL1_IRQ_DEFER_CTR) = 0;
+                true
+            } else {
+                *ptr::addr_of_mut!(EL1_IRQ_DEFER_CTR) = c;
+                false
+            }
+        }
     }
 }
 
@@ -2968,6 +3303,11 @@ fn host_tsc() -> u64 {
 const GUEST_CNTFRQ_HZ: u64 = aether_translator::runtime::sysreg_rt::DEFAULT_CNTFRQ;
 static mut TSC_BASE: u64 = 0;
 static mut TSC_HZ: u64 = 0;
+/// Virtual-time guest counter accumulator (icount-style CNTVCT). Advanced by a
+/// fixed increment per dispatched block in the dispatch loop — see the timer
+/// block in `enter_translated_block_from_npf`. Decoupled from wall-clock so the
+/// generic-timer tick fires at a sane rate relative to DBT throughput.
+static mut VIRT_NOW: u64 = 0;
 
 #[inline]
 fn cpuid(leaf: u32, sub: u32) -> core::arch::x86_64::CpuidResult {
@@ -3099,6 +3439,62 @@ unsafe fn host_pt_make_handoff_rw() {
         // RAM pages writable via PTE.W=1.
         core::arch::asm!("mov cr0, {}", in(reg) saved_cr0, options(nomem, nostack));
         dual_puts(b"[x86] host PT: handoff window forced RW\n");
+    }
+}
+
+/// Identity-map `count` 1-GiB pages starting at `base_pa` into the HOST CR3 by
+/// installing 1-GiB-leaf PDPTEs. OVMF only identity-maps the low 4 GiB, so a
+/// high-RAM region — the PMEM `/system` image staged at 8 GiB — is otherwise
+/// unreachable by the VMX-root host-CALL dispatch: every lifted load of it would
+/// #PF. PML4[0]'s existing PDPT (covering 0..512 GiB) has free slots [8..] for
+/// the high region, so no new page-table page is allocated — we just write leaf
+/// entries. Mirrors `host_pt_make_handoff_rw`'s CR0.WP dance (the PDPT page may
+/// be mapped W=0 by OVMF).
+///
+/// # Safety
+/// `base_pa` must be 1 GiB-aligned and `[base_pa, base_pa + count*1GiB)` backed
+/// by real conventional RAM. Must run post-EBS with a valid host CR3.
+unsafe fn host_pt_map_identity_1g(base_pa: u64, count: u64) {
+    unsafe {
+        const GIB: u64 = 1 << 30;
+        const P:  u64 = 1;        // present
+        const RW: u64 = 1 << 1;   // writable
+        const PS: u64 = 1 << 7;   // page size → 1 GiB leaf at the PDPT level
+        let saved_cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) saved_cr0, options(nomem, nostack));
+        core::arch::asm!("mov cr0, {}", in(reg) saved_cr0 & !(1u64 << 16),
+                         options(nomem, nostack));
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+        let pml4 = (cr3 & 0x0000_FFFF_FFFF_F000) as *mut u64;
+        let mut i = 0u64;
+        while i < count {
+            let va = base_pa + i * GIB;
+            let pml4_idx = ((va >> 39) & 0x1FF) as isize;
+            let pml4e = core::ptr::read_volatile(pml4.offset(pml4_idx));
+            if pml4e & 1 == 0 {
+                // No PDPT under this PML4 slot. The 8 GiB region falls under
+                // PML4[0], which OVMF always populates, so this should never
+                // trigger; skip rather than risk a wild allocation.
+                i += 1;
+                continue;
+            }
+            // Keep the PML4E writable so its PDPT (and our new leaf) is RW.
+            core::ptr::write_volatile(pml4.offset(pml4_idx), pml4e | RW);
+            let pdpt = (pml4e & 0x0000_FFFF_FFFF_F000) as *mut u64;
+            let pdpt_idx = ((va >> 30) & 0x1FF) as isize;
+            // Install a 1 GiB identity leaf (PA == VA). Slots [8..] are unused by
+            // the low-4-GiB map (slots [0..4]), so no existing entry is stomped.
+            core::ptr::write_volatile(
+                pdpt.offset(pdpt_idx),
+                (va & !(GIB - 1)) | P | RW | PS,
+            );
+            i += 1;
+        }
+        let cr3_v: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3_v, options(nomem, nostack));
+        core::arch::asm!("mov cr3, {}", in(reg) cr3_v, options(nomem, nostack));
+        core::arch::asm!("mov cr0, {}", in(reg) saved_cr0, options(nomem, nostack));
     }
 }
 
@@ -3237,7 +3633,55 @@ unsafe fn read_guest_window_identity(guest_pa: u64, max_len: usize) -> Option<(*
 /// dispatch context. Diverges (halts) on translate failure, an unsupported
 /// (UD2) block, a fetch fault with no handler, a PSCI power-off/reset, or the
 /// iteration cap.
+/// Recent guest block PCs (most-recent-last), updated every dispatch iteration.
+/// Module-global so the host IDT exception handler (host_idt.rs) can dump it on
+/// a CPU fault in translated code — the last entry is the block whose emitted
+/// x86 faulted, the prior entries are the call/branch chain that led there.
+pub static mut DBG_GUEST_PC_RING: [u64; 16] = [0; 16];
+pub static mut DBG_GUEST_PC_IDX: usize = 0;
+
+// ── Dedicated dispatch-loop stack ────────────────────────────────────────────
+// The boot flow reaches the host-mode dispatch loop deep on the UEFI stack,
+// leaving only a few KiB below run_android_dispatch_loop's frame. Its per-block
+// call chain (enter_host_block → translated block → MMU xlate → page walk) needs
+// more than that, so it overflowed into the unmapped page just below the UEFI
+// stack — a host #PF the IDT can't service (#PF handler can't push its own frame
+// on the bad stack → #DF → triple fault, observed at the clear_page/0x8323088
+// block, iter ~0xcdc793, with NO `[idt]` log). Run the loop on a large,
+// BSS-resident stack instead: BSS is part of the loaded .efi image, so it is
+// mapped + writable under the host CR3 (the same region .text executes from),
+// and 2 MiB is far more headroom than any block's chain needs.
+#[repr(align(16))]
+struct DispatchStack([u8; 2 * 1024 * 1024]);
+static mut DISPATCH_STACK: DispatchStack = DispatchStack([0u8; 2 * 1024 * 1024]);
+static mut DISPATCH_REGS: crate::android_handoff::DbtInitialRegs =
+    crate::android_handoff::DbtInitialRegs::zero();
+
+/// Trampoline: stash the seed registers, switch RSP to the dedicated dispatch
+/// stack, and tail-call the real loop (which never returns). Splitting this out
+/// keeps the RSP switch tiny and self-contained — the inner loop runs entirely
+/// on the new stack, so its large frame + deep per-block call chain have room.
 unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs) -> ! {
+    unsafe {
+        *ptr::addr_of_mut!(DISPATCH_REGS) = regs;
+        let base = ptr::addr_of_mut!(DISPATCH_STACK) as *mut u8;
+        // 16-byte-aligned top; `call` pushes 8 so the inner fn entry sees
+        // RSP%16 == 8 per the SysV/Win64 convention.
+        let top = (base.add(2 * 1024 * 1024) as u64) & !0xFu64;
+        core::arch::asm!(
+            "mov rsp, {top}",
+            "call {f}",
+            top = in(reg) top,
+            f = sym run_android_dispatch_loop_inner,
+            options(noreturn),
+        );
+    }
+}
+
+unsafe fn run_android_dispatch_loop_inner() -> ! {
+    // SAFETY: single-core EL2 dispatch; DISPATCH_REGS was written by the
+    // trampoline immediately before the stack switch and is not mutated again.
+    let regs = unsafe { *ptr::addr_of!(DISPATCH_REGS) };
     unsafe {
         // aether_dbt_{translate_block,block_host_va,last_failure} + AetherDbtResult
         // are already imported at module scope; only MAX_INSNS_PER_BLOCK is new.
@@ -3258,6 +3702,42 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         );
         // Clear any software-TLB residue left by the boot proof programs.
         aether_translator::runtime::mmu::aether_mmu_flush_all();
+
+        // Phase 3 PIVOT: the GKI kernel has NO virtio-blk driver (CONFIG_VIRTIO_*
+        // all unset) but has CONFIG_OF_PMEM=y. The AOSP system.raw image is
+        // staged by QEMU's generic loader into a FIXED high-RAM region
+        // (PMEM_SYSTEM_PA = 8 GiB) and exposed to the guest as a PMEM block
+        // device (/dev/pmem0) via the `pmem-region` DT node. Make that region
+        // reachable from both translation layers:
+        //   (1) register it as a SECOND software-MMU guest-PA window so the
+        //       walker confines+allows guest accesses to it (No-Boundary holds:
+        //       a fixed hypervisor-set range), and
+        //   (2) identity-map it into the HOST CR3 (OVMF maps only the low 4 GiB)
+        //       so the VMX-root host-CALL dispatch can deref it without #PF.
+        {
+            use crate::android_handoff::{PMEM_SYSTEM_PA, PMEM_SYSTEM_SIZE};
+            aether_translator::runtime::mmu::aether_mmu_set_window2(
+                PMEM_SYSTEM_PA,
+                PMEM_SYSTEM_SIZE,
+            );
+            // 1 GiB-leaf identity map covering the PMEM region (round size up).
+            let gigs = (PMEM_SYSTEM_SIZE + (1u64 << 30) - 1) >> 30;
+            host_pt_map_identity_1g(PMEM_SYSTEM_PA, gigs);
+            // Sanity: the QEMU loader should have placed the ext4 image here. The
+            // ext4 superblock sits at byte offset 0x400; its magic (0x53 0xEF)
+            // lives at +0x38 within it. Reading it confirms BOTH that the loader
+            // staged the image AND that the host-CR3 1 GiB map works — this very
+            // read derefs PMEM_SYSTEM_PA through the entry we just installed.
+            let sb = (PMEM_SYSTEM_PA + 0x400) as *const u8;
+            dual_puts(b"[p3] pmem window2 base=");
+            dual_puthex64(PMEM_SYSTEM_PA);
+            dual_puts(b" size=");
+            dual_puthex64(PMEM_SYSTEM_SIZE);
+            dual_puts(b" ext4_magic=");
+            dual_puthex64(*sb.add(0x38) as u64);
+            dual_puthex64(*sb.add(0x39) as u64);
+            dual_puts(b" (expect 53 ef)\n");
+        }
 
         // Phase-D kernel-image VA->PA fallback. Linux's __create_page_tables in
         // head.S maps `[_text, ALIGN(_end, 2 MiB))`, but the kernel later
@@ -3346,6 +3826,22 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
             0x7BE0_0000, 0x7C00_0000,
         );
 
+        // ── Phase-G x30-corruption hunt: arm the eBPF store/load ring over the
+        // swapper/0 init-stack page (init_thread_union lives in the kernel
+        // image's low BSS, ~0x...0800bxxx). The prior hunt pinned a STRH of
+        // 0x42 to 0xffffffc00800ba68 and a later epilogue reading that slot as
+        // saved-x30 → RET to 0x42. This window captures EVERY store AND load to
+        // that stack page so the [x30!] trap below can dump the slot's full
+        // value history (single STRs with values, pair/wide stores as
+        // sentinels, and — new — loads with the physical value read). No value
+        // filter: we WANT the legitimate high-VA x30 saves visible to compare.
+        aether_translator::runtime::mmu::aether_arm_ebpf_store_trace(
+            0xFFFF_FFC0_0800_B000,
+            0xFFFF_FFC0_0800_C000,
+        );
+        aether_translator::runtime::mmu::aether_arm_ebpf_store_value_max(0);
+        dual_puts(b"[x30!] init-stack ring armed [0x...0800b000, 0x...0800c000) val_max=0\n");
+
         // Seed the live guest register file: x0..x30 (slots 0..30), SP (slot
         // 0xF8/8 = 31), PC (slot 0x100/8 = 32). npf_ctx_ptr() seeds the RO ID
         // sysregs on first touch.
@@ -3427,18 +3923,370 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
         let mut last_pc:   u64 = regs.pc;
         let mut last_insn: u32 = 0;
 
-        const MAX_ITERS: u64 = 200_000_000;
+        const MAX_ITERS: u64 = 2_000_000_000; // userspace grind; watchdog HARD_WALL bounds wall time
+        // Stall detector: /init makes syscalls continuously while it runs. If
+        // SYSCALL_TOTAL stops advancing for STALL_NO_SVC_LIMIT dispatches, the
+        // guest is wedged (init blocked on a syscall / waiting on a missing
+        // device). Force the iter-cap diagnostic path so the syscall-ring dump
+        // fires and reveals what init was parked on (the cap is never reached on
+        // its own because the idle guest produces almost no dispatches).
+        let mut last_svc_total: u64 = 0;
+        let mut no_svc_streak: u64 = 0;
+        const STALL_NO_SVC_LIMIT: u64 = 2_000_000;
         let mut iter: u64 = 0;
         loop {
             iter += 1;
+            {
+                let cur_svc =
+                    *ptr::addr_of!(aether_translator::runtime::exceptions::SYSCALL_TOTAL);
+                if cur_svc != last_svc_total {
+                    last_svc_total = cur_svc;
+                    no_svc_streak = 0;
+                } else if last_svc_total > 0 {
+                    // Only arm AFTER /init has made its first syscall. Kernel boot
+                    // (pre-init) legitimately issues zero SVCs for tens of millions
+                    // of dispatches (the kernel uses HVC, not SVC), which would
+                    // otherwise false-trigger the stall dump during early boot.
+                    no_svc_streak += 1;
+                    if no_svc_streak == STALL_NO_SVC_LIMIT {
+                        dual_puts(b"[stall] init: no syscall for 2M dispatches -- forcing diag dump\n");
+                        iter = MAX_ITERS + 1;
+                    }
+                }
+            }
+            // Syscall heartbeat: once /init is making syscalls, emit a compact
+            // progress line every 4M dispatches showing total SVC count + the most
+            // recent syscall (nr, x0). This is /init's LOGICAL trajectory (mmap →
+            // mount → openat /dev/kmsg → …) — far more informative than the
+            // demand-paging fault stream, and it survives the [exc]/[uflt] budget
+            // cap. A climbing total with varied nr = forward progress; a frozen
+            // total = a stall (the detector above then dumps the full ring).
+            if (iter & 0xF_FFFF) == 0 {
+                use aether_translator::runtime::exceptions as exc;
+                let total = *ptr::addr_of!(exc::SYSCALL_TOTAL);
+                if total > 0 {
+                    let ridx = *ptr::addr_of!(exc::SYSCALL_RING_IDX);
+                    let last = (*ptr::addr_of!(exc::SYSCALL_RING))[(ridx + 31) % 32];
+                    dual_puts(b"[sys] iter=");
+                    dual_puthex64(iter);
+                    dual_puts(b" total=");
+                    dual_puthex64(total);
+                    dual_puts(b" last_nr=");
+                    dual_puthex64(last[0]);
+                    dual_puts(b" x0=");
+                    dual_puthex64(last[1]);
+                    dual_puts(b"\n");
+                }
+            }
             if iter > MAX_ITERS {
                 dual_puts(b"[x86] dispatch iteration cap reached -- halting\n");
+                // Diagnostic: what is /init parked on? Dump the syscall histogram
+                // — total SVCs, last (nr,pc), and the top syscall numbers by
+                // count. A dominant `mount`/`openat` => waiting on the (missing)
+                // /system partition; a dominant `futex`/`ppoll`/`nanosleep` =>
+                // a wait loop in /init's own code (possible DBT issue).
+                {
+                    use aether_translator::runtime::exceptions as exc;
+                    let total = *ptr::addr_of!(exc::SYSCALL_TOTAL);
+                    dual_puts(b"[svc] total=");
+                    dual_puthex64(total);
+                    dual_puts(b"\n");
+                    // Dump the syscall ring in chronological order (oldest first).
+                    let ring = &*ptr::addr_of!(exc::SYSCALL_RING);
+                    let idx = *ptr::addr_of!(exc::SYSCALL_RING_IDX);
+                    let n = if total < 32 { total as usize } else { 32 };
+                    let mut k = 0usize;
+                    while k < n {
+                        // oldest first: start = idx - n (mod 32)
+                        let slot = (idx + 32 - n + k) % 32;
+                        let r = ring[slot];
+                        dual_puts(b"[svc]  nr=");
+                        dual_puthex64(r[0]);
+                        dual_puts(b" x0=");
+                        dual_puthex64(r[1]);
+                        dual_puts(b" x1=");
+                        dual_puthex64(r[2]);
+                        dual_puts(b" x2=");
+                        dual_puthex64(r[3]);
+                        dual_puts(b" x30=");
+                        dual_puthex64(r[4]);
+                        dual_puts(b"\n");
+                        k += 1;
+                    }
+                }
+                // Timer/IRQ delivery diagnosis — distinguishes "timer IRQ never
+                // delivered" (TIMER_FIRED ~0, kernel waiting on jiffies) from
+                // "timer IRQ storm" (IAR1_TIMER_ACKS ~ dispatches) from a plain
+                // code spin (both low; PC ring clusters on one block).
+                {
+                    use aether_translator::runtime::sysreg_rt as sr;
+                    let diag = sr::aether_timer_irq_diag();
+                    dual_puts(b"[tmr] now=");
+                    dual_puthex64(diag[0]);
+                    dual_puts(b" ctl=");
+                    dual_puthex64(diag[1]);
+                    dual_puts(b" cval=");
+                    dual_puthex64(diag[2]);
+                    dual_puts(b" en27=");
+                    dual_puthex64(diag[3]);
+                    dual_puts(b" grp1_27=");
+                    dual_puthex64(diag[4]);
+                    dual_puts(b" pend27=");
+                    dual_puthex64(diag[5]);
+                    dual_puts(b" prio27=");
+                    dual_puthex64(diag[6]);
+                    dual_puts(b" pmr=");
+                    dual_puthex64(diag[7]);
+                    dual_puts(b" igrpen1=");
+                    dual_puthex64(diag[8]);
+                    dual_puts(b" runprio=");
+                    dual_puthex64(diag[9]);
+                    dual_puts(b" tmr_pend=");
+                    dual_puthex64(diag[10]);
+                    dual_puts(b" signalled=");
+                    dual_puthex64(diag[11]);
+                    dual_puts(b"\n[ptmr] pctl=");
+                    dual_puthex64(diag[12]);
+                    dual_puts(b" pcval=");
+                    dual_puthex64(diag[13]);
+                    dual_puts(b" ppend=");
+                    dual_puthex64(diag[14]);
+                    dual_puts(b" en30=");
+                    dual_puthex64(diag[15]);
+                    dual_puts(b" grp1_30=");
+                    dual_puthex64(diag[16]);
+                    dual_puts(b" pend30=");
+                    dual_puthex64(diag[17]);
+                    dual_puts(b"\n[tmr] polls=");
+                    dual_puthex64(*ptr::addr_of!(sr::IRQ_PENDING_POLLS));
+                    dual_puts(b" fired=");
+                    dual_puthex64(*ptr::addr_of!(sr::TIMER_FIRED_POLLS));
+                    dual_puts(b" iar1_timer=");
+                    dual_puthex64(*ptr::addr_of!(sr::IAR1_TIMER_ACKS));
+                    dual_puts(b" eoir1_timer=");
+                    dual_puthex64(*ptr::addr_of!(sr::EOIR1_TIMER_WRITES));
+                    dual_puts(b"\n");
+                }
+                // Last 16 guest PCs (oldest first) — a code spin clusters here.
+                {
+                    let idx = *ptr::addr_of!(DBG_GUEST_PC_IDX);
+                    let mut k = 0usize;
+                    while k < 16 {
+                        let rp = *ptr::addr_of!(DBG_GUEST_PC_RING[(idx as usize + k) % 16]);
+                        dual_puts(b"[pcr] ");
+                        dual_puthex64(rp);
+                        dual_puts(b"\n");
+                        k += 1;
+                    }
+                }
+                // QSPINLOCK store-trace dump: every store recorded to the lock's
+                // cacheline (PC + value + size + PA). Tells us if the unlock store
+                // (clearing bit0) ever happened and at which PA vs the spin's read.
+                {
+                    use aether_translator::runtime::mmu as mmu;
+                    let n = *ptr::addr_of!(mmu::VMM_TRACE_IDX);
+                    let total = if n > mmu::VMM_TRACE_CAP as u64 { mmu::VMM_TRACE_CAP as u64 } else { n };
+                    dual_puts(b"[strace] lock stores recorded=");
+                    dual_puthex64(total);
+                    dual_puts(b"\n");
+                    let mut k = 0u64;
+                    while k < total && k < 48 {
+                        let va = *ptr::addr_of!(mmu::VMM_TRACE_VA[k as usize]);
+                        let pa = *ptr::addr_of!(mmu::VMM_TRACE_PA[k as usize]);
+                        let val = *ptr::addr_of!(mmu::VMM_TRACE_VAL[k as usize]);
+                        let sz = *ptr::addr_of!(mmu::VMM_TRACE_SIZE[k as usize]);
+                        let tpc = *ptr::addr_of!(mmu::VMM_TRACE_PC[k as usize]);
+                        dual_puts(b"[strace] va=");
+                        dual_puthex64(va);
+                        dual_puts(b" pa=");
+                        dual_puthex64(pa);
+                        dual_puts(b" val=");
+                        dual_puthex64(val);
+                        dual_puts(b" sz=");
+                        dual_puthex64(sz as u64);
+                        dual_puts(b" pc=");
+                        dual_puthex64(tpc);
+                        dual_puts(b"\n");
+                        k += 1;
+                    }
+                }
                 exit_code = 0;
                 sum_iter = iter;
                 break;
             }
             let pc = (*ptr::addr_of!(NPF_GUEST_CTX))[NPF_PC_SLOT];
             last_pc = pc;
+            // Record the recent guest-PC ring so a HOST CPU fault in translated
+            // code (caught by the host IDT) can name the offending block.
+            {
+                let gi = *ptr::addr_of!(DBG_GUEST_PC_IDX);
+                *ptr::addr_of_mut!(DBG_GUEST_PC_RING[gi % 16]) = pc;
+                *ptr::addr_of_mut!(DBG_GUEST_PC_IDX) = gi.wrapping_add(1);
+            }
+            // ── SLUB cmpxchg_double DEADLOCK operand trace ──────────────────
+            // The /init mmap path deadlocks in ___slab_alloc's __cmpxchg_double_slab
+            // LL/SC loop at VA 0xffffffc00831f248:
+            //   prfm; ldxp x1,x0,[x20]; eor x1,x23; eor x0,x28; orr; cbnz(skip);
+            //   stlxp w1,x24,x3,[x20]; cbnz(retry); dmb; ...
+            // x20 = &slab->freelist (cmpxchg addr), x23:x28 = expected old
+            // freelist:counters (loaded by the prior ldp), x24:x3 = new. On a
+            // single CPU this MUST match+commit first try. Dump the operands AND
+            // walk the SAME VA for both read+write translation to expose a
+            // read/write PA mismatch (ldxp reads one PA, stlxp writes another →
+            // store invisible → livelock) or a stale ldp vs in-memory value.
+            // GATED to the deadlock window (iter > 110M) — the slab cmpxchg runs
+            // constantly during normal boot, so an ungated trap caught early
+            // healthy usage, NOT the spin. At the deadlock dump the cmpxchg
+            // operands AND walk the cpu-partial list (slab->next @ [slab+8]) to
+            // detect a CIRCULAR list (the loop at 0x831f1a0-0x831f1bc follows
+            // slab->next forever → a cycle there is the infinite loop).
+            // (SLUB put_cpu_partial self-cycle trap removed — the CAS-width fix
+            // resolved the deadlock; the new kernel now boots past it into Android
+            // first-stage init at EL0.)
+            // memcpy corrupt-size guard: bionic memcpy entry is /init VA 0x35aaf0
+            // (x0=dst, x1=src, x2=len). A len > 1 MiB during first-stage cmdline
+            // parsing is a corrupt size (the std::string resize miscomputed it) —
+            // memcpy then overruns into the caller's stack frame, zeroing its saved
+            // x30 → RET to NULL. Catch it AT THE SOURCE: dump args + return address
+            // (the resize call site) + the recent PC ring. One-shot.
+            if pc == 0x35aaf0 {
+                let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                let len = g[2];
+                if len > 0x10_0000 {
+                    static mut MEMCPY_GUARD: bool = false;
+                    if !*ptr::addr_of!(MEMCPY_GUARD) {
+                        *ptr::addr_of_mut!(MEMCPY_GUARD) = true;
+                        dual_puts(b"[mcpy] *** HUGE memcpy *** dst=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b" src=");
+                        dual_puthex64(g[1]);
+                        dual_puts(b" len=");
+                        dual_puthex64(len);
+                        dual_puts(b" x30(ret)=");
+                        dual_puthex64(g[30]);
+                        dual_puts(b" sp_el0=");
+                        dual_puthex64(g[aether_translator::runtime::context::SYSREG_SLOT0 + 16]);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n");
+                        let mut gr = 0usize;
+                        while gr < 31 {
+                            dual_puts(b"[mcpy] x");
+                            dual_puthex64(gr as u64);
+                            dual_puts(b"=");
+                            dual_puthex64(g[gr]);
+                            dual_puts(b"\n");
+                            gr += 1;
+                        }
+                        let idx = *ptr::addr_of!(DBG_GUEST_PC_IDX);
+                        let mut k = 0usize;
+                        while k < 16 {
+                            let rp = *ptr::addr_of!(DBG_GUEST_PC_RING[(idx as usize + k) % 16]);
+                            dual_puts(b"[mcpy] ring[");
+                            dual_puthex64(k as u64);
+                            dual_puts(b"]=");
+                            dual_puthex64(rp);
+                            dual_puts(b"\n");
+                            k += 1;
+                        }
+                    }
+                }
+            }
+            // Phase-G clear_page DC-ZVA self-loop probe. The boot wedges in the
+            // clear_page block [0x8f1b4c4: dc zva,x0; add x0,x0,x1; tst x0,#0xfff;
+            // b.ne]. x1 = DC-ZVA block size (= 64; DCZID_EL0 seeded 0x4). The
+            // loop must zero a 4 KiB page in 64-byte steps and exit when x0 is
+            // 4 KiB-aligned. It never exits → dump x0 + x1 at the loop head on
+            // the first hit and periodically: x1==0 ⇒ block-size compute bug,
+            // x0 frozen ⇒ `add` lost, x0 climbing-but-misaligned ⇒ tst/b.ne flags.
+            {
+                // Block B = loop body (0x8f1b4c4); block A = clear_page entry
+                // that recomputes the block size (0x8f1b4b8). If A's count grows
+                // ~1:64 with B's, clear_page is being re-called per page (a legit
+                // large memzero, just slow); if A stays ~0 while B runs away,
+                // `tst x0,#0xfff; b.ne` is not exiting (a real flag/exit bug).
+                static mut ZVA_B: u64 = 0;
+                static mut ZVA_A: u64 = 0;
+                if pc == 0xFFFF_FFC0_08F1_B4B8 {
+                    *ptr::addr_of_mut!(ZVA_A) = (*ptr::addr_of!(ZVA_A)).wrapping_add(1);
+                }
+                if pc == 0xFFFF_FFC0_08F1_B4C4 {
+                    let n = *ptr::addr_of!(ZVA_B);
+                    *ptr::addr_of_mut!(ZVA_B) = n.wrapping_add(1);
+                    if n < 4 || (n & 0xFFF) == 0 {
+                        let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                        com1_puts(b"[zva] B=");
+                        com1_puthex64(n);
+                        com1_puts(b" A=");
+                        com1_puthex64(*ptr::addr_of!(ZVA_A));
+                        com1_puts(b" iter=");
+                        com1_puthex64(iter);
+                        com1_puts(b" x0=");
+                        com1_puthex64(g[0]);
+                        com1_puts(b" x1=");
+                        com1_puthex64(g[1]);
+                        com1_puts(b"\n");
+                    }
+                }
+            }
+            // Phase-G parse_args investigation: the boot parks at the cmdline
+            // param-search loop (0x80d9f04). Dump its outer-loop bound N
+            // (= [x29-0x20], the param-table entry count) + key regs the FIRST
+            // time and every ~4M revisits, COM1+FB. A corrupt huge N ⇒ a
+            // count-computation lifter bug; a sane N with x23 not climbing ⇒
+            // the inner compare never converges. Bounded so it can't flood.
+            {
+                static mut PA_HITS: u64 = 0;
+                if pc == 0xFFFF_FFC0_080D_9F04 {
+                    let h = *ptr::addr_of!(PA_HITS);
+                    *ptr::addr_of_mut!(PA_HITS) = h.wrapping_add(1);
+                    if h == 0 || (h & 0x3F_FFFF) == 0 {
+                        let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                        let x29 = g[29];
+                        let nva = x29.wrapping_sub(0x20);
+                        let npa = aether_translator::runtime::mmu::aether_mmu_xlate(
+                            ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, nva, 0, 8);
+                        let nval = if npa != 0 { ptr::read_volatile(npa as *const u64) } else { 0xDEAD_DEAD };
+                        dual_puts(b"[parse_args] hit#=");
+                        dual_puthex64(h);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" N(bound)=");
+                        dual_puthex64(nval);
+                        dual_puts(b" x23(idx)=");
+                        dual_puthex64(g[23]);
+                        dual_puts(b" x24(tbl)=");
+                        dual_puthex64(g[24]);
+                        dual_puts(b" x9(qstr)=");
+                        dual_puthex64(g[9]);
+                        dual_puts(b" x0(len)=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b" x29=");
+                        dual_puthex64(x29);
+                        dual_puts(b"\n");
+                    }
+                }
+            }
+            // Phase-G post-memzero death-window trace. The boot consistently
+            // ends (QEMU "exited on its own", a host triple-fault that bypasses
+            // the IDT — no [idt] log) at iter ~0xcd970d, right at/after the
+            // full-RAM memzero. Trace every block PC to COM1-only across that
+            // window so the LAST line before QEMU terminates is the block whose
+            // translated x86 faulted. Capped; COM1 file writes are per-byte.
+            {
+                static mut DW2_N: u64 = 0;
+                if iter > 0xFFFF_FFFF_0000 {  // disabled (was 0xCD9000 death-window trace)
+                    let n = *ptr::addr_of!(DW2_N);
+                    if n < 60_000 {
+                        *ptr::addr_of_mut!(DW2_N) = n + 1;
+                        com1_puts(b"[dw2] pc=");
+                        com1_puthex64(pc);
+                        com1_puts(b" i=");
+                        com1_puthex64(iter);
+                        com1_puts(b"\n");
+                    }
+                }
+            }
 
             // Phase B step 1: panic-site PC hook. When the block PC reaches
             // setup_machine_fdt's panic call (image+0x19e5824 ==
@@ -3748,12 +4596,20 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                 // Hook every memcpy call into the eBPF buffer. memcpy entry
                 // is the BTI at 0x8f1de20; the 16..32B fast path branches to
                 // 0x8f1de44. Capture x0/dst x1/src x2/size for ALL memcpys
-                // whose dst lands in the eBPF buffer. When we see memcpy #1
-                // (the suspect 32-byte one writing insn[17..20]), FREEZE the
-                // store tracker so the 8192-entry ring preserves the writes
-                // that POPULATED the src buffer — those are the stores
-                // immediately preceding memcpy and identify whoever
-                // (mis)filled src+24 = the slot that becomes insn[20]=0.
+                // whose dst lands in the eBPF buffer.
+                //
+                // Phase-G PASS-2 narrowing: bpf_convert_filter runs TWO passes.
+                // memcpy #0 = PASS-1 copy of insn[17..20] from a stack scratch
+                // (4 × bpf_insn struct). memcpy #1 = PASS-2 jump-offset fixup
+                // copy from a DIFFERENT (or reused) stack scratch — and that
+                // is where insn[20] gets zeroed. The store tracker's secondary
+                // VA range is armed AT memcpy #0 over [src - 0x80, src + 0x80)
+                // so every byte written to PASS-2's stack scratch buffer
+                // BETWEEN memcpy #0 and memcpy #1 is captured. On memcpy #1
+                // we freeze the tracker (both ranges) so the dump preserves
+                // the exact PASS-2 stack-build sequence — the IR op that
+                // FAILS to write to src+24 (= the slot that becomes insn[20])
+                // is in that captured sequence.
                 {
                     static mut MEMCPY_HITS: u32 = 0;
                     let g = &*ptr::addr_of!(NPF_GUEST_CTX);
@@ -3765,7 +4621,88 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                     {
                         let n = *ptr::addr_of!(MEMCPY_HITS);
                         *ptr::addr_of_mut!(MEMCPY_HITS) = n + 1;
+                        let src1 = g[1];
                         dual_puts(b"[memcpy->ebpf] #");
+                        dual_puthex64(n as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b" dst=");
+                        dual_puthex64(g[0]);
+                        dual_puts(b" src=");
+                        dual_puthex64(src1);
+                        dual_puts(b" n=");
+                        dual_puthex64(g[2]);
+                        dual_puts(b"\n");
+                        // On hit #0: arm the secondary range over the stack
+                        // scratch buffer so the next ~30 stores (PASS-2's
+                        // stack build) get captured alongside the primary
+                        // eBPF range. 256-byte window is plenty for a
+                        // 4 × 8-byte bpf_insn scratch with slack on either side.
+                        // Phase-G x30 hunt: range2 arm DISABLED — it would add
+                        // the bpf stack-scratch window to the init-stack ring
+                        // and flood it before the (later) x30 OOPS.
+                        let _ = src1;
+                        if n == 0 {
+                            dual_puts(b"[memcpy->ebpf] (range2 arm suppressed for x30 hunt)\n");
+                        }
+                        // Freeze the tracker RIGHT AFTER memcpy #1's src
+                        // dump (the bytes that became insn[17..20]). The
+                        // ring then preserves the writes to the staging
+                        // buffer at 0x800b850 that PREPARED memcpy #1's
+                        // data — the buggy lifter PC that produced 0 at
+                        // offset +0x18 is in those preserved entries.
+                        // Phase-G x30 hunt: freeze DISABLED — the init-stack
+                        // ring must stay live until the [x30!] trap freezes it
+                        // at the actual corruption (which happens long after
+                        // these bpf-buffer memcpys).
+                        if n == 1 {
+                            dual_puts(b"[memcpy->ebpf] (freeze suppressed for x30 hunt)\n");
+                        }
+                        //
+                        // Diagnostic dump: print the bytes the memcpy is
+                        // about to read from src. The static Image content
+                        // at this VA is NOPs (0xd503201f), so if the
+                        // runtime bytes are also NOPs we know we're hooking
+                        // the wrong path; if they're real BPF insns we know
+                        // the dst-side LDP/STP lifter is the suspect.
+                        if n <= 2 {
+                            let mut off = 0u64;
+                            while off < g[2].min(0x40) {
+                                let va = src1.wrapping_add(off);
+                                let pa = aether_translator::runtime::mmu::aether_mmu_xlate(
+                                    ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                                if pa == 0 { break; }
+                                let v = ptr::read_volatile(pa as *const u64);
+                                dual_puts(b"[memcpy->src]   +");
+                                dual_puthex64(off);
+                                dual_puts(b" @va=");
+                                dual_puthex64(va);
+                                dual_puts(b" = ");
+                                dual_puthex64(v);
+                                dual_puts(b"\n");
+                                off += 8;
+                            }
+                        }
+                    }
+                }
+                // LDP x6,x7 / LDP x12,x13 dump for the 16..32B memcpy fast
+                // path. We arrive here at PC 0x8f1de4c (the FIRST STP) AFTER
+                // both LDPs have run, so x6, x7, x12, x13 hold the data the
+                // STP pair is about to write to dst. By comparing these
+                // values against what eventually shows up in the eBPF buffer
+                // we can localize a wrong-load (LDP) vs wrong-store (STP).
+                {
+                    static mut LDP_HITS: u32 = 0;
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    let dst = g[0];
+                    if pc == 0xFFFF_FFC0_08F1_DE4C
+                       && dst >= 0xFFFF_FFC0_0A0F_5000
+                       && dst <  0xFFFF_FFC0_0A0F_5200
+                       && *ptr::addr_of!(LDP_HITS) < 4
+                    {
+                        let n = *ptr::addr_of!(LDP_HITS);
+                        *ptr::addr_of_mut!(LDP_HITS) = n + 1;
+                        dual_puts(b"[memcpy->ldp] #");
                         dual_puthex64(n as u64);
                         dual_puts(b" iter=");
                         dual_puthex64(iter);
@@ -3775,10 +4712,15 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                         dual_puthex64(g[1]);
                         dual_puts(b" n=");
                         dual_puthex64(g[2]);
+                        dual_puts(b"\n  x6=");
+                        dual_puthex64(g[6]);
+                        dual_puts(b" x7=");
+                        dual_puthex64(g[7]);
+                        dual_puts(b"\n  x12=");
+                        dual_puthex64(g[12]);
+                        dual_puts(b" x13=");
+                        dual_puthex64(g[13]);
                         dual_puts(b"\n");
-                        // Don't freeze — let the tracker capture writes AFTER
-                        // memcpy too, so we can see if anything zeroes
-                        // insn[20] post-memcpy.
                     }
                 }
                 // Phase-D CRC32 fault diagnostics. The kernel hits a translation
@@ -4016,6 +4958,113 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                             dual_puts(b" vbar=");
                             dual_puthex64(cur_vbar);
                             dual_puts(b"\n");
+                            // NULL-fetch source trap: a fetch of VA < 0x1000 means
+                            // the block JUST run branched to (near-)NULL — a
+                            // corrupted/unresolved function pointer or return
+                            // address. The fetch-abort target (pc) is the symptom;
+                            // the SOURCE is the previous block. Dump the guest-PC
+                            // ring (newest entry is this `pc`==0, the one before it
+                            // is the branching block) + the GPR file (one register
+                            // holds 0 — the BR/BLR/RET source) + SP. One-shot so it
+                            // doesn't drown the log if the kernel retries.
+                            if pc < 0x1000 {
+                                static mut NULLFETCH_DUMPED: bool = false;
+                                if !*ptr::addr_of!(NULLFETCH_DUMPED) {
+                                    *ptr::addr_of_mut!(NULLFETCH_DUMPED) = true;
+                                    let cur_el = (g[SR0 + 42] >> 2) & 0b11;
+                                    dual_puts(b"[nfetch] *** BRANCH TO NULL *** target=");
+                                    dual_puthex64(pc);
+                                    dual_puts(b" curEL=");
+                                    dual_puthex64(cur_el);
+                                    dual_puts(b" elr_el1=");
+                                    dual_puthex64(g[SR0 + 13]);
+                                    dual_puts(b" sp_el0=");
+                                    dual_puthex64(g[SR0 + 16]);
+                                    dual_puts(b"\n");
+                                    let idx = *ptr::addr_of!(DBG_GUEST_PC_IDX);
+                                    let mut k = 0usize;
+                                    while k < 16 {
+                                        // oldest..newest in execution order
+                                        let slot = (idx as usize + k) % 16;
+                                        let rp = *ptr::addr_of!(DBG_GUEST_PC_RING[slot]);
+                                        dual_puts(b"[nfetch] ring[");
+                                        dual_puthex64(k as u64);
+                                        dual_puts(b"]=");
+                                        dual_puthex64(rp);
+                                        if k == 14 { dual_puts(b"  <== branching block"); }
+                                        dual_puts(b"\n");
+                                        k += 1;
+                                    }
+                                    let mut r = 0usize;
+                                    while r < 31 {
+                                        dual_puts(b"[nfetch] x");
+                                        dual_puthex64(r as u64);
+                                        dual_puts(b"=");
+                                        dual_puthex64(g[r]);
+                                        if g[r] == 0 { dual_puts(b"  <== zero"); }
+                                        dual_puts(b"\n");
+                                        r += 1;
+                                    }
+                                    dual_puts(b"[nfetch] x30(lr)=");
+                                    dual_puthex64(g[30]);
+                                    dual_puts(b" sp=");
+                                    dual_puthex64(g[0xF8 / 8]);
+                                    dual_puts(b" scatter_set=");
+                                    dual_puthex64(*ptr::addr_of!(
+                                        aether_translator::runtime::mmu::SCATTER_SET_COUNT));
+                                    dual_puts(b" scatter_flush=");
+                                    dual_puthex64(*ptr::addr_of!(
+                                        aether_translator::runtime::mmu::SCATTER_FLUSH_COUNT));
+                                    dual_puts(b"\n");
+                                    // FILE struct around x19 ([+0x00..+0x58]) — the
+                                    // call was `ldr x8,[x19,#0x50]; blr x8` with
+                                    // x8==0, i.e. a stdio FILE whose _write fp is 0.
+                                    // _cookie@0x30, _write@0x50. See which fields the
+                                    // setup actually populated.
+                                    let fbase = g[19];
+                                    let mut fo = 0u64;
+                                    while fo <= 0x58 {
+                                        let va = fbase.wrapping_add(fo);
+                                        let pa = aether_translator::runtime::mmu::aether_mmu_xlate(
+                                            ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                                        dual_puts(b"[nfetch] FILE+");
+                                        dual_puthex64(fo);
+                                        dual_puts(b" = ");
+                                        if pa != 0 { dual_puthex64(ptr::read_volatile(pa as *const u64)); }
+                                        else { dual_puts(b"<flt>"); }
+                                        dual_puts(b"\n");
+                                        fo += 8;
+                                    }
+                                    // Frame-pointer (x29) unwind — print each saved
+                                    // return address. One of these is the function
+                                    // (vsnprintf/__vfprintf) that BUILT this FILE and
+                                    // failed to store _write; disasm it to find the
+                                    // miscompiled setup store.
+                                    let mut fp = g[29];
+                                    let mut depth = 0u64;
+                                    while depth < 12 {
+                                        if fp < 0x1000 || (fp & 7) != 0 { break; }
+                                        let pfp = aether_translator::runtime::mmu::aether_mmu_xlate(
+                                            ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, fp, 0, 8);
+                                        let plr = aether_translator::runtime::mmu::aether_mmu_xlate(
+                                            ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64,
+                                            fp.wrapping_add(8), 0, 8);
+                                        if pfp == 0 || plr == 0 { break; }
+                                        let saved_fp = ptr::read_volatile(pfp as *const u64);
+                                        let saved_lr = ptr::read_volatile(plr as *const u64);
+                                        dual_puts(b"[nfetch] frame[");
+                                        dual_puthex64(depth);
+                                        dual_puts(b"] lr=");
+                                        dual_puthex64(saved_lr);
+                                        dual_puts(b" fp=");
+                                        dual_puthex64(saved_fp);
+                                        dual_puts(b"\n");
+                                        if saved_fp <= fp { break; } // unwind must ascend
+                                        fp = saved_fp;
+                                        depth += 1;
+                                    }
+                                }
+                            }
                             // C.3 MANDATORY: short-circuit fetch-abort loops
                             // when VBAR_EL1 is still 0. Without VBAR set the
                             // dispatcher will spin to FETCH_ABORT_STREAK_MAX
@@ -4094,9 +5143,19 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
             *ptr::addr_of_mut!(RING_IDX) = (*ptr::addr_of!(RING_IDX)).wrapping_add(1);
             if pc != prev_traced_pc {
                 if loop_reps > 0 {
-                    dual_puts(b"[dbt]   ^ looped ");
-                    dual_puthex64(loop_reps);
-                    dual_puts(b"x\n");
+                    // Only emit the "looped Nx" collapse line during the early
+                    // trace window or on a heartbeat. Un-gated it floods COM1 +
+                    // the framebuffer once per loop-exit; loop-heavy initcall
+                    // phases (e.g. per-element table init) emit tens of
+                    // thousands of these, and framebuffer text rendering under
+                    // TCG is so slow it dominates wall-clock (~1000x boot
+                    // slowdown observed). The repeat count is still useful, so
+                    // keep it where the trajectory is already being printed.
+                    if distinct_blocks <= DBT_TRACE_FIRST || iter % TRACE_PERIOD == 0 {
+                        dual_puts(b"[dbt]   ^ looped ");
+                        dual_puthex64(loop_reps);
+                        dual_puts(b"x\n");
+                    }
                     loop_reps = 0;
                 }
                 distinct_blocks += 1;
@@ -4115,6 +5174,15 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                     if iter % TRACE_PERIOD == 0 {
                         // Heartbeat: also surface common loop-counter regs so a
                         // runaway loop (corrupted width/limit) is diagnosable.
+                        // Phase-G host-stack-overflow probe: read the live host
+                        // RSP. If it drifts DOWN heartbeat-over-heartbeat, a
+                        // per-block stack leak is walking RSP into an unmapped
+                        // page (the #PF→#DF→triple at iter ~0xcdc793). A stable
+                        // RSP points instead to a page-table hole / deep call.
+                        let rsp_now: u64;
+                        core::arch::asm!("mov {}, rsp", out(reg) rsp_now, options(nomem, nostack));
+                        dual_puts(b" rsp=");
+                        dual_puthex64(rsp_now);
                         let g = &*ptr::addr_of!(NPF_GUEST_CTX);
                         dual_puts(b" x9=");
                         dual_puthex64(g[9]);
@@ -4297,6 +5365,15 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
             }
 
             // 3. Cold-translate (idempotent: a cache hit returns Ok immediately).
+            //    NOTE: the per-translation scratch (IrFunction / regalloc maps /
+            //    encoder Vecs) leaks into the never-freeing bump heap — a real
+            //    leak (~KB/cold block) addressed by a larger HEAP_SIZE (lib.rs),
+            //    not by resetting the GLOBAL bump pointer: a reset would also
+            //    reclaim any lazily-initialised global allocated during the
+            //    bracketed call (Rust runtime statics, etc.), corrupting it
+            //    (observed: BTreeMap use-after-free panic at iter 0x2e0). A
+            //    dedicated scratch arena threaded through translate is the proper
+            //    fix; deferred.
             if aether_dbt_translate_block(pc, bytes) != AetherDbtResult::Ok {
                 let (fpc, fw, fkind) = aether_dbt_last_failure();
                 dual_puts(b"[dbt] TranslateFail pc=");
@@ -4566,6 +5643,26 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                     dual_puts(b" cnt=");
                     dual_puthex64(cur_unsafe as u64);
                     dual_puts(b"\n");
+                    // Dump the block's ARM instruction WORDS so the unimplemented
+                    // op can be identified. Userspace code (linker64/bionic/init)
+                    // is demand-paged from the ramdisk, NOT in ./Image, so these
+                    // raw words are the only way to find the gap — decode each
+                    // with `tools/dva.py word <hex>`. (`bytes` is the guest
+                    // instruction window the lifter just consumed.)
+                    {
+                        dual_puts(b"[dbt]   arm:");
+                        let mut wi = 0usize;
+                        while wi < 24 && wi * 4 + 4 <= bytes.len() {
+                            let w = u32::from_le_bytes([
+                                bytes[wi * 4], bytes[wi * 4 + 1],
+                                bytes[wi * 4 + 2], bytes[wi * 4 + 3],
+                            ]);
+                            dual_puts(b" ");
+                            dual_puthex64(w as u64);
+                            wi += 1;
+                        }
+                        dual_puts(b"\n");
+                    }
                     // Phase-E investigation: dump the first 192 bytes of the
                     // UNSAFE block AND the byte offset of the UD2 sentinel so
                     // the lowering arm can be identified from the byte
@@ -4729,6 +5826,165 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                     // legitimate timed delay loop resets this well before the
                     // limit; only a truly unchanging spin trips it.)
                     let new_pc = (*ptr::addr_of!(NPF_GUEST_CTX))[NPF_PC_SLOT];
+                    // ── Phase-G x30 / indirect-branch corruption trap ─────────
+                    // The block just executed wrote a branch target < 0x1000
+                    // into PC. No legitimate kernel/EL1 code lives in page 0
+                    // (kernel VAs are 0xffffffc0_xxxxxxxx; pre-MMU PAs sit in
+                    // the multi-GiB handoff window), so this IS the root
+                    // function-pointer corruption the kernel OOPS (pc=lr=x9=
+                    // 0x42) reacts to one exception later. Snapshot full state
+                    // HERE, before the kernel's fault machinery overwrites it.
+                    if new_pc != 0 && new_pc < 0x1000 {
+                        // Freeze the ring FIRST so the diagnostic xlate reads
+                        // below (which touch the armed slot window) don't append
+                        // their own LOAD entries and pollute the history.
+                        aether_translator::runtime::mmu::aether_freeze_ebpf_store_trace();
+                        let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                        dual_puts(b"[x30!] *** INVALID BRANCH TARGET *** new_pc=");
+                        dual_puthex64(new_pc);
+                        dual_puts(b" block_pc=");
+                        dual_puthex64(pc);
+                        dual_puts(b" insn0=");
+                        dual_puthex64(insn0 as u64);
+                        dual_puts(b" iter=");
+                        dual_puthex64(iter);
+                        dual_puts(b"\n");
+                        // 1) GPR file — flag every register equal to the target
+                        //    (RET sources x30; BR/BLR xN sources xN).
+                        let mut r = 0usize;
+                        while r < 31 {
+                            dual_puts(b"[x30!]   x");
+                            dual_puthex64(r as u64);
+                            dual_puts(b"=");
+                            dual_puthex64(g[r]);
+                            if g[r] == new_pc { dual_puts(b"  <== equals target"); }
+                            dual_puts(b"\n");
+                            r += 1;
+                        }
+                        let sp_now = g[0xF8 / 8];
+                        dual_puts(b"[x30!]   sp=");
+                        dual_puthex64(sp_now);
+                        dual_puts(b" x30(lr)=");
+                        dual_puthex64(g[30]);
+                        dual_puts(b"\n");
+                        // 2) Faulting block's guest instructions (the epilogue:
+                        //    expect LDP x29,x30 + RET, or LDR + BR/BLR).
+                        dual_puts(b"[x30!] faulting block insns:\n");
+                        let nb = if len > 80 { 80 } else { len };
+                        let mut bi = 0usize;
+                        while bi + 4 <= nb {
+                            let w = u32::from_le_bytes(
+                                [bytes[bi], bytes[bi + 1], bytes[bi + 2], bytes[bi + 3]]);
+                            dual_puts(b"[x30!]   pc=");
+                            dual_puthex64(pc.wrapping_add(bi as u64));
+                            dual_puts(b" = ");
+                            dual_puthex64(w as u64);
+                            dual_puts(b"\n");
+                            bi += 4;
+                        }
+                        // 3) Physical stack frame around SP + the suspect saved-
+                        //    x30 slot region, read through the dispatcher's own
+                        //    walker so VA->PA matches the guest's view. This is
+                        //    the load-vs-store discriminator: if the slot here
+                        //    holds the corrupt value, it is a store-side bug; if
+                        //    it holds a sane return address yet x30 is garbage,
+                        //    the LOAD miscompiled.
+                        dual_puts(b"[x30!] stack @ sp:\n");
+                        let sp_base = sp_now & !0x7u64;
+                        let mut k = 0u64;
+                        while k < 12 {
+                            let va = sp_base.wrapping_add(k * 8);
+                            let pa = aether_translator::runtime::mmu::aether_mmu_xlate(
+                                ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                            dual_puts(b"[x30!]   @");
+                            dual_puthex64(va);
+                            dual_puts(b" = ");
+                            if pa != 0 { dual_puthex64(ptr::read_volatile(pa as *const u64)); }
+                            else { dual_puts(b"<xlate-flt>"); }
+                            dual_puts(b"\n");
+                            k += 1;
+                        }
+                        dual_puts(b"[x30!] suspect slot region (0x...0800ba40+):\n");
+                        let mut k = 0u64;
+                        while k < 8 {
+                            let va = 0xFFFF_FFC0_0800_BA40u64.wrapping_add(k * 8);
+                            let pa = aether_translator::runtime::mmu::aether_mmu_xlate(
+                                ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                            dual_puts(b"[x30!]   @");
+                            dual_puthex64(va);
+                            dual_puts(b" = ");
+                            if pa != 0 { dual_puthex64(ptr::read_volatile(pa as *const u64)); }
+                            else { dual_puts(b"<xlate-flt>"); }
+                            dual_puts(b"\n");
+                            k += 1;
+                        }
+                        // 4) PC ring — the call chain that led into this block.
+                        dual_puts(b"[x30!] PRE-FAULT pc ring (oldest first):\n");
+                        let cur = *ptr::addr_of!(RING_IDX);
+                        let mut ri = 0usize;
+                        while ri < RING_LEN {
+                            let slot = (cur + ri) % RING_LEN;
+                            let p = *ptr::addr_of!(PC_RING[slot]);
+                            let ins = *ptr::addr_of!(INSN_RING[slot]);
+                            if p != 0 {
+                                dual_puts(b"[x30!]   pc=");
+                                dual_puthex64(p);
+                                dual_puts(b" insn=");
+                                dual_puthex64(ins as u64);
+                                dual_puts(b"\n");
+                            }
+                            ri += 1;
+                        }
+                        // 5) The init-stack store/load ring, filtered to the
+                        //    suspect slot neighbourhood. Flag decode (size byte):
+                        //    0x40=LOAD (val=physical read), 0x80=PAIR/WIDE STORE
+                        //    (val unknown sentinel), else single STR (real val).
+                        let store_idx = *ptr::addr_of!(
+                            aether_translator::runtime::mmu::EBPF_STORE_IDX);
+                        let cap = aether_translator::runtime::mmu::EBPF_STORE_CAP as u64;
+                        dual_puts(b"[x30!] init-stack ring (total=");
+                        dual_puthex64(store_idx);
+                        dual_puts(b") slot 0x...ba00-0x...bb00:\n");
+                        let start = if store_idx > cap { store_idx - cap } else { 0 };
+                        let mut e = start;
+                        while e < store_idx {
+                            let i = (e as usize)
+                                % aether_translator::runtime::mmu::EBPF_STORE_CAP;
+                            let va_s = *ptr::addr_of!(
+                                aether_translator::runtime::mmu::EBPF_STORE_VA[i]);
+                            if va_s >= 0xFFFF_FFC0_0800_BA00 && va_s < 0xFFFF_FFC0_0800_BB00 {
+                                let pc_s = *ptr::addr_of!(
+                                    aether_translator::runtime::mmu::EBPF_STORE_PC[i]);
+                                let val_s = *ptr::addr_of!(
+                                    aether_translator::runtime::mmu::EBPF_STORE_VAL[i]);
+                                let sz_s = *ptr::addr_of!(
+                                    aether_translator::runtime::mmu::EBPF_STORE_SIZE[i]);
+                                let seq_s = *ptr::addr_of!(
+                                    aether_translator::runtime::mmu::EBPF_STORE_SEQ[i]);
+                                dual_puts(b"[x30!]   seq=");
+                                dual_puthex64(seq_s);
+                                if sz_s & 0x40 != 0 { dual_puts(b" LOAD  "); }
+                                else if sz_s & 0x80 != 0 { dual_puts(b" STORE*"); }
+                                else { dual_puts(b" STORE "); }
+                                dual_puts(b"sz=");
+                                dual_puthex64((sz_s & 0x3F) as u64);
+                                dual_puts(b" pc=");
+                                dual_puthex64(pc_s);
+                                dual_puts(b" va=");
+                                dual_puthex64(va_s);
+                                dual_puts(b" val=");
+                                dual_puthex64(val_s);
+                                dual_puts(b"\n");
+                            }
+                            e += 1;
+                        }
+                        exit_code = 9;
+                        sum_pc = pc;
+                        sum_a = new_pc;
+                        sum_b = insn0 as u64;
+                        sum_iter = iter;
+                        break;
+                    }
                     if new_pc == pc {
                         same_pc += 1;
                         if same_pc >= NO_PROGRESS_LIMIT {
@@ -4838,6 +6094,41 @@ unsafe fn run_android_dispatch_loop(regs: crate::android_handoff::DbtInitialRegs
                 i += 1;
             }
         }
+        // [dcache-hunt] Dump VMM-ring entries flagged with the UTF-16 store
+        // pattern (kind=9) — the mistranslated store(s) that corrupt a dentry
+        // pointer (new GCC kernel __d_lookup_rcu Oops). Each prints the guest PC.
+        {
+            let idx = *ptr::addr_of!(aether_translator::runtime::mmu::VMM_TRACE_IDX);
+            let cap = aether_translator::runtime::mmu::VMM_TRACE_CAP as u64;
+            let n = if idx < cap { idx } else { cap };
+            let start = if idx > cap { idx - cap } else { 0 };
+            dual_puts(b"[dcache] UTF16-store ring (idx=");
+            dual_puthex64(idx);
+            dual_puts(b"):\n");
+            let mut i: u64 = 0;
+            while i < n {
+                let slot = ((start + i) as usize) % aether_translator::runtime::mmu::VMM_TRACE_CAP;
+                let kind = *ptr::addr_of!(aether_translator::runtime::mmu::VMM_TRACE_KIND[slot]);
+                if kind == 9 {
+                    dual_puts(b"  STR8 va=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::VMM_TRACE_VA[slot]));
+                    dual_puts(b" val=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::VMM_TRACE_VAL[slot]));
+                    dual_puts(b" pc=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::VMM_TRACE_PC[slot]));
+                    dual_puts(b"\n");
+                } else if kind == 10 {
+                    dual_puts(b"  REGS x3(base)=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::VMM_TRACE_VA[slot]));
+                    dual_puts(b" x4(bucket)=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::VMM_TRACE_PA[slot]));
+                    dual_puts(b" loadVA=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::VMM_TRACE_VAL[slot]));
+                    dual_puts(b"\n");
+                }
+                i += 1;
+            }
+        }
         dual_puts(b"[x86] host-mode dispatch loop exited. Halting.\n");
         // Guaranteed-readable post-mortem: clear the framebuffer (which may have
         // scrolled the decisive line off-screen) and paint one concise box. COM1
@@ -4935,6 +6226,16 @@ unsafe fn paint_dispatch_summary(
                 fb_text_puts(b"  pc = ");
                 fb_text_puthex64(pc);
                 fb_text_puts(b"\n");
+            }
+            9 => {
+                fb_text_puts(b"x30/INDIRECT-BRANCH CORRUPTION (target < 0x1000)\n");
+                fb_text_puts(b"  block pc = ");
+                fb_text_puthex64(pc);
+                fb_text_puts(b"\n  target   = ");
+                fb_text_puthex64(a);
+                fb_text_puts(b"\n  insn0    = ");
+                fb_text_puthex64(b);
+                fb_text_puts(b"\n  (see [x30!] dump on COM1)\n");
             }
             _ => {
                 fb_text_puts(b"host_va miss after Ok translate (INTERNAL BUG)\n");

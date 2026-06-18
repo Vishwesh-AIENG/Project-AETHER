@@ -206,8 +206,9 @@ impl Dispatcher {
             .map_err(|_| DispatchError::CodeBufFull)?;
         self.code_buf.commit();
 
-        // 8. Cache.
-        self.cache.insert(guest_pc, offset, code.len());
+        // 8. Cache (with the structural-safety verdict computed once here).
+        let safe = crate::dbt::block_bytes_are_safe(&code);
+        self.cache.insert(guest_pc, offset, code.len(), safe);
 
         Ok((offset, code.len()))
     }

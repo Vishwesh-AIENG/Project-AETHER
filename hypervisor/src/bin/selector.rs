@@ -37,7 +37,10 @@ use hypervisor::uefi_boot_selector::{
 #[panic_handler]
 fn panic(_: &PanicInfo) -> ! {
     loop {
+        #[cfg(target_arch = "x86_64")]
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        #[cfg(target_arch = "aarch64")]
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
     }
 }
 
@@ -530,7 +533,12 @@ pub extern "efiapi" fn efi_main(
         Ok(s) => s,
         Err(_) => {
             unsafe { puts(st, b"      Selector config invalid. Halting.\r\n"); }
-            loop { unsafe { core::arch::asm!("hlt", options(nomem, nostack)); } }
+            loop {
+                #[cfg(target_arch = "x86_64")]
+                unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+                #[cfg(target_arch = "aarch64")]
+                unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+            }
         }
     };
 

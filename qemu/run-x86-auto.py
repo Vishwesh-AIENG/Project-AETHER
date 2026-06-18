@@ -130,10 +130,25 @@ def main():
     # nothing backing those PAs and the JIT path silently corrupts staged
     # kernel bytes (seen as iter-1 insn=0 UD2). Override via MEM=… if needed.
     mem = os.environ.get("MEM", "16G")
+    # WHPX=1 selects Windows Hypervisor Platform hardware acceleration instead of
+    # TCG software emulation. Requires the AETHER hypervisor.efi built with the
+    # `whpx_hostmode` Cargo feature (skips VMXON so no nested VMX is needed — WHPX
+    # does not expose it). ~10-100x faster than TCG; the only realistic way to
+    # drive the Android boot to the display gate. -cpu host (TCG uses -cpu max).
+    if os.environ.get("WHPX"):
+        accel = "whpx"
+        # Disable VMX/SVM in the guest CPU: the whpx_hostmode hypervisor never
+        # executes VMXON, so it does not need them, and exposing them makes QEMU
+        # try to enable NESTED virtualization (which WHPX rejects: hr=80370302).
+        cpu = "host,-vmx,-svm"
+    else:
+        accel = "tcg,tb-size=512"
+        cpu = "max"
     cmd = [
         QEMU_BIN,
-        "-machine", "q35,accel=tcg",
-        "-cpu", "max",
+        "-machine", "q35",
+        "-accel", accel,
+        "-cpu", cpu,
         "-m", mem,
         "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF}",
         "-drive", f"format=raw,file=fat:rw:{EFI_DIR}",
@@ -147,15 +162,44 @@ def main():
         cmd += ["-drive", f"file={boot_img},if=none,id=android0,format=raw",
                 "-device", "virtio-blk-pci,drive=android0"]
 
+    # Phase 3 PIVOT — AOSP system image as a PMEM block device. The GKI kernel
+    # has NO virtio-blk driver (CONFIG_VIRTIO_* unset) but CONFIG_OF_PMEM=y, so
+    # we stage system.raw straight into a FIXED high-RAM region with QEMU's
+    # generic loader (native memcpy at machine init — no DMA loop, no driver).
+    # AETHER exposes [PMEM_BASE, PMEM_BASE+size) to the guest as a
+    # `compatible="pmem-region"` DT node → /dev/pmem0 → first-stage `/system`.
+    #
+    # PMEM_BASE MUST match hypervisor::android_handoff::PMEM_SYSTEM_PA (12 GiB).
+    # 12 GiB sits in the high-RAM band (q35, -m 16G → RAM at [4G, ~17.25G)),
+    # above the low-4-GiB hypervisor heap/staging/PCI-hole AND clear of the
+    # translator JIT cache + bump arena at 8 GiB. PML4[0]'s PDPT has free 1-GiB
+    # slots [12..15] for AETHER's host-CR3 identity map.
+    PMEM_SYSTEM_PA = 0x3_0000_0000
+    IMG_DIR = os.path.join(HERE, "images")
+    sys_raw = os.path.join(IMG_DIR, "system.raw")
+    if os.path.exists(sys_raw):
+        cmd += ["-device",
+                f"loader,file={sys_raw},addr={PMEM_SYSTEM_PA:#x},force-raw=on"]
+    # QDBG=1: log host CPU exceptions + resets to qemu/qdbg.log. `int` shows each
+    # exception vector + RIP + error code as it is taken (so a #PF -> #DF -> reset
+    # nested-fault triple-fault is visible with the ORIGINAL faulting RIP/CR2);
+    # `cpu_reset` shows the state at the triple-fault reset.
+    if os.environ.get("QDBG"):
+        cmd += ["-d", "int,cpu_reset", "-D", os.path.join(HERE, "qdbg.log")]
+
     print(f"==> Launching QEMU (timeout={timeout}s)")
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-    # connect QMP
+    # connect QMP. QEMU only sends the QMP greeting AFTER machine init completes,
+    # and the `-device loader,file=system.raw` stages a multi-GiB image into
+    # guest RAM during init (host memcpy — seconds, not the 1 s a tight timeout
+    # allows). Use a generous socket timeout so the greeting / capabilities
+    # handshake survives the load, and dump QEMU stderr if it dies.
     sock = None
-    deadline = time.time() + 10
+    deadline = time.time() + 120
     while time.time() < deadline:
         try:
-            sock = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=1)
+            sock = socket.create_connection(("127.0.0.1", QMP_PORT), timeout=120)
             break
         except OSError:
             if proc.poll() is not None:
@@ -167,8 +211,19 @@ def main():
         print("Could not connect to QMP")
         proc.kill()
         return 2
-    sock.recv(4096)  # greeting
-    qmp(sock, "qmp_capabilities")
+    sock.settimeout(120)
+    try:
+        sock.recv(4096)  # greeting (waits out the image-load init)
+        qmp(sock, "qmp_capabilities")
+    except (socket.timeout, TimeoutError):
+        # If QEMU is wedged during init, surface whatever it printed.
+        if proc.poll() is not None:
+            err = proc.stderr.read().decode(errors="replace")
+            print("QEMU exited during QMP handshake:\n" + err)
+        else:
+            print("QMP handshake timed out (QEMU still running)")
+        proc.kill()
+        return 2
 
     # wait for serial log to settle
     start = time.time()

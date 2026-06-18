@@ -83,6 +83,31 @@ pub const KERNEL_WORKING_RAM_SIZE: u64 = 1024 * 1024 * 1024
 pub const HANDOFF_REGION_SIZE: u64 =
     STAGED_BOOT_IMG_SIZE + GUEST_DTB_SIZE + KERNEL_WORKING_RAM_SIZE;
 
+// ── Phase 3 PIVOT: PMEM-backed AOSP system image (x86 tier) ──────────────────
+//
+// The GKI kernel has no virtio-blk driver but has CONFIG_OF_PMEM=y, so the AOSP
+// `system.raw` image is staged into a FIXED high-RAM region by QEMU's generic
+// loader (`-device loader,file=system.raw,addr=PMEM_SYSTEM_PA`) and exposed to
+// the guest as a `compatible="pmem-region"` DT node → /dev/pmem0 → /system.
+//
+// PA chosen at 12 GiB: above the low-4-GiB hypervisor heap/staging/PCI-hole AND
+// clear of the translator JIT cache + bump arena (which occupy PDPT slot 8 at
+// 0x2_0000_0000). PML4[0]'s existing PDPT has free 1-GiB slots [12..15] so the
+// host CR3 maps the region with three 1-GiB leaf entries (no new page-table page
+// needed). With QEMU -m 16G the high-RAM band is [4 GiB, ~17.25 GiB), so
+// [12 GiB, 15 GiB) is backed. Mirrored in `qemu/run-x86-auto.py` (loader addr)
+// — keep the two in sync.
+/// Base PA of the PMEM `/system` region (12 GiB).
+pub const PMEM_SYSTEM_PA: u64 = 0x3_0000_0000;
+/// Size of the PMEM `/system` region (3 GiB == `qemu/images/system.raw`).
+pub const PMEM_SYSTEM_SIZE: u64 = 0xC000_0000;
+
+/// Boot the AOSP `system.raw` directly as root (`root=/dev/pmem0`) instead of
+/// running the boot.img ramdisk's first-stage init. The image is a system-as-root
+/// layout (`/init` -> `/system/bin/init`), so this bypasses the ramdisk
+/// switch_root that fails in the DBT. See `prepare_android_handoff`.
+pub const BOOT_SYSTEM_AS_ROOT: bool = true;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DbtInitialRegs — ARM64 GPR file at kernel entry
 // ─────────────────────────────────────────────────────────────────────────────
@@ -218,6 +243,10 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
         // the boot.img scan's ramdisk_pa/ramdisk_size when a ramdisk exists.
         initrd_start: 0,
         initrd_end:   0,
+        // Phase 3 PIVOT: expose the QEMU-loader-staged system.raw as a PMEM
+        // block device (/dev/pmem0) — the kernel has no virtio-blk driver.
+        pmem_base: PMEM_SYSTEM_PA,
+        pmem_size: PMEM_SYSTEM_SIZE,
     };
     // Default kernel cmdline — same string AETHER's BoardConfig.mk emits.
     // `earlycon=pl011,mmio32,0x9000000` enables Linux's earlycon PL011 driver
@@ -225,9 +254,40 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
     // in a buffer until the late console driver loads (after IRQ/timer init),
     // so any pre-IRQ panic prints nothing to PL011/COM1 and looks silent.
     // Pairs with mmio_emu::PL011_UART_BASE = 0x0900_0000 → pl011_emit → dual_puts.
+    // `androidboot.slot_suffix=_a` gives fs_mgr a slot context: this AOSP build
+    // is A/B (the ramdisk fstab.aether marks system/vendor/product `slotselect`),
+    // so first-stage init's `fs_mgr_update_for_slotselect` aborts with "Error
+    // updating for slotselect" if no suffix is available — even though our DT
+    // fstab uses direct, non-slotselect `/dev/block/vda` (which therefore keeps
+    // its name; the suffix only appends to entries that actually set slotselect).
+    // `root=/dev/pmem0 rootwait ro`: boot the system.raw PMEM device as root
+    // (system-as-root). `androidboot.force_normal_boot=1`: skip recovery and do a
+    // normal boot even though there is no boot/recovery ramdisk distinction.
+    // `rootwait` blocks until of_pmem has created /dev/pmem0. (See BOOT_SYSTEM_AS_ROOT.)
+    // `initcall_debug ignore_loglevel`: DIAGNOSTIC — print every initcall as it
+    // runs ("calling X+0x0/0x0 @ 1" before, "initcall X returned … after N usecs"
+    // after). The last `calling …` with no matching `returned` names the hanging
+    // initcall. `ignore_loglevel` forces the KERN_DEBUG initcall lines to the
+    // console (default loglevel filters them). Remove once the hang is found.
+    // `initcall_blacklist=init_kprobe_trace`: the kprobe-tracing initcall HANGS
+    // under the DBT — it blocks on a wait (RCU grace period / kprobe instruction
+    // patching sync) that never completes (hot PCs are all idle/scheduler/RCU).
+    // Kprobe/ftrace tracing is a debug feature not needed for boot or production,
+    // so blacklist it. (Multiple names comma-separated if more tracing initcalls
+    // hang.) initcall_blacklist is parsed by init/main.c, always available.
+    // `init=/system/bin/init`: with system-as-root and NO initramfs, the kernel
+    // never sets ramdisk_execute_command (=/init), so kernel_init falls through its
+    // default list /sbin/init → /etc/init → /bin/init → /bin/sh. On an AOSP image
+    // /etc → /system/etc and /etc/init is a DIRECTORY → execve EACCES (-13); only
+    // /bin/init (→/system/bin/init) eventually runs. Pointing `init=` straight at
+    // /system/bin/init runs Android's real init immediately and skips the two
+    // failed candidate execs (no ambiguity, no -13 noise).
     let cmd = b"earlycon=pl011,mmio32,0x9000000 console=ttyAMA0,115200 \
+                root=/dev/pmem0 rootwait ro androidboot.force_normal_boot=1 \
+                init=/system/bin/init \
                 androidboot.hardware=aether androidboot.selinux=enforcing \
-                androidboot.verifiedbootstate=green";
+                androidboot.verifiedbootstate=green androidboot.slot_suffix=_a \
+                initcall_debug ignore_loglevel initcall_blacklist=init_kprobe_trace";
     let n = if cmd.len() < MAX_KERNEL_CMDLINE_LEN { cmd.len() } else { MAX_KERNEL_CMDLINE_LEN };
     cfg.cmdline[..n].copy_from_slice(&cmd[..n]);
     cfg.cmdline_len = n;
@@ -300,7 +360,14 @@ pub unsafe fn prepare_android_handoff_at(
     // place (no copy needed). When the kernel was gzip-decompressed above the
     // DTB, layout.kernel_pa moves but ramdisk_pa stays in the boot.img window;
     // we deliberately do NOT re-derive ramdisk position from the new kernel_pa.
-    if layout.ramdisk_size > 0 {
+    // BOOT_SYSTEM_AS_ROOT: the staged AOSP system.raw is a system-as-root image
+    // (root has /init -> /system/bin/init, /system/, and the standard mount-point
+    // dirs). Booting it directly as root via `root=/dev/pmem0` (cmdline) skips the
+    // boot.img ramdisk's first-stage init + switch_root entirely — switch_root was
+    // failing in the DBT (getmntent returned an empty mnt_dir -> mount("",..)=EINVAL
+    // -> init exit 127 -> panic). When this is true we do NOT advertise the initrd,
+    // so the kernel mounts root= instead of running the ramdisk's /init.
+    if !BOOT_SYSTEM_AS_ROOT && layout.ramdisk_size > 0 {
         dtb_cfg.initrd_start = layout.ramdisk_pa;
         dtb_cfg.initrd_end   = layout.ramdisk_pa + layout.ramdisk_size as u64;
     }
@@ -363,7 +430,33 @@ pub unsafe fn prepare_android_handoff_at(
     } else if is_unsupported_kernel_compression(kernel_src) {
         return Err(HandoffError::KernelCompressionUnsupported);
     } else {
-        // Uncompressed `Image` — run in place.
+        // Uncompressed `Image`. The arm64 boot protocol REQUIRES a 2-MiB-aligned
+        // load address (Documentation/arm64/booting.rst §"Call the kernel image").
+        // Running in place at `header_pa + 4096` (only 4-KiB-aligned) makes the
+        // kernel's self-relocated VA base 0x1000 off a 16-KiB (THREAD_SIZE)
+        // boundary, so every thread stack lands non-THREAD_SIZE-aligned. The
+        // VMAP_STACK overflow detector (`tbnz sp, #THREAD_SHIFT`) then falsely
+        // trips on the FIRST exception taken on such a stack (e.g. the first timer
+        // IRQ) → handle_bad_stack → "kernel stack overflow" panic. Copy the image
+        // to the same 2-MiB-aligned destination the gzip path uses.
+        let dest_pa = (dtb_pa + dtb_size + 0x1F_FFFF) & !0x1F_FFFF;
+        let region_end = stage_pa + region_size_out;
+        if dest_pa >= region_end {
+            return Err(HandoffError::KernelDecompressNoRoom);
+        }
+        let dest_cap = (region_end - dest_pa) as usize;
+        if kernel_size > dest_cap {
+            return Err(HandoffError::KernelDecompressNoRoom);
+        }
+        // SAFETY: identical to the gzip branch — `dest_pa..region_end` is
+        // hypervisor-owned, host-identity-mapped RAM, disjoint from the boot.img
+        // window holding `kernel_src` (dest_pa >= dtb_pa+dtb_size; the boot.img
+        // window ends at stage_pa+STAGED_BOOT_IMG_SIZE <= dtb_pa).
+        let dest: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(dest_pa as *mut u8, dest_cap)
+        };
+        dest[..kernel_size].copy_from_slice(kernel_src);
+        layout.kernel_pa = dest_pa;
         false
     };
 
@@ -485,6 +578,14 @@ mod tests {
         assert!(n < out.len());
         // FDT magic at offset 0.
         assert_eq!(&out[..4], &[0xD0, 0x0D, 0xFE, 0xED]);
+    }
+
+    #[test]
+    fn dump_dtb_for_inspection() {
+        let cfg = default_dtb_config();
+        let mut out = vec![0u8; 8192];
+        let n = build_android_dtb(&cfg, &mut out).expect("DTB build");
+        std::fs::write("D:/AETHER/qemu/test.dtb", &out[..n]).unwrap();
     }
 
     #[test]

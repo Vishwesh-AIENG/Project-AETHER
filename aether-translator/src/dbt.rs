@@ -91,10 +91,26 @@ pub struct ArmElfDescriptor {
 pub const MAX_INSNS_PER_BLOCK: usize = 64;
 
 /// JIT code buffer size — matches `DbtIntegrationConfig::aether_defaults()`.
+/// (Tried 128 MiB to fight a suspected init-phase thrash; it REGRESSED ~3× —
+/// init's working set fits in 16 MiB so no thrash occurred, and the paired
+/// larger block_cache hash table just added host-CPU-cache pressure per lookup.
+/// init's slowness is the exception-heavy demand-paging path under double
+/// emulation, not JIT thrashing.)
 pub const JIT_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Block cache capacity — must be power-of-two ≥ 8. 4096 is the AT-16 default.
-pub const BLOCK_CACHE_CAPACITY: usize = 4096;
+/// Block cache capacity — must be power-of-two ≥ 8. The AT-16 default of 4096
+/// was tuned for a ~1000-unique-PC surrogate; a full Linux kernel boot touches
+/// 50–150K unique basic blocks. At 4096 (two-gen, 70% fill ≈ 5.7K live) the
+/// param/string-parse init phase blew past the working set, so blocks were
+/// dropped and RE-translated on every revisit — which re-allocates them in the
+/// 16 MiB `code_buf`, fills it, forces a `reset()` (flush + re-translate ALL),
+/// and thrashes (~150× boot slowdown observed at the cmdline parser). Sized so
+/// the cache holds as many blocks as `code_buf` can (16 MiB / ~80 B ≈ 200K):
+/// a block still in `code_buf` is never dropped from the cache prematurely, so
+/// every revisit hits and each unique block is translated exactly once. Pure
+/// host-heap Vec (≈ 2 gens × 262144 × 40 B ≈ 21 MiB), independent of the
+/// guest-invisible JIT PA arena — no EPT/NPT or bump-arena interaction.
+pub const BLOCK_CACHE_CAPACITY: usize = 262144;
 
 /// Aggregate runtime state for the translator. One instance per hypervisor
 /// (single-vCPU model).
@@ -126,6 +142,24 @@ pub struct DbtRuntime {
     /// 0 = none, 1 = decode failure, 2 = lift failure, 3 = too-short input,
     /// 4 = no insns lifted (block ended before producing any IR).
     last_fail_kind: u8,
+    /// Reusable per-translation scratch. The global heap is a never-freeing bump
+    /// allocator, so a fresh IrFunction + X86Encoder per cold block leaks their
+    /// Vec buffers (~KB/block × the millions of unique blocks a full userspace
+    /// boot translates → OOM). `translate_block` `mem::take`s these, resets them
+    /// (clears but KEEPS capacity), uses them, and puts them back — so after the
+    /// first few blocks the translate path stops growing the heap. See the
+    /// reverted global-bump-reset note in hypervisor/src/lib.rs for why this
+    /// explicit reuse (not a heap-pointer reset) is the safe form.
+    scratch_func: IrFunction,
+    scratch_enc:  X86Encoder,
+    /// Reusable liveness + linear-scan buffers (same leak rationale as above):
+    /// a fresh `BTreeMap`-backed allocation per cold block leaked B-tree nodes
+    /// into the bump heap. `translate_block` fills `scratch_regalloc.result`
+    /// via `regalloc::allocate_into`, which resets every working buffer in
+    /// place and keeps its capacity. Borrowed (not `mem::take`n) — it is a
+    /// disjoint field from `scratch_func`/`scratch_enc`, so the result can be
+    /// borrowed through the lowering loop while those two are taken out.
+    scratch_regalloc: regalloc::RegallocScratch,
 }
 
 impl DbtRuntime {
@@ -144,6 +178,9 @@ impl DbtRuntime {
             last_fail_pc:                  0,
             last_fail_word:                0,
             last_fail_kind:                0,
+            scratch_func: IrFunction::new(0),
+            scratch_enc:  X86Encoder::new(),
+            scratch_regalloc: regalloc::RegallocScratch::default(),
         }
     }
 
@@ -180,6 +217,32 @@ impl DbtRuntime {
                 | DecodedInsn::Brk { .. }
                 | DecodedInsn::Hlt { .. }
                 | DecodedInsn::Udf { .. }
+        )
+    }
+
+    /// True for instructions that can take a (data) abort — loads, stores,
+    /// their pair / SIMD-FP / exclusive / acquire-release / atomic forms, and
+    /// DC ZVA (which writes memory). Used to PC-stamp before a mid-block memory
+    /// access so a demand-paging fault resumes at the faulting instruction
+    /// rather than restarting the whole (possibly non-idempotent) block.
+    fn is_mem_access(insn: &DecodedInsn) -> bool {
+        matches!(
+            insn,
+            DecodedInsn::Ldr { .. }
+                | DecodedInsn::Str { .. }
+                | DecodedInsn::Ldp { .. }
+                | DecodedInsn::Stp { .. }
+                | DecodedInsn::LdpFp { .. }
+                | DecodedInsn::StpFp { .. }
+                | DecodedInsn::Ldxr { .. }
+                | DecodedInsn::Stxr { .. }
+                | DecodedInsn::Ldar { .. }
+                | DecodedInsn::Stlr { .. }
+                | DecodedInsn::Ldapr { .. }
+                | DecodedInsn::Cas { .. }
+                | DecodedInsn::LdAtomicRmw { .. }
+                | DecodedInsn::Swp { .. }
+                | DecodedInsn::SysDc { .. }
         )
     }
 
@@ -220,8 +283,13 @@ impl DbtRuntime {
             return AetherDbtResult::TranslationFailed;
         }
 
-        let mut func = IrFunction::new(pc);
-        let block = func.add_block();
+        // Reuse the runtime's scratch IrFunction (mem::take -> owned local so
+        // there is no self-field borrow conflict with stat_*/code_buf below;
+        // reset clears it but keeps the ops/values Vec capacity). Put back on
+        // the success path. Failure paths return TranslationFailed, which halts
+        // the dispatch loop, so not restoring the scratch there is harmless.
+        let mut func = core::mem::take(&mut self.scratch_func);
+        let block = func.reset_single_block(pc);
 
         let mut bytes_consumed = 0usize;
         let mut insns_lifted   = 0usize;
@@ -255,6 +323,25 @@ impl DbtRuntime {
                     break;
                 }
             };
+
+            // Per-instruction PC stamp for correct MID-BLOCK fault resume.
+            // Before a memory access that is NOT the block's first instruction,
+            // write the current guest PC to the PC slot. A demand-paging data
+            // abort (ubiquitous in userspace) then injects ELR = THIS
+            // instruction's PC, so the kernel handler ERETs back to it and the
+            // dispatcher re-dispatches a FRESH block starting here — instead of
+            // restarting the whole block and re-executing the earlier
+            // instructions whose side effects already happened. Without it the
+            // /init constructor `mov x8,x0; mov w0,wzr; ldr q,[..]; str wzr,[x8]`
+            // restarts after the `ldr` faults, re-runs `mov x8,x0` on the
+            // already-zeroed x0 -> x8=0 -> NULL store -> SIGSEGV / kill init.
+            // (The block's first insn already resumes correctly: the dispatcher
+            // seeds PC_SLOT = block start, so no stamp is needed for it.)
+            if insns_lifted > 0 && Self::is_mem_access(&insn) {
+                let v = block.new_value(crate::ir::value::IrValueKind::I64);
+                block.push_op(crate::ir::IrOp::ConstI64 { dst: v, val: cur_pc as i64 });
+                block.push_op(crate::ir::IrOp::WritePc { src: v });
+            }
 
             let term = Self::is_terminator(&insn);
             if let Err(_) = lift_at(&insn, block, cur_pc) {
@@ -300,8 +387,12 @@ impl DbtRuntime {
             block.push_op(crate::ir::IrOp::WritePc { src: v_next });
         }
 
-        // Allocate registers.
-        let alloc = regalloc::allocate(&func);
+        // Allocate registers into the runtime's reusable scratch (resets every
+        // liveness/scan buffer in place — no per-cold-block bump-heap leak).
+        // `func` is a local (mem::take'n above), so `&func` does not alias the
+        // `&mut self.scratch_regalloc` field borrow.
+        regalloc::allocate_into(&func, &mut self.scratch_regalloc);
+        let alloc = &self.scratch_regalloc.result;
 
         // M4a boot-safety (MUST-FIX): the spill area is a fixed 64-slot region in
         // the R15 context block ([R15+SPILL_BASE..]). If allocation needed more
@@ -325,18 +416,24 @@ impl DbtRuntime {
 
         // Lower to x86 bytes. Lower_block currently consumes flag-elision +
         // branch-patches from earlier passes; we synthesise empties here.
-        let mut enc = X86Encoder::new();
+        // Reuse the runtime's scratch encoder (reset KEEPS its Vec capacity).
+        let mut enc = core::mem::take(&mut self.scratch_enc);
+        enc.reset();
         let mut branch_patches: BTreeMap<usize, crate::ir::BlockId> = BTreeMap::new();
         for blk in &func.blocks {
-            IntLower::lower_block_with_pc(blk, pc, &alloc, &mut enc, &mut branch_patches);
+            IntLower::lower_block_with_pc(blk, pc, alloc, &mut enc, &mut branch_patches);
         }
         // Block epilogue: RET. Cheapest possible "return to dispatcher" —
         // production lowering inserts the AT-19 context-save/restore here,
         // which is out of Step A's narrow scope.
         enc.emit_ret();
 
-        let bytes: Vec<u8> = enc.finish();
-        let host_offset = match self.code_buf.alloc_block(pc, &bytes) {
+        let bytes_len = enc.as_bytes().len();
+        // Compute the structural-safety verdict ONCE here (immutable bytes), so
+        // the dispatch hot path reads a cached flag instead of rescanning the
+        // block on every entry.
+        let block_safe = block_bytes_are_safe(enc.as_bytes());
+        let host_offset = match self.code_buf.alloc_block(pc, enc.as_bytes()) {
             Ok(o) => o,
             Err(CodeBufError::OutOfCapacity { .. }) => {
                 // Capacity pressure: reset the buffer, then retry once.
@@ -354,13 +451,18 @@ impl DbtRuntime {
                     self.stat_lower_failures.saturating_add(1);
                 self.code_buf.reset();
                 self.block_cache.flush_all();
-                match self.code_buf.alloc_block(pc, &bytes) {
+                match self.code_buf.alloc_block(pc, enc.as_bytes()) {
                     Ok(o) => o,
                     Err(_) => return AetherDbtResult::TranslationFailed,
                 }
             }
             Err(_) => return AetherDbtResult::TranslationFailed,
         };
+
+        // Return the scratch buffers to the runtime so the next translation
+        // reuses their (now-warm) capacity instead of allocating fresh.
+        self.scratch_enc = enc;
+        self.scratch_func = func;
 
         // Step 3 W^X commit: serialise + flip RW→RX via the hypervisor-
         // registered EPT/NPT callback. When `host_pa_base == 0` (no host
@@ -379,7 +481,7 @@ impl DbtRuntime {
         }
 
         self.block_cache
-            .insert(pc, host_offset, bytes.len());
+            .insert(pc, host_offset, bytes_len, block_safe);
         self.stat_blocks_translated =
             self.stat_blocks_translated.saturating_add(1);
         AetherDbtResult::Ok
@@ -409,6 +511,13 @@ impl DbtRuntime {
     ///   `host_va = jit_base + host_offset`
     pub fn host_offset_for_pc(&mut self, pc: u64) -> Option<(usize, usize)> {
         self.block_cache.lookup(pc).map(|b| (b.host_offset, b.len))
+    }
+
+    /// Like [`host_offset_for_pc`] but also returns the block's cached
+    /// structural-safety verdict, so the dispatch hot path skips the per-entry
+    /// byte rescan. `(host_offset, len, safe)`.
+    pub fn host_offset_for_pc_safe(&mut self, pc: u64) -> Option<(usize, usize, bool)> {
+        self.block_cache.lookup(pc).map(|b| (b.host_offset, b.len, b.safe))
     }
 
     /// Invalidate the **entire** block cache (PC → host-offset lookup table).
@@ -629,6 +738,18 @@ pub fn aether_dbt_block_host_va(pc: u64) -> Option<(usize, usize)> {
     global::with(|rt| {
         let (off, len) = rt.host_offset_for_pc(pc)?;
         Some((rt.code_buf.base_ptr() as usize + off, len))
+    })
+    .flatten()
+}
+
+/// Hot-path variant of [`aether_dbt_block_host_va`]: also returns the block's
+/// CACHED structural-safety verdict so the dispatcher skips the per-entry byte
+/// rescan (`block_bytes_are_safe` was O(len) softmmu reads on EVERY dispatch).
+/// `(host_va, len, safe)`.
+pub fn aether_dbt_block_host_va_safe(pc: u64) -> Option<(usize, usize, bool)> {
+    global::with(|rt| {
+        let (off, len, safe) = rt.host_offset_for_pc_safe(pc)?;
+        Some((rt.code_buf.base_ptr() as usize + off, len, safe))
     })
     .flatten()
 }

@@ -150,14 +150,11 @@ fn decode_add_sub_with_carry(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if opcode2 != 0 {
         return Err(DecodeErr::Reserved);
     }
-    // ADCS / SBCS (flag-setting) get a dedicated variant the lift maps to the
-    // carry-in IR ops. The plain ADC / SBC (S=0) forms are rare and have no
-    // non-flag-setting carry IR op yet, so they remain fail-loud (the block
-    // stops at decode rather than silently producing wrong flags).
-    if !set_flags {
-        return Err(DecodeErr::Unimplemented);
-    }
-    Ok(DecodedInsn::AdcSub { sf, rd, rn, rm, sub })
+    // ADC/ADCS/SBC/SBCS — `set_flags` distinguishes the S=0 (plain, NZCV
+    // preserved) from the S=1 (flag-setting) forms. NGC/NGCS are the Rn==xzr
+    // aliases of SBC/SBCS; the kernel's syscall dispatcher uses `ngc x8,xzr`
+    // (S=0) as a Spectre-v1 array-index mask, so the S=0 form MUST decode.
+    Ok(DecodedInsn::AdcSub { sf, rd, rn, rm, sub, set_flags })
 }
 
 fn decode_conditional_compare(word: u32) -> Result<DecodedInsn, DecodeErr> {

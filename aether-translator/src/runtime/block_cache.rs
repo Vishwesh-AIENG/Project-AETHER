@@ -26,6 +26,12 @@ pub struct CachedBlock {
     pub host_offset: usize,
     /// Length of the translated block in bytes.
     pub len: usize,
+    /// Structural-safety verdict computed ONCE at translation time
+    /// (`block_bytes_are_safe`): ends in RET, no UD2 sentinel. Cached here so
+    /// the dispatch hot path does not re-scan the block's bytes on every entry
+    /// — the translated bytes are immutable until eviction/re-translation, so a
+    /// per-entry rescan was pure waste (O(len) softmmu reads × every dispatch).
+    pub safe: bool,
     /// Generation at which this entry was installed.
     pub generation: u32,
 }
@@ -173,7 +179,7 @@ impl BlockCache {
     ///
     /// If the active generation is at the fill threshold, it is rotated: the
     /// active becomes old and a fresh active generation is allocated.
-    pub fn insert(&mut self, guest_pc: u64, host_offset: usize, len: usize) {
+    pub fn insert(&mut self, guest_pc: u64, host_offset: usize, len: usize, safe: bool) {
         // Rotate generations if active is too full.
         let threshold = (self.capacity as u64 * self.fill_pct as u64 / 100) as usize;
         if self.active_count >= threshold {
@@ -184,6 +190,7 @@ impl BlockCache {
             guest_pc,
             host_offset,
             len,
+            safe,
             generation: self.generation,
         };
 

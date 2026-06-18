@@ -93,6 +93,15 @@ pub const GUEST_PA_SIZE: u64 = 0x4000_0000;
 static mut WIN_BASE: u64 = GUEST_PA_BASE;
 static mut WIN_SIZE: u64 = GUEST_PA_SIZE;
 
+// Second (optional) guest-PA window. The x86 tier stages the AOSP `system.raw`
+// image as a PMEM block device in a FIXED high-RAM region (8 GiB, well above the
+// primary handoff window) — a single contiguous window cannot cover both, so a
+// disjoint second range is registered here. 0/0 = disabled (the ARM tier and all
+// tests leave it off). Same No-Boundary confinement: a fixed, hypervisor-set
+// range, never guest-controlled.
+static mut WIN2_BASE: u64 = 0;
+static mut WIN2_SIZE: u64 = 0;
+
 /// Pin the guest physical window the walker confines all PAs to. Called once by
 /// the hypervisor at MMU bring-up with the exact mapped span.
 #[allow(unsafe_code)]
@@ -104,17 +113,33 @@ pub extern "C" fn aether_mmu_set_window(base: u64, size: u64) {
     }
 }
 
-/// True iff `pa` lies within the configured guest physical window.
+/// Register a SECOND disjoint guest-PA window (e.g. the PMEM system image at
+/// 8 GiB). Pass `(0, 0)` to disable. Mirrors [`aether_mmu_set_window`].
+#[allow(unsafe_code)]
+pub extern "C" fn aether_mmu_set_window2(base: u64, size: u64) {
+    // SAFETY: EL2-private, single-vCPU; set once before any walk.
+    unsafe {
+        *core::ptr::addr_of_mut!(WIN2_BASE) = base;
+        *core::ptr::addr_of_mut!(WIN2_SIZE) = size;
+    }
+}
+
+/// True iff `pa` lies within either configured guest physical window.
 #[allow(unsafe_code)]
 fn in_window(pa: u64) -> bool {
     // SAFETY: EL2-private, single-vCPU.
-    let (base, size) = unsafe {
+    let (base, size, base2, size2) = unsafe {
         (
             *core::ptr::addr_of!(WIN_BASE),
             *core::ptr::addr_of!(WIN_SIZE),
+            *core::ptr::addr_of!(WIN2_BASE),
+            *core::ptr::addr_of!(WIN2_SIZE),
         )
     };
-    pa >= base && pa.wrapping_sub(base) < size
+    if pa >= base && pa.wrapping_sub(base) < size {
+        return true;
+    }
+    size2 != 0 && pa >= base2 && pa.wrapping_sub(base2) < size2
 }
 
 // ── MMIO device-window allow-list (M4b-5) ────────────────────────────────────
@@ -165,6 +190,74 @@ fn is_mmio(pa: u64) -> bool {
 /// adjacent free ctx word rather than out-of-bounds memory.
 pub const SLOT_MMIO_SCRATCH: usize = 59;
 
+/// 16-byte (slots 60–61) gather/scatter bounce buffer for a CROSS-PAGE access
+/// whose two guest pages map to PHYSICALLY NON-CONTIGUOUS host PAs. A single
+/// host load/store at one PA cannot serve such a span, but the kernel HAS mapped
+/// both pages (demand-paged anon pages are rarely PA-adjacent), so faulting just
+/// loops forever — `do_page_fault` sees both pages present and does nothing, the
+/// guest re-executes the same straddling LDP/STP/LDR-Q and re-faults. Instead:
+/// a LOAD gathers both pages' bytes here and returns this slot's host address
+/// (the caller's `mov rd,[rax]` / `movdqu` reads the contiguous copy); a STORE
+/// returns this address for the caller to write into, then [`flush_scatter`]
+/// (run at the top of every xlate/store/fetch entry) scatters the bytes back to
+/// the two real pages before any subsequent guest access can observe them.
+/// 16 bytes covers LDP/STP (X-pair) and LDR/STR-Q — the memcpy/string hot path.
+pub const SLOT_SPAN_SCRATCH: usize = 60;
+/// Largest cross-page span served by the bounce buffer (bytes). Wider spans
+/// (LDP-Q = 32 B, LD4 = 64 B) crossing a NON-contiguous boundary stay loud
+/// (pending Data Abort) until the scratch is widened — they are vanishingly rare
+/// versus 16-byte bulk copies.
+const SPAN_SCRATCH_MAX: u64 = 16;
+
+// ── Deferred cross-page STORE scatter ────────────────────────────────────────
+// A store routed through `aether_mmu_xlate` (STP, STR-Q/D/S) returns a host PA
+// the caller writes through; when that PA is the bounce buffer (non-contiguous
+// cross-page span) the written bytes must be scattered back to the two real
+// pages. There is no post-write callback, so the scatter is DEFERRED and flushed
+// lazily at the head of the next xlate/store/fetch — every guest RAM access (and
+// the dispatcher's next-block fetch) funnels through one of those, and nothing
+// else reads guest RAM, so the bytes always land before they can be observed.
+// EL2-private, single-vCPU: plain statics (the software TLB uses the same model).
+static mut SCATTER_PENDING: bool = false;
+static mut SCATTER_SRC: *const u8 = core::ptr::null(); // bounce-buffer host addr
+static mut SCATTER_PA1: u64 = 0; // page-1 host PA (first `n1` bytes)
+static mut SCATTER_N1: u64 = 0;
+static mut SCATTER_PA2: u64 = 0; // page-2 host PA base (next `n2` bytes)
+static mut SCATTER_N2: u64 = 0;
+// Diagnostic balance counters: a deferred store-scatter that is SET but never
+// FLUSHED would leave the cross-page bytes unwritten (e.g. a prologue STP's
+// saved x30 stays as the fresh-page zero → RET to NULL). SET and FLUSH should
+// stay within 1 of each other (at most one pending at a time).
+pub static mut SCATTER_SET_COUNT: u64 = 0;
+pub static mut SCATTER_FLUSH_COUNT: u64 = 0;
+
+/// Flush a pending cross-page STORE scatter (no-op when none pending). Copies the
+/// bytes the caller wrote into the bounce buffer back out to the two real guest
+/// pages. Called at the head of every guest-RAM entry point so the scatter is
+/// always materialised before any later access (or block fetch) can read it.
+#[allow(unsafe_code)]
+fn flush_scatter() {
+    // SAFETY: EL2-private single-vCPU statics; the recorded PAs were confined to
+    // the guest window by `xlate_page` when the scatter was queued, and the src
+    // is the in-ctx bounce buffer. Cleared FIRST so a re-entrant entry can't
+    // double-apply.
+    unsafe {
+        if !*core::ptr::addr_of!(SCATTER_PENDING) {
+            return;
+        }
+        *core::ptr::addr_of_mut!(SCATTER_PENDING) = false;
+        *core::ptr::addr_of_mut!(SCATTER_FLUSH_COUNT) =
+            (*core::ptr::addr_of!(SCATTER_FLUSH_COUNT)).wrapping_add(1);
+        let src = *core::ptr::addr_of!(SCATTER_SRC);
+        let pa1 = *core::ptr::addr_of!(SCATTER_PA1);
+        let n1 = *core::ptr::addr_of!(SCATTER_N1);
+        let pa2 = *core::ptr::addr_of!(SCATTER_PA2);
+        let n2 = *core::ptr::addr_of!(SCATTER_N2);
+        core::ptr::copy_nonoverlapping(src, pa1 as *mut u8, n1 as usize);
+        core::ptr::copy_nonoverlapping(src.add(n1 as usize), pa2 as *mut u8, n2 as usize);
+    }
+}
+
 /// Non-zero "ok" sentinel returned by [`aether_mmu_store`] on success (0 ==
 /// [`XLATE_FAULT`] keeps the lowered fault-check `test rax,rax; jz fault` valid).
 const MMIO_STORE_OK: u64 = 1;
@@ -193,6 +286,7 @@ pub static mut VMM_TRACE_KIND: [u8; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
 /// combined with the VA in the same entry, the source-level write site
 /// is uniquely identified.
 pub static mut LAST_GUEST_PC: u64 = 0;
+
 pub static mut VMM_TRACE_PC: [u64; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
 /// Monotonic counter — `(idx % CAP)` is the next slot. Lets the dumper
 /// distinguish "ring wrapped" from "ring not full" and walk oldest-first.
@@ -207,7 +301,19 @@ pub static mut VMM_TRACE_IDX: u64 = 0;
 pub const EBPF_STORE_CAP: usize = 8192;
 pub static mut EBPF_STORE_LO: u64 = 0;
 pub static mut EBPF_STORE_HI: u64 = 0;
+// Phase-G PASS-2 diagnostic: a SECOND VA range so the same ring can
+// simultaneously capture stores to the kernel's bpf_convert_filter stack
+// scratch buffer AND stores to the eBPF output buffer. Armed at runtime
+// from the memcpy hook in boot_x86.rs once we know the stack src VA.
+pub static mut EBPF_STORE_LO2: u64 = 0;
+pub static mut EBPF_STORE_HI2: u64 = 0;
 pub static mut EBPF_STORE_IDX: u64 = 0;
+/// When non-zero, ebpf_store_record only logs stores whose value is
+/// STRICTLY LESS than this threshold. Used to filter out legitimate
+/// high-VA-valued writes (e.g. saved x30 = 0xffffffc0...) when hunting
+/// for a lifter bug that writes a small/garbage value to a stack slot.
+/// Default 0 disables the filter (matches all values).
+pub static mut EBPF_STORE_VAL_MAX: u64 = 0;
 pub static mut EBPF_STORE_PC:   [u64; EBPF_STORE_CAP] = [0; EBPF_STORE_CAP];
 pub static mut EBPF_STORE_VA:   [u64; EBPF_STORE_CAP] = [0; EBPF_STORE_CAP];
 pub static mut EBPF_STORE_VAL:  [u64; EBPF_STORE_CAP] = [0; EBPF_STORE_CAP];
@@ -216,24 +322,41 @@ pub static mut EBPF_STORE_SIZE: [u8;  EBPF_STORE_CAP] = [0; EBPF_STORE_CAP];
 /// determine temporal order even across ring wraps.
 pub static mut EBPF_STORE_SEQ: [u64; EBPF_STORE_CAP] = [0; EBPF_STORE_CAP];
 
-/// Arm the eBPF store tracker over `[lo, hi)` by VA. Resets the ring.
+/// Arm the eBPF store tracker over `[lo, hi)` by VA. Resets the ring AND
+/// clears the second VA range.
 #[allow(unsafe_code)]
 pub extern "C" fn aether_arm_ebpf_store_trace(lo: u64, hi: u64) {
     unsafe {
         *core::ptr::addr_of_mut!(EBPF_STORE_LO) = lo;
         *core::ptr::addr_of_mut!(EBPF_STORE_HI) = hi;
+        *core::ptr::addr_of_mut!(EBPF_STORE_LO2) = 0;
+        *core::ptr::addr_of_mut!(EBPF_STORE_HI2) = 0;
         *core::ptr::addr_of_mut!(EBPF_STORE_IDX) = 0;
+    }
+}
+
+/// Arm a SECOND VA range `[lo, hi)` for the eBPF store tracker WITHOUT
+/// resetting the ring. Used to add a stack window mid-flight so the
+/// existing entries (and ongoing capture of the primary range) are
+/// preserved. Pass `(0, 0)` to disable the second range.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_arm_ebpf_store_trace_range2(lo: u64, hi: u64) {
+    unsafe {
+        *core::ptr::addr_of_mut!(EBPF_STORE_LO2) = lo;
+        *core::ptr::addr_of_mut!(EBPF_STORE_HI2) = hi;
     }
 }
 
 /// Freeze the tracker without resetting the ring — used when bpf_jit hits
 /// "unknown opcode" so subsequent boot activity doesn't overwrite the
-/// convert_bpf_filter traces.
+/// convert_bpf_filter traces. Clears both VA ranges.
 #[allow(unsafe_code)]
 pub extern "C" fn aether_freeze_ebpf_store_trace() {
     unsafe {
         *core::ptr::addr_of_mut!(EBPF_STORE_LO) = 0;
         *core::ptr::addr_of_mut!(EBPF_STORE_HI) = 0;
+        *core::ptr::addr_of_mut!(EBPF_STORE_LO2) = 0;
+        *core::ptr::addr_of_mut!(EBPF_STORE_HI2) = 0;
         // IDX preserved so dumper sees existing entries.
     }
 }
@@ -246,7 +369,22 @@ fn ebpf_store_record(va: u64, value: u64, size: u8) {
     unsafe {
         let lo = *core::ptr::addr_of!(EBPF_STORE_LO);
         let hi = *core::ptr::addr_of!(EBPF_STORE_HI);
-        if lo == 0 || va < lo || va >= hi { return; }
+        let lo2 = *core::ptr::addr_of!(EBPF_STORE_LO2);
+        let hi2 = *core::ptr::addr_of!(EBPF_STORE_HI2);
+        let in_primary = lo != 0 && va >= lo && va < hi;
+        let in_second  = lo2 != 0 && va >= lo2 && va < hi2;
+        if !in_primary && !in_second { return; }
+        // Value filter: when EBPF_STORE_VAL_MAX > 0, only record stores
+        // strictly below that threshold. Lets us hunt for the buggy STR
+        // that writes a tiny value (e.g. 0x42) to a stack slot without
+        // overflowing the ring with legitimate high-VA writes.
+        let vmax = *core::ptr::addr_of!(EBPF_STORE_VAL_MAX);
+        if vmax != 0 && value >= vmax { return; }
+        // Also filter out the xlate-only sentinel value 0xFFFF_FFFF_FFFF_FFFF
+        // (with size flag 0x80) emitted from aether_mmu_xlate when value
+        // is unknown -- those are duplicates of the real stores logged
+        // here, and they pollute the ring under the value filter.
+        if vmax != 0 && (size & 0x80) != 0 { return; }
         let idx = *core::ptr::addr_of!(EBPF_STORE_IDX);
         let i = (idx as usize) % EBPF_STORE_CAP;
         *core::ptr::addr_of_mut!(EBPF_STORE_IDX) = idx.wrapping_add(1);
@@ -255,6 +393,76 @@ fn ebpf_store_record(va: u64, value: u64, size: u8) {
         *core::ptr::addr_of_mut!(EBPF_STORE_VAL[i])  = value;
         *core::ptr::addr_of_mut!(EBPF_STORE_SIZE[i]) = size;
         *core::ptr::addr_of_mut!(EBPF_STORE_SEQ[i])  = idx;
+    }
+}
+
+/// Set the value-filter threshold for ebpf_store_record. When set to a
+/// non-zero value, only stores whose written value is < threshold are
+/// recorded. Pass 0 to disable the filter.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_arm_ebpf_store_value_max(max: u64) {
+    unsafe {
+        *core::ptr::addr_of_mut!(EBPF_STORE_VAL_MAX) = max;
+    }
+}
+
+/// True if `va` falls in either armed eBPF-tracker VA range. Cheap guard so
+/// the LOAD path only peeks host memory for in-window accesses (and pays
+/// nothing when the tracker is disarmed, i.e. `EBPF_STORE_LO == 0`).
+#[inline]
+#[allow(unsafe_code)]
+fn ebpf_in_window(va: u64) -> bool {
+    unsafe {
+        let lo = *core::ptr::addr_of!(EBPF_STORE_LO);
+        let hi = *core::ptr::addr_of!(EBPF_STORE_HI);
+        let lo2 = *core::ptr::addr_of!(EBPF_STORE_LO2);
+        let hi2 = *core::ptr::addr_of!(EBPF_STORE_HI2);
+        (lo != 0 && va >= lo && va < hi) || (lo2 != 0 && va >= lo2 && va < hi2)
+    }
+}
+
+/// Phase-G x30-hunt LOAD recorder. Single-`STR` stores are captured by
+/// `aether_mmu_store` (real value) and PAIR/wide stores leave a sentinel
+/// entry (value unknown, size flag 0x80) on the is_write xlate path — but the
+/// LOAD side (the epilogue `ldp x29,x30,[sp,#N]` that reads a saved x30) was
+/// never recorded. This peeks the *physical* value the access is about to
+/// read and logs it with the LOAD flag (size | 0x40), one entry per ≤8-byte
+/// chunk so a pair load surfaces BOTH the x29 slot (chunk 0) and the x30 slot
+/// (chunk 1) by VA. Comparing the recorded slot value here against the
+/// resulting GPR at the fault tells load-side (slot ok, reg wrong) from
+/// store-side (slot itself holds the garbage) corruption.
+///
+/// `pa` is the resolved, in-window, RAM (non-MMIO) host PA of the first byte;
+/// the caller has already proven the whole `size`-byte span is mapped and
+/// physically contiguous, so `pa + off` is valid host RAM for `off < size`.
+#[inline]
+#[allow(unsafe_code)]
+fn ebpf_load_record(va: u64, pa: u64, size: u64) {
+    // Fast out when disarmed or the access misses both ranges entirely. The
+    // span is contiguous, so if neither endpoint is in-window we still test
+    // each chunk below (a window narrower than the access could sit inside).
+    if !ebpf_in_window(va) && !ebpf_in_window(va.wrapping_add(size.saturating_sub(1))) {
+        return;
+    }
+    let mut off: u64 = 0;
+    while off < size {
+        let cva = va.wrapping_add(off);
+        let cpa = pa.wrapping_add(off);
+        let rem = (size - off).min(8);
+        if ebpf_in_window(cva) {
+            // SAFETY: cpa is within the validated, contiguous host-RAM span.
+            let val = unsafe {
+                match rem {
+                    1 => core::ptr::read_volatile(cpa as *const u8) as u64,
+                    2 => core::ptr::read_volatile(cpa as *const u16) as u64,
+                    4 => core::ptr::read_volatile(cpa as *const u32) as u64,
+                    _ => core::ptr::read_volatile(cpa as *const u64),
+                }
+            };
+            // Flag 0x40 = LOAD; low bits carry the chunk byte width.
+            ebpf_store_record(cva, val, (rem as u8) | 0x40);
+        }
+        off += 8;
     }
 }
 
@@ -348,6 +556,61 @@ pub extern "C" fn aether_mmu_at_s1e1(
 /// issues these aggressively in is_spurious_el1_translation_fault; a
 /// non-zero value here confirms the lifter is routing AT correctly.
 pub static mut MMU_AT_HITS: u64 = 0;
+
+#[allow(unsafe_code)]
+/// [dcache-hunt] Force a record into the VMM trace ring, bypassing the VA/PA
+/// range gate. Used by the UTF-16-store-pattern trap to catch the mistranslated
+/// store that corrupts a dentry pointer (the __d_lookup_rcu Oops, new GCC kernel).
+#[allow(unsafe_code)]
+fn force_vmm_record(va: u64, pa: u64, value: u64, size: u8, kind: u8) {
+    unsafe {
+        let i = (*core::ptr::addr_of!(VMM_TRACE_IDX) as usize) % VMM_TRACE_CAP;
+        *core::ptr::addr_of_mut!(VMM_TRACE_VA[i]) = va;
+        *core::ptr::addr_of_mut!(VMM_TRACE_PA[i]) = pa;
+        *core::ptr::addr_of_mut!(VMM_TRACE_VAL[i]) = value;
+        *core::ptr::addr_of_mut!(VMM_TRACE_SIZE[i]) = size;
+        *core::ptr::addr_of_mut!(VMM_TRACE_KIND[i]) = kind;
+        *core::ptr::addr_of_mut!(VMM_TRACE_PC[i]) = *core::ptr::addr_of!(LAST_GUEST_PC);
+        let cur = *core::ptr::addr_of!(VMM_TRACE_IDX);
+        *core::ptr::addr_of_mut!(VMM_TRACE_IDX) = cur.wrapping_add(1);
+    }
+}
+
+/// [dcache-hunt] True for the UTF-16-interleaved-null corruption pattern: an
+/// 8-byte value whose every 16-bit lane has a zero low byte and an ASCII high
+/// byte (e.g. 0x6400650069006600 = "fied"). Rare enough that the 1024-slot ring
+/// won't overflow before the Oops.
+/// [dcache-hunt] FP/vector-store trap. The Vec128/F64/F32 store lowering writes
+/// inline (movdqu/movsd) and BYPASSES aether_mmu_store, so the integer trap can't
+/// see it. The lowering calls this with the store's host PA and the low 64 bits of
+/// the value; if it matches the UTF-16 corruption pattern, record PC+PA+value.
+pub extern "C" fn aether_fpstore_trace(pa: u64, low64: u64) {
+    if is_utf16_store_pattern(low64, 8) {
+        force_vmm_record(pa, pa, low64, 8, 9);
+    }
+}
+
+#[inline]
+fn is_utf16_store_pattern(value: u64, size: u64) -> bool {
+    if size != 8 || value == 0 {
+        return false;
+    }
+    // Leftover UTF-16 string data in a pointer slot, EITHER alignment:
+    //   chars in HIGH bytes (0x6400650069006600 "fied"): low bytes all 0
+    //   chars in LOW bytes  (0x007300660066004e "Nffs"): high bytes all 0
+    // Require ≥3 of the 4 char bytes printable ASCII (rejects page-ish values).
+    let count_ascii = |shift: u32| {
+        (0..4)
+            .filter(|i| {
+                let b = (value >> (8 * (2 * i) + shift)) & 0xFF;
+                (0x20..0x7f).contains(&b)
+            })
+            .count()
+    };
+    let high_chars = value & 0x00FF_00FF_00FF_00FF == 0 && count_ascii(8) >= 3;
+    let low_chars = value & 0xFF00_FF00_FF00_FF00 == 0 && count_ascii(0) >= 3;
+    high_chars || low_chars
+}
 
 #[allow(unsafe_code)]
 fn vmm_trace_record(va: u64, pa: u64, value: u64, size: u8, kind: u8) {
@@ -628,6 +891,118 @@ pub fn walk(sysregs: &[u64], va: u64, is_write: bool) -> Result<(u64, bool), (Fa
     }
     // The level-3 branch above always returns; the loop cannot fall through.
     unreachable!()
+}
+
+/// Per-level descriptor trace of one page-table walk (diagnostic only).
+pub struct WalkDebug {
+    pub ttbr: u64,
+    pub tcr: u64,
+    pub start_level: u8,
+    /// `(desc_pa, descriptor)` per architectural level 0..=3; `(0, 0)` = not visited.
+    pub levels: [(u64, u64); 4],
+    /// Level at which a translation fault occurred, or `-1` if the walk resolved.
+    pub fault_level: i8,
+    /// Output PA when `fault_level < 0`.
+    pub out_pa: u64,
+    /// A table base escaped the handoff window (walk refused to dereference it).
+    pub window_reject: bool,
+}
+
+/// Diagnostic mirror of [`walk`] for the hypervisor's stuck-user-fault dump.
+///
+/// Records every visited level's raw descriptor so a repeating demand-fault can
+/// be classified WITHOUT guessing: if the descriptor at the fault level has bit
+/// 0 clear the PTE is genuinely absent (the kernel never mapped it — a
+/// fault-delivery / handler problem); if `walk_debug` instead resolves to a PA
+/// while the live path keeps faulting, the fault is stale (a TLB / block-cache
+/// coherence bug). Side-effect free: no software-TLB update, no trace-ring
+/// touch, and it never dereferences a table base outside the handoff window.
+#[allow(unsafe_code)]
+pub fn walk_debug(sysregs: &[u64], va: u64, is_write: bool) -> WalkDebug {
+    let mut out = WalkDebug {
+        ttbr: 0,
+        tcr: 0,
+        start_level: 0,
+        levels: [(0, 0); 4],
+        fault_level: 0,
+        out_pa: 0,
+        window_reject: false,
+    };
+    let va_high = (va >> 55) & 1 == 1;
+    let ttbr = if va_high {
+        sysregs[SYSREG_SLOT0 + SLOT_TTBR1]
+    } else {
+        sysregs[SYSREG_SLOT0 + SLOT_TTBR0]
+    };
+    let tcr = sysregs[SYSREG_SLOT0 + SLOT_TCR];
+    out.ttbr = ttbr;
+    out.tcr = tcr;
+    let start_level = match regime_start_level(tcr, va_high) {
+        Some(l) => l,
+        None => {
+            out.fault_level = 0;
+            return out;
+        }
+    };
+    out.start_level = start_level;
+
+    let mut table = ttbr & ADDR_MASK;
+    if !in_window(table) {
+        out.window_reject = true;
+        out.fault_level = start_level as i8;
+        return out;
+    }
+    for level in start_level..4 {
+        let shift = 12 + 9 * (3 - level as u32);
+        let index = (va >> shift) & 0x1FF;
+        let desc_pa = table + index * 8;
+        // SAFETY: `table` is confirmed in-window; `index < 512`, 8-byte aligned.
+        let desc = unsafe { core::ptr::read_volatile(desc_pa as *const u64) };
+        out.levels[level as usize] = (desc_pa, desc);
+
+        if desc & 1 == 0 {
+            out.fault_level = level as i8; // invalid descriptor = translation fault
+            return out;
+        }
+        let is_table_or_page = desc & 0b10 != 0;
+        if level == 3 {
+            if !is_table_or_page {
+                out.fault_level = level as i8;
+                return out;
+            }
+            match finish_leaf(desc, va, 12, level, is_write) {
+                Ok((pa, _)) => {
+                    out.fault_level = -1;
+                    out.out_pa = pa;
+                }
+                Err((_, l)) => out.fault_level = l as i8,
+            }
+            return out;
+        }
+        if !is_table_or_page {
+            // Block descriptor (1 GiB at L1, 2 MiB at L2; L0 block is invalid).
+            if level == 0 {
+                out.fault_level = level as i8;
+                return out;
+            }
+            match finish_leaf(desc, va, shift, level, is_write) {
+                Ok((pa, _)) => {
+                    out.fault_level = -1;
+                    out.out_pa = pa;
+                }
+                Err((_, l)) => out.fault_level = l as i8,
+            }
+            return out;
+        }
+        table = desc & ADDR_MASK;
+        if !in_window(table) {
+            out.window_reject = true;
+            out.fault_level = level as i8;
+            return out;
+        }
+    }
+    out.fault_level = 3;
+    out
 }
 
 /// Common leaf handling: AF / permission checks + PA assembly. `block_shift` is
@@ -1126,6 +1501,9 @@ pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64,
     let sysregs = unsafe { core::slice::from_raw_parts(ctx, CTX_U64S) };
     let is_w = is_write != 0;
     let mmu_on = sysregs[SYSREG_SLOT0 + SLOT_SCTLR] & SCTLR_M != 0;
+    // Materialise any deferred cross-page STORE scatter before this access reads
+    // or writes guest RAM (it may target the very bytes just stored).
+    flush_scatter();
     // Phase-G: log xlate-for-write calls that fall in the eBPF buffer range.
     // STP / wide-Q stores go through here and write to host RAM directly,
     // bypassing aether_mmu_store — so the simple store-tracker would miss
@@ -1201,17 +1579,63 @@ pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64,
     // single host access cannot serve a split RAM/MMIO span). `size` is clamped
     // to ≥ 1 so a zero-size probe never underflows. Page-granular fetches
     // (4-byte, 4-aligned) never span, so this path is data-only.
-    let span = size.max(1) - 1;
+    let sz = size.max(1);
+    let span = sz - 1;
     let last = va.wrapping_add(span);
     if (va >> 12) != (last >> 12) {
         let pa_last = match xlate_page(sysregs, last, is_w) {
             Ok(pa) => pa,
             Err((kind, level)) => return record_pending_fault(ctx, va, kind, level, is_w),
         };
-        if is_mmio(pa_last) || pa_last != pa.wrapping_add(span) {
-            // Mapped but PA-discontiguous (or split RAM/MMIO): a single host
-            // access cannot serve it.
+        if is_mmio(pa_last) {
+            // A split RAM/MMIO span can't be served by one host access, and a
+            // device half can't be bounced — fail loud.
             return record_pending_fault(ctx, va, FaultKind::Translation, 3, is_w);
+        }
+        if pa_last != pa.wrapping_add(span) {
+            // Mapped but PA-DISCONTIGUOUS. Both guest pages ARE present (the
+            // kernel can't help — injecting a fault just spins the guest on the
+            // straddling LDP/STP/LDR-Q forever), so serve the span via the
+            // 16-byte bounce buffer when it fits. Wider non-contiguous spans
+            // (LDP-Q/LD4) stay loud until the scratch is widened.
+            if sz > SPAN_SCRATCH_MAX {
+                return record_pending_fault(ctx, va, FaultKind::Translation, 3, is_w);
+            }
+            let n1 = 0x1000 - (va & 0xFFF); // bytes resident in page 1
+            let n2 = sz - n1; // bytes resident in page 2
+            let pa2_base = pa_last & !0xFFFu64; // page-2 host PA base
+            // SAFETY: `pa`/`pa2_base` were confined to the guest window by
+            // `xlate_page`; the scratch is two in-bounds free ctx slots.
+            let scratch = unsafe { ctx.add(SYSREG_SLOT0 + SLOT_SPAN_SCRATCH) as *mut u8 };
+            if is_w {
+                // STORE: hand the caller the bounce buffer and DEFER the scatter
+                // (no post-write hook). flush_scatter() at the next entry copies
+                // the written bytes back to the two pages.
+                unsafe {
+                    *core::ptr::addr_of_mut!(SCATTER_SRC) = scratch as *const u8;
+                    *core::ptr::addr_of_mut!(SCATTER_PA1) = pa;
+                    *core::ptr::addr_of_mut!(SCATTER_N1) = n1;
+                    *core::ptr::addr_of_mut!(SCATTER_PA2) = pa2_base;
+                    *core::ptr::addr_of_mut!(SCATTER_N2) = n2;
+                    *core::ptr::addr_of_mut!(SCATTER_PENDING) = true;
+                    *core::ptr::addr_of_mut!(SCATTER_SET_COUNT) =
+                        (*core::ptr::addr_of!(SCATTER_SET_COUNT)).wrapping_add(1);
+                }
+                return scratch as u64;
+            }
+            // LOAD: gather both pages' bytes into the bounce buffer NOW and
+            // return its host address; the caller's `mov rd,[rax]` / `movdqu`
+            // reads the contiguous copy.
+            // SAFETY: in-window source PAs; `n1 + n2 == sz <= 16` fits the slot.
+            unsafe {
+                core::ptr::copy_nonoverlapping(pa as *const u8, scratch, n1 as usize);
+                core::ptr::copy_nonoverlapping(
+                    pa2_base as *const u8,
+                    scratch.add(n1 as usize),
+                    n2 as usize,
+                );
+            }
+            return scratch as u64;
         }
     }
     // Phase-E: vmemmap LOAD tracer — record (va, pa, 0, size) so we can
@@ -1220,6 +1644,11 @@ pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64,
     // here, the caller does the actual read via the returned pa pointer).
     if !is_w {
         vmm_trace_record(va, pa, 0, size.max(1) as u8, 0);
+        // Phase-G x30-hunt: capture the physical value this load is about to
+        // read (incl. LDP pair loads, which route through here) for the armed
+        // stack-slot window. Lets the dispatcher tell a load-side miscompile
+        // (slot value correct, dest reg wrong) from a store-side one.
+        ebpf_load_record(va, pa, size.max(1));
     }
     pa
 }
@@ -1243,6 +1672,12 @@ pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, val
     // SAFETY: caller's contract — ctx is the register-file base.
     let sysregs = unsafe { core::slice::from_raw_parts(ctx, CTX_U64S) };
     let mmu_on = sysregs[SYSREG_SLOT0 + SLOT_SCTLR] & SCTLR_M != 0;
+
+    // (SLAB cpu-partial self-cycle catcher removed — the CAS-width fix resolved
+    // the put_cpu_partial deadlock; boot now proceeds into Android userspace.)
+
+    // Materialise any deferred cross-page STORE scatter before this store runs.
+    flush_scatter();
 
     let pa = if !mmu_on {
         va
@@ -1268,8 +1703,29 @@ pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, val
                 Ok(pa) => pa,
                 Err((kind, level)) => return record_pending_fault(ctx, va, kind, level, true),
             };
-            if is_mmio(pa_last) || pa_last != pa.wrapping_add(span) {
+            if is_mmio(pa_last) {
                 return record_pending_fault(ctx, va, FaultKind::Translation, 3, true);
+            }
+            if pa_last != pa.wrapping_add(span) {
+                // DISCONTIGUOUS RAM: both pages are mapped, so faulting would
+                // just spin the guest on the straddling store. We hold the
+                // value here — split it across the two pages byte-wise (LE).
+                let n1 = 0x1000 - (va & 0xFFF);
+                let pa2_base = pa_last & !0xFFFu64;
+                vmm_trace_record(va, pa, value, sz as u8, 1);
+                ebpf_store_record(va, value, sz as u8);
+                // SAFETY: both PAs were confined to the guest window by the
+                // walk; `sz <= 8` so the shift never exceeds 56.
+                unsafe {
+                    let mut i = 0u64;
+                    while i < sz {
+                        let b = (value >> (8 * i)) as u8;
+                        let dst = if i < n1 { pa + i } else { pa2_base + (i - n1) };
+                        core::ptr::write_volatile(dst as *mut u8, b);
+                        i += 1;
+                    }
+                }
+                return MMIO_STORE_OK;
             }
         }
     } else {
@@ -1398,6 +1854,9 @@ mod tests {
         // `let _g = setup();` — an unconditional self-recursive call that
         // dead-locked/overflowed every MMU test before it could run.)
         aether_mmu_flush_all();
+        // SAFETY: serialized by the lock; drop any cross-page scatter a prior
+        // test queued but did not flush, so it cannot apply into this test.
+        unsafe { *core::ptr::addr_of_mut!(SCATTER_PENDING) = false; }
         aether_mmu_set_window(0, u64::MAX); // clamp effectively disabled
         g
     }
@@ -1652,14 +2111,17 @@ mod tests {
         assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "no fault for a contiguous span");
     }
 
-    /// 2b cross-page (DISCONTIGUOUS): the same straddling access but the second
-    /// page maps to a NON-adjacent PA must fault loudly (pending Data Abort,
-    /// FAR = the access base VA) rather than touch the wrong second page.
-    #[test]
-    fn xlate_spanning_discontiguous_pages_faults() {
-        let _g = setup();
-        let va = 0x22_0000u64;
-        let pa = 0x80BB_0000u64;
+    /// Build a 4-level chain mapping `va` and `va + 0x1000` to two REAL,
+    /// physically NON-contiguous host pages (separate allocations). Returns
+    /// (ctx, page1_pa, page2_pa). Used by the cross-page bounce-buffer tests:
+    /// the demand-paged anon pages a guest actually straddles are rarely
+    /// PA-adjacent, and the bytes must be dereferenced (gathered/scattered), so
+    /// the leaves must point at backed memory — not the fake PAs the older
+    /// fault-only test could get away with.
+    fn map_4k_2pages_discontig(va: u64) -> (Vec<u64>, u64, u64) {
+        let (p1_pa, _) = alloc_table();
+        let (p2_pa, _) = alloc_table();
+        assert_ne!(p2_pa, p1_pa + 0x1000, "test needs non-adjacent backing pages");
         let (l0_pa, l0) = alloc_table();
         let (l1_pa, l1) = alloc_table();
         let (l2_pa, l2) = alloc_table();
@@ -1667,16 +2129,74 @@ mod tests {
         l0[((va >> 39) & 0x1FF) as usize] = table_desc(l1_pa);
         l1[((va >> 30) & 0x1FF) as usize] = table_desc(l2_pa);
         l2[((va >> 21) & 0x1FF) as usize] = table_desc(l3_pa);
-        l3[((va >> 12) & 0x1FF) as usize] = leaf_desc(pa, true, false);
-        // Second page -> pa + 0x5000 (NOT pa + 0x1000): physically discontiguous.
-        l3[(((va + 0x1000) >> 12) & 0x1FF) as usize] = leaf_desc(pa + 0x5000, true, false);
-        let mut ctx = ctx_with_ttbr0(l0_pa, true);
-        let acc = va | 0xFFC;
+        l3[((va >> 12) & 0x1FF) as usize] = leaf_desc(p1_pa, true, false);
+        l3[(((va + 0x1000) >> 12) & 0x1FF) as usize] = leaf_desc(p2_pa, true, false);
+        (ctx_with_ttbr0(l0_pa, true), p1_pa, p2_pa)
+    }
+
+    /// 2b cross-page (DISCONTIGUOUS) LOAD: an 8-byte read straddling a boundary
+    /// whose two pages are physically non-adjacent is served by GATHERING both
+    /// halves into the bounce buffer (NOT faulting — both pages are mapped, so a
+    /// fault would just spin the guest on the straddling LDP forever).
+    #[test]
+    fn xlate_spanning_discontiguous_load_gathers() {
+        let _g = setup();
+        let va = 0x22_0000u64;
+        let (mut ctx, p1_pa, p2_pa) = map_4k_2pages_discontig(va);
+        // Known LE bytes: page-1 [0xFFC..0x1000] = 11 22 33 44 (-> 0x44332211 read
+        // as the low 4 bytes), page-2 [0..4] = 55 66 77 88.
+        // SAFETY: both pages are real 4 KiB allocations.
+        unsafe {
+            let b1 = p1_pa as *mut u8;
+            b1.add(0xFFC).write(0x11);
+            b1.add(0xFFD).write(0x22);
+            b1.add(0xFFE).write(0x33);
+            b1.add(0xFFF).write(0x44);
+            let b2 = p2_pa as *mut u8;
+            b2.add(0).write(0x55);
+            b2.add(1).write(0x66);
+            b2.add(2).write(0x77);
+            b2.add(3).write(0x88);
+        }
+        let acc = va | 0xFFC; // 8-byte load, 4 bytes each side of the boundary
         // SAFETY: ctx is CTX_U64S long.
         let got = unsafe { aether_mmu_xlate(ctx.as_mut_ptr(), acc, 0, 8) };
-        assert_eq!(got, XLATE_FAULT, "discontiguous cross-page span -> fault sentinel");
-        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 1, "pending Data Abort recorded");
-        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_FAR], acc, "FAR = the access base VA");
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "no fault for a gathered span");
+        assert_ne!(got, XLATE_FAULT, "gathered load returns a buffer, not the fault sentinel");
+        // SAFETY: `got` is the in-ctx bounce buffer; read the contiguous 8 bytes.
+        let gathered = unsafe { core::ptr::read_unaligned(got as *const u64) };
+        assert_eq!(gathered, 0x8877_6655_4433_2211, "gathered LE 8-byte spanning value");
+    }
+
+    /// 2b cross-page (DISCONTIGUOUS) STORE: an 8-byte write straddling a boundary
+    /// whose two pages are non-adjacent returns the bounce buffer and DEFERS the
+    /// scatter; the next MMU entry flushes the written bytes back to both pages.
+    #[test]
+    fn xlate_spanning_discontiguous_store_scatters() {
+        let _g = setup();
+        let va = 0x24_0000u64;
+        let (mut ctx, p1_pa, p2_pa) = map_4k_2pages_discontig(va);
+        let acc = va | 0xFFC;
+        // Store-xlate hands back the bounce buffer + queues a deferred scatter.
+        // SAFETY: ctx is CTX_U64S long.
+        let dst = unsafe { aether_mmu_xlate(ctx.as_mut_ptr(), acc, 1, 8) };
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "store-xlate must not fault");
+        assert_ne!(dst, XLATE_FAULT, "store-xlate returns a buffer");
+        // The lowered movs write the value into the buffer (here, directly).
+        // SAFETY: `dst` is the 16-byte in-ctx bounce buffer.
+        unsafe { core::ptr::write_unaligned(dst as *mut u64, 0xAABB_CCDD_1122_3344) };
+        // Not yet scattered: page-1's straddled bytes are still zero.
+        // SAFETY: real page.
+        assert_eq!(unsafe { core::ptr::read_unaligned((p1_pa + 0xFFC) as *const u32) }, 0,
+            "bytes are buffered, not yet in RAM");
+        // Any later entry flushes the scatter. A harmless 1-byte re-xlate does it.
+        // SAFETY: ctx is CTX_U64S long.
+        let _ = unsafe { aether_mmu_xlate(ctx.as_mut_ptr(), va, 0, 1) };
+        // SAFETY: real pages; low 4 bytes -> page 1, high 4 -> page 2 (LE).
+        let lo = unsafe { core::ptr::read_unaligned((p1_pa + 0xFFC) as *const u32) };
+        let hi = unsafe { core::ptr::read_unaligned(p2_pa as *const u32) };
+        assert_eq!(lo, 0x1122_3344, "low 4 bytes scattered to page 1");
+        assert_eq!(hi, 0xAABB_CCDD, "high 4 bytes scattered to page 2");
     }
 
     /// must-fix #1: a 39-bit-VA / 3-level / start-L1 regime (the Android GKI

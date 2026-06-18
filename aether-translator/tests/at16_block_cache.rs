@@ -7,7 +7,7 @@ use aether_translator::runtime::block_cache::BlockCache;
 #[test]
 fn at16_insert_and_hit() {
     let mut cache = BlockCache::new(64);
-    cache.insert(0x1000, 0, 32);
+    cache.insert(0x1000, 0, 32, true);
     let blk = cache.lookup(0x1000).expect("should hit");
     assert_eq!(blk.host_offset, 0);
     assert_eq!(blk.len, 32);
@@ -24,7 +24,7 @@ fn at16_miss_returns_none() {
 #[test]
 fn at16_invalidate_removes_entry() {
     let mut cache = BlockCache::new(64);
-    cache.insert(0x2000, 64, 16);
+    cache.insert(0x2000, 64, 16, true);
     assert!(cache.lookup(0x2000).is_some());
     cache.invalidate(0x2000);
     assert!(cache.lookup(0x2000).is_none());
@@ -33,8 +33,8 @@ fn at16_invalidate_removes_entry() {
 #[test]
 fn at16_update_existing_entry() {
     let mut cache = BlockCache::new(64);
-    cache.insert(0x3000, 0, 10);
-    cache.insert(0x3000, 100, 20); // update
+    cache.insert(0x3000, 0, 10, true);
+    cache.insert(0x3000, 100, 20, true); // update
     let blk = cache.lookup(0x3000).unwrap();
     assert_eq!(blk.host_offset, 100);
     assert_eq!(blk.len, 20);
@@ -44,7 +44,7 @@ fn at16_update_existing_entry() {
 fn at16_flush_all_clears_both_generations() {
     let mut cache = BlockCache::new(16);
     for i in 0..8u64 {
-        cache.insert(i * 4, i as usize * 32, 32);
+        cache.insert(i * 4, i as usize * 32, 32, true);
     }
     cache.flush_all();
     for i in 0..8u64 {
@@ -65,7 +65,7 @@ fn at16_hit_rate_gate_99pct() {
 
     // Warm-up: insert all blocks.
     for pc in (0..N_PCS).map(|i| i * 4) {
-        cache.insert(pc, pc as usize, 16);
+        cache.insert(pc, pc as usize, 16, true);
     }
 
     // Steady-state: look up every PC ACCESSES_PER_PC times.
@@ -93,7 +93,7 @@ fn at16_generational_eviction_promotes_active() {
     let mut cache = BlockCache::new(8); // capacity=8, threshold=5 (70%)
     // Insert 6 entries to trigger rotation.
     for i in 0..6u64 {
-        cache.insert(i * 4, i as usize, 4);
+        cache.insert(i * 4, i as usize, 4, true);
     }
     // After rotation, old entries are in old-gen.
     // Looking them up should promote them back.
@@ -110,7 +110,7 @@ fn at16_generational_eviction_promotes_active() {
 #[test]
 fn at16_stat_counters_monotone() {
     let mut cache = BlockCache::new(32);
-    cache.insert(0xA000, 0, 8);
+    cache.insert(0xA000, 0, 8, true);
     let _ = cache.lookup(0xA000); // hit
     let _ = cache.lookup(0xB000); // miss
     let _ = cache.lookup(0xA000); // hit
@@ -123,7 +123,7 @@ fn at16_load_factor_below_threshold_before_rotation() {
     let mut cache = BlockCache::new(16);
     // Insert fewer than 70% of capacity.
     for i in 0..10u64 {
-        cache.insert(i * 4, i as usize, 4);
+        cache.insert(i * 4, i as usize, 4, true);
     }
     // load factor = 10/16 = 0.625 < 0.7, should not have rotated.
     assert_eq!(cache.generation(), 0, "should not have rotated yet");

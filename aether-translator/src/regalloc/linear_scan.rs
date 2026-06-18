@@ -6,12 +6,18 @@
 //! (modeled as a spill slot index).
 //!
 //! Gate: zero allocation failures; spill ratio < 8 % of ops.
+//!
+//! Leak note (hypervisor bump heap): every container here is reusable across
+//! translations.  `assignments` is an [`AssignMap`] backed by a `Vec` rather
+//! than a `BTreeMap` so [`AssignMap::clear`] keeps its capacity — a fresh
+//! `BTreeMap` per cold block leaked its B-tree nodes into the never-freeing
+//! bump allocator every translation.  The linear-scan working lists live in a
+//! reusable [`ScanScratch`] threaded from the DBT runtime.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::liveness::LiveInterval;
-use super::x86_regs::{RegClass, ALLOCATABLE_GPRS, ALLOCATABLE_XMMS};
+use super::x86_regs::{RegClass, ALLOCATABLE_GPRS};
 
 /// Assignment for a single IR value after allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,10 +27,80 @@ pub enum Assignment {
     Spill(u32), // spill slot index in the context block
 }
 
+/// Dense `value_id → Assignment` map backed by a `Vec<Option<Assignment>>`
+/// indexed by the (block-local, dense) IR value id.
+///
+/// Drop-in for the previous `BTreeMap<u32, Assignment>` — same `get` / `insert`
+/// / `len` surface — but [`AssignMap::clear`] keeps the backing allocation,
+/// whereas `BTreeMap::clear` frees its nodes and the next insert re-allocates.
+/// Under the hypervisor's never-freeing bump heap that re-allocation was a
+/// per-cold-block leak; a `Vec` reused across translations does not grow the
+/// heap once warm.
+#[derive(Debug, Clone, Default)]
+pub struct AssignMap {
+    slots: Vec<Option<Assignment>>,
+    /// Number of distinct value ids currently assigned (matches `BTreeMap::len`).
+    count: usize,
+}
+
+impl AssignMap {
+    pub fn new() -> Self {
+        Self { slots: Vec::new(), count: 0 }
+    }
+
+    /// Look up an assignment by value id (`&u32` to mirror the old
+    /// `BTreeMap::get(&key)` call sites verbatim).
+    #[inline]
+    pub fn get(&self, vid: &u32) -> Option<&Assignment> {
+        self.slots.get(*vid as usize).and_then(|s| s.as_ref())
+    }
+
+    /// Insert or overwrite. Overwriting an existing id leaves `len` unchanged,
+    /// exactly like `BTreeMap::insert` returning the old value.
+    #[inline]
+    pub fn insert(&mut self, vid: u32, a: Assignment) {
+        let i = vid as usize;
+        if i >= self.slots.len() {
+            self.slots.resize(i + 1, None);
+        }
+        if self.slots[i].is_none() {
+            self.count += 1;
+        }
+        self.slots[i] = Some(a);
+    }
+
+    /// Number of distinct value ids assigned.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Iterate `(value_id, &assignment)` over assigned ids in ascending order.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &Assignment)> + '_ {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|a| (i as u32, a)))
+    }
+
+    /// Clear for reuse, keeping the backing allocation (no free under the bump
+    /// heap; the next fill reuses the warm capacity).
+    #[inline]
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.count = 0;
+    }
+}
+
 /// Output of the allocator.
 #[derive(Debug, Clone, Default)]
 pub struct AllocResult {
-    pub assignments: BTreeMap<u32, Assignment>, // value_id → assignment
+    pub assignments: AssignMap, // value_id → assignment
     pub n_spill_slots: u32,
     pub n_intervals: usize,
     pub n_spilled: usize,
@@ -49,29 +125,62 @@ impl AllocResult {
             && self.spill_ratio() < 0.08
             && (self.n_spill_slots as usize) <= crate::runtime::context::SPILL_SLOTS
     }
+
+    /// Reset for reuse, keeping the assignment-map capacity.
+    #[inline]
+    pub fn reset(&mut self) {
+        self.assignments.clear();
+        self.n_spill_slots = 0;
+        self.n_intervals = 0;
+        self.n_spilled = 0;
+    }
+}
+
+/// Reusable linear-scan working lists (the per-class active/free sets). Held by
+/// the DBT runtime and reset per translation so the allocator does not allocate
+/// into the bump heap on every cold block.
+#[derive(Default)]
+pub struct ScanScratch {
+    gpr: ClassAlloc,
+    xmm: ClassAlloc,
 }
 
 pub struct LinearScanAlloc;
 
 impl LinearScanAlloc {
+    /// Standalone (allocating) entry — used by tests and one-shot callers.
+    /// Allocates fresh scratch; the hot DBT path must use [`Self::allocate_into`].
     pub fn allocate(intervals: &[LiveInterval]) -> AllocResult {
-        let mut gpr_alloc =
-            ClassAlloc::new(ALLOCATABLE_GPRS.len(), crate::regalloc::x86_regs::GPR_ALLOC_FIRST_INDEX);
+        let mut scratch = ScanScratch::default();
+        let mut out = AllocResult::default();
+        Self::allocate_into(intervals, &mut scratch, &mut out);
+        out
+    }
+
+    /// Reusable entry: fills `out` using `scratch`'s warm working lists. Both
+    /// `scratch` and `out` keep their capacity across calls.
+    pub fn allocate_into(intervals: &[LiveInterval], scratch: &mut ScanScratch, out: &mut AllocResult) {
+        out.reset();
         // XMM 0..=3 are reserved as SIMD/FP ctx-template scratch (VS0..VS3) and
         // XMM15 (VFP) as the LDR/STR-Q transfer register; the allocator may only
         // assign XMM4..=14 to IR values. (Defensive: the live path lowers vector
         // ops via ctx templates and does not allocate XMMs.)
-        let mut xmm_alloc = ClassAlloc::new(
+        scratch
+            .gpr
+            .reset(ALLOCATABLE_GPRS.len(), crate::regalloc::x86_regs::GPR_ALLOC_FIRST_INDEX);
+        scratch.xmm.reset(
             crate::regalloc::x86_regs::XMM_ALLOC_COUNT,
             crate::regalloc::x86_regs::XMM_ALLOC_FIRST_INDEX,
         );
-        let mut assignments: BTreeMap<u32, Assignment> = BTreeMap::new();
+
+        let assignments = &mut out.assignments;
         let mut n_spill_slots = 0u32;
         let mut n_spilled = 0usize;
 
         for interval in intervals {
             match interval.class {
                 RegClass::Gpr => {
+                    let gpr_alloc = &mut scratch.gpr;
                     gpr_alloc.expire_old(interval.start);
                     if let Some(reg) = gpr_alloc.alloc_reg() {
                         gpr_alloc.active.push(ActiveInterval { end: interval.end, reg, vid: interval.value.0 });
@@ -107,6 +216,7 @@ impl LinearScanAlloc {
                     }
                 }
                 RegClass::Xmm => {
+                    let xmm_alloc = &mut scratch.xmm;
                     xmm_alloc.expire_old(interval.start);
                     if let Some(reg) = xmm_alloc.alloc_reg() {
                         xmm_alloc.active.push(ActiveInterval { end: interval.end, reg, vid: interval.value.0 });
@@ -137,8 +247,9 @@ impl LinearScanAlloc {
             }
         }
 
-        let n_intervals = intervals.len();
-        AllocResult { assignments, n_spill_slots, n_intervals, n_spilled }
+        out.n_spill_slots = n_spill_slots;
+        out.n_intervals = intervals.len();
+        out.n_spilled = n_spilled;
     }
 }
 
@@ -150,8 +261,8 @@ struct ActiveInterval {
     vid: u32,
 }
 
+#[derive(Default)]
 struct ClassAlloc {
-    n_regs: usize,
     /// Sorted by end point.
     active: Vec<ActiveInterval>,
     /// Free register indices.
@@ -159,17 +270,20 @@ struct ClassAlloc {
 }
 
 impl ClassAlloc {
+    /// Reset in place for reuse, keeping the `active`/`free` Vec capacities.
     /// `n_regs` total registers; `reserved_low` indices [0, reserved_low) are
     /// withheld from allocation (M4a: GPR reserves RAX(0)/RCX(1) as scratch).
-    fn new(n_regs: usize, reserved_low: usize) -> Self {
-        let free: Vec<usize> = (reserved_low..n_regs).collect();
-        Self { n_regs, active: Vec::new(), free }
+    fn reset(&mut self, n_regs: usize, reserved_low: usize) {
+        self.active.clear();
+        self.free.clear();
+        self.free.extend(reserved_low..n_regs);
     }
 
     fn expire_old(&mut self, pos: usize) {
+        let free = &mut self.free;
         self.active.retain(|a| {
             if a.end <= pos {
-                self.free.push(a.reg);
+                free.push(a.reg);
                 false
             } else {
                 true

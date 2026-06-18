@@ -39,6 +39,14 @@ pub mod regid {
     pub const CNTV_TVAL_EL0: u32 = 0x104;
     /// Physical count — aliased to the virtual count in the DBT (no CNTVOFF).
     pub const CNTPCT_EL0: u32 = 0x105;
+    // ── Physical EL1 timer (CNTP) — a SEPARATE compare unit from CNTV. A
+    // kernel booted at EL1 normally uses the virtual timer, but model the
+    // physical one too so a kernel that selects CNTP (or programs both) gets
+    // a working timer IRQ (PPI 14 → INTID 30) instead of writes sinking to
+    // dead ctx slots.
+    pub const CNTP_CTL_EL0: u32 = 0x106;
+    pub const CNTP_CVAL_EL0: u32 = 0x107;
+    pub const CNTP_TVAL_EL0: u32 = 0x108;
     // ── GICv3 CPU interface ──────────────────────────────────────────────────
     pub const ICC_PMR_EL1: u32 = 0x200;
     pub const ICC_IAR1_EL1: u32 = 0x201;
@@ -55,8 +63,14 @@ pub mod regid {
 /// QEMU virt platform).
 pub const DEFAULT_CNTFRQ: u64 = 24_000_000;
 
+/// Non-secure physical EL1 timer interrupt — PPI 14 maps to absolute INTID 30.
+pub const TIMER_PHYS_INTID: u32 = 30;
+
 // ── Single-vCPU global platform state ────────────────────────────────────────
 static mut TIMER: VirtualTimer = VirtualTimer::new(DEFAULT_CNTFRQ);
+/// The physical EL1 timer (CNTP) — a separate compare unit sharing the same live
+/// count `NOW`. Dormant unless the kernel selects the physical timer.
+static mut PTIMER: VirtualTimer = VirtualTimer::new(DEFAULT_CNTFRQ);
 static mut GIC: VirtualGic = VirtualGic::new();
 /// The live virtual count (CNTVCT_EL0). Advanced by `aether_timer_set_now`.
 static mut NOW: u64 = 0;
@@ -76,6 +90,23 @@ pub static mut SYSREG_UNKNOWN_READS: u32 = 0;
 pub static mut SYSREG_UNKNOWN_WRITES: u32 = 0;
 pub static mut SYSREG_LAST_UNKNOWN_READ_ID: u32 = 0;
 pub static mut SYSREG_LAST_UNKNOWN_WRITE_ID: u32 = 0;
+
+// ── Timer / IRQ delivery diagnostics ─────────────────────────────────────────
+// These distinguish the two opposite timer failure modes on a slow DBT:
+//   * timer IRQ NEVER delivered  → TIMER_FIRED_POLLS stays ~0 while the kernel
+//     waits on jiffies/scheduler  (GIC enable/group/igrpen not set, or the timer
+//     condition is never met because CVAL is never programmed);
+//   * timer IRQ STORM            → IAR1_TIMER_ACKS climbs ~1:1 with dispatches
+//     (the handler re-fires immediately because handling it took longer, in
+//     wall-clock, than the programmed period).
+/// Count of `aether_pending_irq` polls (≈ block dispatches that checked IRQs).
+pub static mut IRQ_PENDING_POLLS: u64 = 0;
+/// Count of polls where the virtual timer condition was met + unmasked.
+pub static mut TIMER_FIRED_POLLS: u64 = 0;
+/// Count of `ICC_IAR1_EL1` acks that returned the timer PPI (27).
+pub static mut IAR1_TIMER_ACKS: u64 = 0;
+/// Count of `ICC_EOIR1_EL1` writes for the timer PPI.
+pub static mut EOIR1_TIMER_WRITES: u64 = 0;
 
 #[allow(unsafe_code)]
 fn now() -> u64 {
@@ -100,6 +131,7 @@ pub extern "C" fn aether_platform_reset() {
     // SAFETY: EL2-private, single-vCPU.
     unsafe {
         *core::ptr::addr_of_mut!(TIMER) = VirtualTimer::new(DEFAULT_CNTFRQ);
+        *core::ptr::addr_of_mut!(PTIMER) = VirtualTimer::new(DEFAULT_CNTFRQ);
         *core::ptr::addr_of_mut!(GIC) = VirtualGic::new();
         *core::ptr::addr_of_mut!(NOW) = 0;
         *core::ptr::addr_of_mut!(BPR1) = 0;
@@ -114,6 +146,7 @@ pub extern "C" fn aether_sysreg_read(reg_id: u32) -> u64 {
     // SAFETY: EL2-private, single-vCPU; in-place access to the singletons.
     unsafe {
         let timer = &*core::ptr::addr_of!(TIMER);
+        let ptimer = &*core::ptr::addr_of!(PTIMER);
         let gic = &mut *core::ptr::addr_of_mut!(GIC);
         let val = match reg_id {
             CNTVCT_EL0 | CNTPCT_EL0 => now,
@@ -121,8 +154,18 @@ pub extern "C" fn aether_sysreg_read(reg_id: u32) -> u64 {
             CNTV_CTL_EL0 => timer.read_ctl(now),
             CNTV_CVAL_EL0 => timer.read_cval(),
             CNTV_TVAL_EL0 => timer.read_tval(now),
+            CNTP_CTL_EL0 => ptimer.read_ctl(now),
+            CNTP_CVAL_EL0 => ptimer.read_cval(),
+            CNTP_TVAL_EL0 => ptimer.read_tval(now),
             ICC_PMR_EL1 => gic.pmr as u64,
-            ICC_IAR1_EL1 => gic.ack_iar1() as u64, // SIDE EFFECT: acknowledges
+            ICC_IAR1_EL1 => {
+                let id = gic.ack_iar1(); // SIDE EFFECT: acknowledges
+                if id == TIMER_VIRT_INTID {
+                    *core::ptr::addr_of_mut!(IAR1_TIMER_ACKS) =
+                        (*core::ptr::addr_of!(IAR1_TIMER_ACKS)).saturating_add(1);
+                }
+                id as u64
+            }
             ICC_HPPIR1_EL1 => gic.hppir1() as u64,
             ICC_IGRPEN1_EL1 => u64::from(gic.igrpen1),
             ICC_CTLR_EL1 => gic.ctlr,
@@ -149,6 +192,7 @@ pub extern "C" fn aether_sysreg_write(reg_id: u32, val: u64) {
     // SAFETY: EL2-private, single-vCPU.
     unsafe {
         let timer = &mut *core::ptr::addr_of_mut!(TIMER);
+        let ptimer = &mut *core::ptr::addr_of_mut!(PTIMER);
         let gic = &mut *core::ptr::addr_of_mut!(GIC);
         *core::ptr::addr_of_mut!(SYSREG_LAST_WRITE_ID) = reg_id;
         *core::ptr::addr_of_mut!(SYSREG_LAST_WRITE_VAL) = val;
@@ -156,9 +200,21 @@ pub extern "C" fn aether_sysreg_write(reg_id: u32, val: u64) {
             CNTV_CTL_EL0 => timer.write_ctl(val),
             CNTV_CVAL_EL0 => timer.write_cval(val),
             CNTV_TVAL_EL0 => timer.write_tval(val, now),
-            CNTFRQ_EL0 => timer.cntfrq = val,
+            CNTP_CTL_EL0 => ptimer.write_ctl(val),
+            CNTP_CVAL_EL0 => ptimer.write_cval(val),
+            CNTP_TVAL_EL0 => ptimer.write_tval(val, now),
+            CNTFRQ_EL0 => {
+                timer.cntfrq = val;
+                ptimer.cntfrq = val;
+            }
             ICC_PMR_EL1 => gic.pmr = val as u8,
-            ICC_EOIR1_EL1 => gic.eoir1(val as u32), // SIDE EFFECT: ends interrupt
+            ICC_EOIR1_EL1 => {
+                if val as u32 == TIMER_VIRT_INTID {
+                    *core::ptr::addr_of_mut!(EOIR1_TIMER_WRITES) =
+                        (*core::ptr::addr_of!(EOIR1_TIMER_WRITES)).saturating_add(1);
+                }
+                gic.eoir1(val as u32); // SIDE EFFECT: ends interrupt
+            }
             ICC_DIR_EL1 => gic.dir(val as u32),
             ICC_IGRPEN1_EL1 => gic.igrpen1 = val & 1 != 0,
             ICC_CTLR_EL1 => gic.ctlr = val,
@@ -183,14 +239,73 @@ pub extern "C" fn aether_pending_irq() -> u32 {
     let now = now();
     // SAFETY: EL2-private, single-vCPU.
     unsafe {
+        *core::ptr::addr_of_mut!(IRQ_PENDING_POLLS) =
+            (*core::ptr::addr_of!(IRQ_PENDING_POLLS)).saturating_add(1);
         let timer = &*core::ptr::addr_of!(TIMER);
+        let ptimer = &*core::ptr::addr_of!(PTIMER);
         let gic = &mut *core::ptr::addr_of_mut!(GIC);
-        if timer.irq_pending(now) {
+        let v_fire = timer.irq_pending(now);
+        let p_fire = ptimer.irq_pending(now);
+        if v_fire || p_fire {
+            *core::ptr::addr_of_mut!(TIMER_FIRED_POLLS) =
+                (*core::ptr::addr_of!(TIMER_FIRED_POLLS)).saturating_add(1);
+        }
+        if v_fire {
             gic.raise(TIMER_VIRT_INTID);
         } else {
             gic.lower(TIMER_VIRT_INTID);
         }
+        if p_fire {
+            gic.raise(TIMER_PHYS_INTID);
+        } else {
+            gic.lower(TIMER_PHYS_INTID);
+        }
         gic.signalled_irq().unwrap_or(SPURIOUS_INTID)
+    }
+}
+
+/// Diagnostic snapshot of the timer + GIC delivery state for the timer PPI (27).
+/// Returned as a fixed array so the no-alloc hypervisor halt-dump can print it
+/// without pulling in a struct ABI. Fields (all `u64`):
+///   [0] now (CNTVCT)         [1] timer ctl (ENABLE|IMASK|live ISTATUS)
+///   [2] timer cval           [3] enabled[27]
+///   [4] group1[27]           [5] pending[27]
+///   [6] priority[27]         [7] pmr
+///   [8] igrpen1              [9] running_priority
+///   [10] timer.irq_pending   [11] signalled_irq (or SPURIOUS)
+///   [12] ptimer ctl          [13] ptimer cval
+///   [14] ptimer.irq_pending  [15] enabled[30]
+///   [16] group1[30]          [17] pending[30]
+#[allow(unsafe_code)]
+pub extern "C" fn aether_timer_irq_diag() -> [u64; 18] {
+    let now = now();
+    // SAFETY: EL2-private, single-vCPU; read-only snapshot.
+    unsafe {
+        let timer = &*core::ptr::addr_of!(TIMER);
+        let ptimer = &*core::ptr::addr_of!(PTIMER);
+        let gic = &*core::ptr::addr_of!(GIC);
+        let g = gic.diag_intid(TIMER_VIRT_INTID);
+        let p = gic.diag_intid(TIMER_PHYS_INTID);
+        [
+            now,
+            timer.read_ctl(now),
+            timer.read_cval(),
+            g[0],
+            g[1],
+            g[2],
+            g[3],
+            gic.pmr as u64,
+            gic.igrpen1 as u64,
+            g[4],
+            timer.irq_pending(now) as u64,
+            gic.signalled_irq().unwrap_or(SPURIOUS_INTID) as u64,
+            ptimer.read_ctl(now),
+            ptimer.read_cval(),
+            ptimer.irq_pending(now) as u64,
+            p[0],
+            p[1],
+            p[2],
+        ]
     }
 }
 

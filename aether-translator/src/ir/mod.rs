@@ -76,6 +76,20 @@ impl IrBlock {
         self.flags.push(());
         IrFlagsId(id)
     }
+
+    /// Reset for reuse: clear every per-block table but KEEP its allocated
+    /// capacity (`Vec::clear` / `BTreeSet::clear` do not free). Lets one block
+    /// be re-lifted across translations without re-allocating — under the
+    /// never-freeing bump heap a fresh `IrBlock` per cold block would otherwise
+    /// leak its ops/values buffers (the dominant translate-path leak).
+    pub fn reset(&mut self, id: BlockId) {
+        self.id = id;
+        self.phis.clear();
+        self.ops.clear();
+        self.values.clear();
+        self.flags.clear();
+        self.elided_flags.clear();
+    }
 }
 
 /// A function = vector of blocks. Phase A has no CFG analysis; the vector
@@ -99,6 +113,22 @@ impl IrFunction {
         let id = BlockId(self.blocks.len() as u32);
         self.blocks.push(IrBlock::new(id));
         self.blocks.last_mut().expect("just pushed")
+    }
+
+    /// Reset to a single empty block for reuse, preserving the block's Vec
+    /// capacities (see [`IrBlock::reset`]). `translate_block` always builds a
+    /// one-block function, so reusing one `IrFunction` across translations
+    /// stops the bump heap leaking its IR buffers every cold block. Returns the
+    /// reusable block.
+    pub fn reset_single_block(&mut self, entry_pc: u64) -> &mut IrBlock {
+        self.entry_pc = entry_pc;
+        self.blocks.truncate(1);
+        if self.blocks.is_empty() {
+            self.blocks.push(IrBlock::new(BlockId(0)));
+        } else {
+            self.blocks[0].reset(BlockId(0));
+        }
+        &mut self.blocks[0]
     }
 
     /// AT-2 gate: structural verification (block-local).

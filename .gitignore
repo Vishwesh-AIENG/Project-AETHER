@@ -36,3 +36,16 @@ esp-staging/
 # Built installer artifacts (ch56 GUI). Reproducible from source via:
 #   cargo build --release -p aether-install -p aether-setup
 /dist/
+
+# ── Strictly-code-only push (user directive 2026-06-18): exclude all docs ──
+*.md
+*.rtf
+*.markdown
+# Dev/debug artifacts + scratch logs (never source)
+/_*
+/Image
+/Image.tmp
+/_init.elf
+*.tar.bz2
+/gki-src.git/
+docs/

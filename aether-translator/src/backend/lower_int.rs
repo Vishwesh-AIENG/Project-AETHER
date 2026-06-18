@@ -12,7 +12,7 @@
 use alloc::collections::BTreeMap;
 
 use crate::ir::{IrBlock, IrValueId, IrOp};
-use crate::ir::memory::{LoadTy, StoreTy};
+use crate::ir::memory::{AtomicOp, LoadTy, StoreTy};
 use crate::regalloc::linear_scan::{AllocResult, Assignment};
 use crate::regalloc::x86_regs::{ALLOCATABLE_GPRS, ALLOCATABLE_XMMS};
 use super::encode::X86Encoder;
@@ -345,6 +345,35 @@ impl IntLower {
         }
     }
 
+    /// [dcache-hunt] Runtime address of `aether_fpstore_trace(pa, low64)`.
+    fn fpstore_trace_addr() -> usize {
+        crate::runtime::mmu::aether_fpstore_trace as *const () as usize
+    }
+
+    /// [dcache-hunt] After a Vec128/F64 store, call the FP-store trap with the
+    /// host PA (in RAX/SCRATCH0, preserved by emit_mmu_xlate_call + movdqu) and
+    /// the low 64 bits of the stored value (in VFP=XMM15, callee-saved). Catches
+    /// the mistranslated FP/vector store that corrupts a dentry pointer.
+    fn emit_fpstore_trace(enc: &mut X86Encoder) {
+        const RAX: u8 = 0;
+        const RCX: u8 = 1;
+        const RDX: u8 = 2;
+        let vfp = crate::regalloc::x86_regs::VFP;
+        for &r in Self::MMU_SAVE_REGS.iter() {
+            enc.emit_push_r64(r);
+        }
+        // RAX still holds the PA (not in the save set; movdqu didn't clobber it).
+        enc.emit_mov_rr64(RCX, RAX); // arg0 = PA
+        enc.emit_movq_r64_xmm(RDX, vfp); // arg1 = low64(VFP) (RDX was saved above)
+        enc.emit_sub_r64_imm32(4 /* RSP */, 0x28);
+        enc.emit_mov_r64_imm64(RAX, Self::fpstore_trace_addr() as i64);
+        enc.emit_call_r64(RAX);
+        enc.emit_add_r64_imm32(4 /* RSP */, 0x28);
+        for &r in Self::MMU_SAVE_REGS.iter().rev() {
+            enc.emit_pop_r64(r);
+        }
+    }
+
     /// Runtime address of the `aether_mmu_xlate` FFI helper, baked into the
     /// emitted `MOV RAX, imm64`. The host test crate and the hypervisor link the
     /// same symbol, so this resolves correctly in both contexts. Coercing the
@@ -353,6 +382,28 @@ impl IntLower {
     #[inline]
     fn mmu_xlate_addr() -> usize {
         crate::runtime::mmu::aether_mmu_xlate as *const () as usize
+    }
+
+    /// Width-honouring zero-extending load of `size` bytes from `[base]` into
+    /// `rd` (atomic RMW/CAS old-value read). 32-bit form zero-extends to 64 per
+    /// W-register semantics; matches the `LoadExclusive` width dispatch.
+    fn emit_w_load(enc: &mut X86Encoder, rd: u8, base: u8, size: u8) {
+        match size {
+            1 => enc.emit_movzx_r64_mem8(rd, base, 0),
+            2 => enc.emit_movzx_r64_mem16(rd, base, 0),
+            4 => enc.emit_mov_r32_mem(rd, base, 0),
+            _ => enc.emit_mov_r64_mem(rd, base, 0),
+        }
+    }
+
+    /// Width-honouring store of the low `size` bytes of `rv` to `[base]`.
+    fn emit_w_store(enc: &mut X86Encoder, base: u8, rv: u8, size: u8) {
+        match size {
+            1 => enc.emit_mov_mem8_r64(base, 0, rv),
+            2 => enc.emit_mov_mem16_r64(base, 0, rv),
+            4 => enc.emit_mov_mem32_r64(base, 0, rv),
+            _ => enc.emit_mov_mem_r64(base, 0, rv),
+        }
     }
 
     /// Runtime address of the `aether_mmu_store` FFI helper (M4b-5). Single
@@ -666,6 +717,83 @@ impl IntLower {
         }
     }
 
+    /// Runtime address of `aether_crypto_sha256(ctx, packed)` — ARMv8 SHA-256.
+    fn crypto_sha256_addr() -> usize {
+        crate::runtime::crypto_rt::aether_crypto_sha256 as *const () as usize
+    }
+
+    /// Emit a Win64 CALL to `aether_crypto_sha256(ctx = R15, packed)`. `packed` =
+    /// `kind | (d<<8) | (n<<16) | (m<<24)`. Same save / shadow-space / realign
+    /// discipline as `emit_hvc_call`; the helper reads/writes the guest q-regs
+    /// through R15 (callee-saved, survives the call).
+    fn emit_crypto_sha256_call(enc: &mut X86Encoder, packed: u32) {
+        const RAX: u8 = 0;
+        const RCX: u8 = 1;
+        const RDX: u8 = 2;
+        for &r in Self::MMU_SAVE_REGS.iter() {
+            enc.emit_push_r64(r);
+        }
+        enc.emit_mov_rr64(RCX, CONTEXT_REG); // arg0 = ctx (R15)
+        enc.emit_mov_r64_imm32(RDX, packed as i32); // arg1 = packed (bit31 clear)
+        enc.emit_sub_r64_imm32(4 /* RSP */, 0x28);
+        enc.emit_mov_r64_imm64(RAX, Self::crypto_sha256_addr() as i64);
+        enc.emit_call_r64(RAX);
+        enc.emit_add_r64_imm32(4 /* RSP */, 0x28);
+        for &r in Self::MMU_SAVE_REGS.iter().rev() {
+            enc.emit_pop_r64(r);
+        }
+    }
+
+    /// Runtime address of `aether_svc_enter(ctx, imm16)` (the SVC exception entry).
+    fn svc_enter_addr() -> usize {
+        crate::runtime::exceptions::aether_svc_enter as *const () as usize
+    }
+
+    /// Runtime address of `aether_eret_enter(ctx)` (the full ERET return).
+    fn eret_enter_addr() -> usize {
+        crate::runtime::exceptions::aether_eret_enter as *const () as usize
+    }
+
+    /// Emit a Win64 CALL to `aether_svc_enter(ctx = R15, imm16)`. Same save /
+    /// shadow-space / realign discipline as `emit_hvc_call`; arg1 (imm16) is a
+    /// compile-time constant moved into RDX (32-bit move zero-extends, and
+    /// imm16 < 2^16 so the upper bits are clean).
+    fn emit_svc_call(enc: &mut X86Encoder, imm16: u16) {
+        const RAX: u8 = 0;
+        const RCX: u8 = 1;
+        const RDX: u8 = 2;
+        for &r in Self::MMU_SAVE_REGS.iter() {
+            enc.emit_push_r64(r);
+        }
+        enc.emit_mov_rr64(RCX, CONTEXT_REG); // arg0 = ctx (R15)
+        enc.emit_mov_r64_imm32(RDX, imm16 as i32); // arg1 = imm16
+        enc.emit_sub_r64_imm32(4 /* RSP */, 0x28);
+        enc.emit_mov_r64_imm64(RAX, Self::svc_enter_addr() as i64);
+        enc.emit_call_r64(RAX);
+        enc.emit_add_r64_imm32(4 /* RSP */, 0x28);
+        for &r in Self::MMU_SAVE_REGS.iter().rev() {
+            enc.emit_pop_r64(r);
+        }
+    }
+
+    /// Emit a Win64 CALL to `aether_eret_enter(ctx = R15)`. One arg; identical
+    /// shape to `emit_hvc_call`.
+    fn emit_eret_call(enc: &mut X86Encoder) {
+        const RAX: u8 = 0;
+        const RCX: u8 = 1;
+        for &r in Self::MMU_SAVE_REGS.iter() {
+            enc.emit_push_r64(r);
+        }
+        enc.emit_mov_rr64(RCX, CONTEXT_REG); // arg0 = ctx (R15)
+        enc.emit_sub_r64_imm32(4 /* RSP */, 0x28);
+        enc.emit_mov_r64_imm64(RAX, Self::eret_enter_addr() as i64);
+        enc.emit_call_r64(RAX);
+        enc.emit_add_r64_imm32(4 /* RSP */, 0x28);
+        for &r in Self::MMU_SAVE_REGS.iter().rev() {
+            enc.emit_pop_r64(r);
+        }
+    }
+
     /// Side-effect class of a sysreg `MSR` write that the software MMU walker
     /// observes. The walker keeps a software TLB keyed on the active page-table
     /// configuration; writes to a translation-control register invalidate it.
@@ -822,6 +950,9 @@ impl IntLower {
             CntvCtlEl0 => regid::CNTV_CTL_EL0,
             CntvCvalEl0 => regid::CNTV_CVAL_EL0,
             CntvTvalEl0 => regid::CNTV_TVAL_EL0,
+            CntpCtlEl0 => regid::CNTP_CTL_EL0,
+            CntpCvalEl0 => regid::CNTP_CVAL_EL0,
+            CntpTvalEl0 => regid::CNTP_TVAL_EL0,
             IccPmrEl1 => regid::ICC_PMR_EL1,
             IccIar1El1 => regid::ICC_IAR1_EL1,
             IccEoir1El1 => regid::ICC_EOIR1_EL1,
@@ -1544,13 +1675,27 @@ impl IntLower {
             // Load{Vec128} immediately followed by WriteFpr{rt}, which commits
             // VFP -> q[rt]. The xlate call is issued FIRST so the subsequent
             // movdqu into VFP (XMM15, Win64 non-volatile) is never clobbered.
-            Load { addr, ty: LoadTy::Vec128, .. } => {
+            // LDR/LDP {Q,D,S} element — Vec128 (movdqu, 16B), F64 (movsd, 8B,
+            // upper 64 zeroed), or F32 (movss, 4B, upper 96 zeroed) into VFP.
+            // The narrow forms zero the high lanes, matching ARM LDR d/s
+            // semantics; the following WriteFpr commits VFP -> q[rt].
+            Load { addr, ty: ty @ (LoadTy::Vec128 | LoadTy::F64 | LoadTy::F32), .. } => {
                 if Self::is_spilled(alloc, *addr) {
                     enc.emit_ud2();
                 } else {
                     let ra = Self::gpr(alloc, *addr);
-                    Self::emit_mmu_xlate_call(enc, ra, false, 16); // RAX = host PA
-                    enc.emit_movdqu_load(crate::regalloc::x86_regs::VFP, SCRATCH0, 0);
+                    let size: i32 = match ty {
+                        LoadTy::F32 => 4,
+                        LoadTy::F64 => 8,
+                        _ => 16,
+                    };
+                    Self::emit_mmu_xlate_call(enc, ra, false, size); // RAX = host PA
+                    let vfp = crate::regalloc::x86_regs::VFP;
+                    match ty {
+                        LoadTy::F32 => enc.emit_movss_load(vfp, SCRATCH0, 0),
+                        LoadTy::F64 => enc.emit_movsd_load(vfp, SCRATCH0, 0),
+                        _ => enc.emit_movdqu_load(vfp, SCRATCH0, 0),
+                    }
                 }
             }
             Load { dst, addr, ty, .. } => {
@@ -1597,13 +1742,26 @@ impl IntLower {
             // write-xlate call; we then movdqu it to the returned host PA.
             // (MMIO Q-stores are not modeled — NEON never targets device memory
             // in the kernel/bionic paths; a device VA would fault in the walker.)
-            Store { addr, ty: StoreTy::Vec128, .. } => {
+            // STR/STP {Q,D,S} element — store VFP's low 128/64/32 bits to the
+            // resolved host PA (movdqu / movsd / movss). VFP was primed by the
+            // preceding ReadFpr (q[rt] -> VFP).
+            Store { addr, ty: ty @ (StoreTy::Vec128 | StoreTy::F64 | StoreTy::F32), .. } => {
                 if Self::is_spilled(alloc, *addr) {
                     enc.emit_ud2();
                 } else {
                     let ra = Self::gpr(alloc, *addr);
-                    Self::emit_mmu_xlate_call(enc, ra, true, 16); // RAX = host PA
-                    enc.emit_movdqu_store(SCRATCH0, 0, crate::regalloc::x86_regs::VFP);
+                    let size: i32 = match ty {
+                        StoreTy::F32 => 4,
+                        StoreTy::F64 => 8,
+                        _ => 16,
+                    };
+                    Self::emit_mmu_xlate_call(enc, ra, true, size); // RAX = host PA
+                    let vfp = crate::regalloc::x86_regs::VFP;
+                    match ty {
+                        StoreTy::F32 => enc.emit_movss_store(SCRATCH0, 0, vfp),
+                        StoreTy::F64 => enc.emit_movsd_store(SCRATCH0, 0, vfp),
+                        _ => enc.emit_movdqu_store(SCRATCH0, 0, vfp),
+                    }
                 }
             }
             Store { val, addr, ty, .. } => {
@@ -1686,6 +1844,25 @@ impl IntLower {
                         enc.emit_mov_mem32_r64(SCRATCH0, 0, va);
                         enc.emit_mov_mem32_r64(SCRATCH0, width, vb);
                     }
+                }
+            }
+            // DC ZVA — zero the 64-byte block containing `addr` with ONE walk +
+            // 8 inline 8-byte zero stores. Align the VA down to 64 in SCRATCH0
+            // (a COPY — the architectural source reg, e.g. x0 in clear_page, must
+            // stay live for the following `add x0,x0,x1`), translate it (write,
+            // 64 B; the whole block is within one page so a single contiguous PA
+            // serves all 8 stores), then store zero 8× to [PA + k*8]. RAX holds
+            // the PA after the call; RCX (SCRATCH1) is the zero source.
+            ZeroBlock { addr } => {
+                let ra = Self::src_in(alloc, enc, *addr, SCRATCH0);
+                if ra != SCRATCH0 { enc.emit_mov_rr64(SCRATCH0, ra); }
+                enc.emit_and_r64_imm32(SCRATCH0, !63i32); // align down to 64-byte block
+                Self::emit_mmu_xlate_call(enc, SCRATCH0, true, 64); // RAX = host PA
+                enc.emit_xor_rr64(SCRATCH1, SCRATCH1); // RCX = 0
+                let mut k: i32 = 0;
+                while k < 8 {
+                    enc.emit_mov_mem_r64(SCRATCH0, k * 8, SCRATCH1);
+                    k += 1;
                 }
             }
             LoadExclusive { dst, addr, ty } => {
@@ -1830,10 +2007,114 @@ impl IntLower {
             IrOp::X86Mfence => enc.emit_mfence(),
             IrOp::X86Cpuid  => enc.emit_isb_sequence(),
 
-            // ── Atomics ────────────────────────────────────────────────────
-            AtomicRmw { .. } | AtomicCas { .. } => {
-                // Handled by lower_atomic in AT-14.
-                enc.emit_nop();
+            // ── Atomics (LSE: SWP / LDADD / CAS …) ─────────────────────────
+            // CRITICAL: these were a silent `nop` ("handled by lower_atomic"),
+            // but lower_atomic is NOT in the live path — so every LSE atomic did
+            // NOTHING. The kernel survived (it uses LL/SC), but bionic's locks
+            // use SWP/CAS: the no-op never touched memory, so the lock page never
+            // demand-paged and /init spun forever on the next plain load (the
+            // 0x514d5c loop). Implemented here as a single-core load-op-store
+            // through the guest MMU — no LOCK needed (one vCPU), width-honoured
+            // (a 64-bit op on a 32-bit lock would clobber the adjacent word), and
+            // the xlate call early-RETs with a pending Data Abort on a fault, so
+            // atomics now demand-page exactly like Load/Store.
+            AtomicRmw { dst, op, addr, val, order, size } => {
+                let _ = order; // x86-TSO single-core: acquire/release are no-ops
+                if Self::is_spilled(alloc, *dst)
+                    || Self::is_spilled(alloc, *addr)
+                    || Self::is_spilled(alloc, *val)
+                {
+                    enc.emit_ud2();
+                } else {
+                    let ra = Self::gpr(alloc, *addr);
+                    Self::emit_mmu_xlate_call(enc, ra, true, *size as i32); // SCRATCH0 = host PA
+                    // dst and val have overlapping live ranges here, so regalloc
+                    // gives them distinct registers (rd != rv) — and neither is
+                    // RAX/RCX (reserved scratch).
+                    let rd = Self::gpr(alloc, *dst);
+                    let rv = Self::gpr(alloc, *val);
+                    // Load old value (the result) into rd.
+                    Self::emit_w_load(enc, rd, SCRATCH0, *size);
+                    // Compute the new value to store, in SCRATCH1.
+                    match op {
+                        AtomicOp::Swp => enc.emit_mov_rr64(SCRATCH1, rv),
+                        AtomicOp::Add => { enc.emit_mov_rr64(SCRATCH1, rd); enc.emit_add_rr64(SCRATCH1, rv); }
+                        AtomicOp::Set => { enc.emit_mov_rr64(SCRATCH1, rd); enc.emit_or_rr64(SCRATCH1, rv); }
+                        AtomicOp::Eor => { enc.emit_mov_rr64(SCRATCH1, rd); enc.emit_xor_rr64(SCRATCH1, rv); }
+                        // Clr = old & ~val.
+                        AtomicOp::Clr => { enc.emit_mov_rr64(SCRATCH1, rv); enc.emit_not_r64(SCRATCH1); enc.emit_and_rr64(SCRATCH1, rd); }
+                        // {S,U}{max,min}: cmp old,val → cmov val into result when
+                        // val is the wanted extreme.
+                        AtomicOp::Smax | AtomicOp::Smin | AtomicOp::Umax | AtomicOp::Umin => {
+                            enc.emit_mov_rr64(SCRATCH1, rd);
+                            // Width-correct compare (see AtomicCas): a 64-bit cmp on
+                            // a 32-bit atomic max/min reads stale upper bits of `rv`.
+                            if *size == 8 {
+                                enc.emit_cmp_rr64(rd, rv);
+                            } else {
+                                enc.emit_cmp_rr32(rd, rv);
+                            }
+                            let take_val = match op {
+                                AtomicOp::Smax => cc::L,    // old <  val (signed)
+                                AtomicOp::Smin => cc::NLE,  // old >  val (signed)
+                                AtomicOp::Umax => cc::B,    // old <  val (unsigned)
+                                AtomicOp::Umin => cc::NBE,  // old >  val (unsigned)
+                                _ => cc::Z,
+                            };
+                            enc.emit_cmov_rr64(take_val, SCRATCH1, rv);
+                        }
+                    }
+                    Self::emit_w_store(enc, SCRATCH0, SCRATCH1, *size);
+                }
+            }
+            AtomicCas { dst, addr, expected, new, order, size } => {
+                let _ = order;
+                if Self::is_spilled(alloc, *dst)
+                    || Self::is_spilled(alloc, *addr)
+                    || Self::is_spilled(alloc, *expected)
+                    || Self::is_spilled(alloc, *new)
+                {
+                    enc.emit_ud2();
+                } else {
+                    let ra = Self::gpr(alloc, *addr);
+                    Self::emit_mmu_xlate_call(enc, ra, true, *size as i32); // SCRATCH0 = host PA
+                    let rd = Self::gpr(alloc, *dst);
+                    let re = Self::gpr(alloc, *expected);
+                    let rn = Self::gpr(alloc, *new);
+                    // Load current value → rd (= old, the result, returned always).
+                    // emit_w_load zero-extends rd to `size` (movzx/mov32), so rd's
+                    // bits above the access width are 0.
+                    Self::emit_w_load(enc, rd, SCRATCH0, *size);
+                    // WIDTH-CORRECT COMPARE. The compare MUST be at the access
+                    // width: `re` (expected) is a guest register that may carry
+                    // STALE upper bits (the DBT doesn't always zero-extend W-writes
+                    // — same root as the LSRV W-form bug). A 64-bit compare of a
+                    // 32-bit CAS then spuriously mismatches whenever those upper
+                    // bits differ → the CAS does the wrong thing → e.g. the
+                    // qspinlock / SLUB `atomic_t` (32-bit) state machine corrupts
+                    // and PID 1 deadlocks in ___slab_alloc. For sub-64-bit sizes,
+                    // mask `re` into SCRATCH1 (zero-extend to `size`) so only the
+                    // relevant bits are compared; the following `mov SCRATCH1,new`
+                    // (a plain MOV) preserves the resulting flags into the cmov.
+                    match *size {
+                        8 => enc.emit_cmp_rr64(rd, re),
+                        4 => enc.emit_cmp_rr32(rd, re),
+                        2 => {
+                            enc.emit_movzx_r64_r16(SCRATCH1, re);
+                            enc.emit_cmp_rr32(rd, SCRATCH1);
+                        }
+                        _ => {
+                            enc.emit_movzx_r64_r8(SCRATCH1, re);
+                            enc.emit_cmp_rr32(rd, SCRATCH1);
+                        }
+                    }
+                    // Branch-free single-core CAS: candidate = new; if cur !=
+                    // expected, candidate = cur (store the value back unchanged —
+                    // harmless with one vCPU). Then store the candidate.
+                    enc.emit_mov_rr64(SCRATCH1, rn);
+                    enc.emit_cmov_rr64(cc::NZ, SCRATCH1, rd);
+                    Self::emit_w_store(enc, SCRATCH0, SCRATCH1, *size);
+                }
             }
 
             // ── FP / SIMD ─────────────────────────────────────────────────
@@ -1853,6 +2134,15 @@ impl IntLower {
             }
 
             // ── Crypto / system ───────────────────────────────────────────
+            // SHA-256 family: a Win64 CALL to the runtime helper that applies the
+            // exact ARM ARM pseudocode to the guest q-regs in ctx memory.
+            CryptoSha256 { kind, d, n, m } => {
+                let packed = (*kind as u32)
+                    | ((*d as u32) << 8)
+                    | ((*n as u32) << 16)
+                    | ((*m as u32) << 24);
+                Self::emit_crypto_sha256_call(enc, packed);
+            }
             AesE { .. } | AesD { .. } | AesMc { .. } | AesImc { .. }
             | Sha1c { .. } | Sha1m { .. } | Sha1p { .. }
             | Sha256h { .. } | Sha256h2 { .. } | Sha256su0 { .. } | Sha256su1 { .. }
@@ -1868,11 +2158,26 @@ impl IntLower {
             Hvc { .. } | Smc { .. } => {
                 Self::emit_hvc_call(enc);
             }
-            // SVC (a guest EL0->EL1 syscall) BRK/HLT (debug/halt) and unmodeled
-            // hints (WFI/WFE/PSTATE/PAC) still trap: SVC needs a synchronous EL1
-            // exception (an M4b-3 extension), the rest need hypervisor handling.
-            // Fail loud (the block is rejected at the safety gate).
-            Svc { .. } | Brk { .. } | Hlt { .. } => {
+            // SVC — a guest syscall (EL0→EL1, or EL1→EL1). A runtime CALL into
+            // `aether_svc_enter(ctx, imm16)` takes the synchronous exception:
+            // it builds the SVC ESR (EC=0x15), saves the WritePc-staged return
+            // address as ELR_EL1, performs the SP_EL0/SP_EL1 bank swap, and
+            // vectors to VBAR + the source-EL sync offset. SVC is a block
+            // terminator, so the call is the last side effect before the RET
+            // and clobbering the volatile set is harmless. No longer UD2.
+            Svc { imm16 } => {
+                Self::emit_svc_call(enc, *imm16);
+            }
+            // ERET — exception return. A runtime CALL into `aether_eret_enter`
+            // (see lift `Eret` → IrOp::EretRt) applies the full architectural
+            // return (PC/NZCV/DAIF/EL/SPSel + SP bank). Also a terminator.
+            EretRt => {
+                Self::emit_eret_call(enc);
+            }
+            // BRK/HLT (debug/halt) still trap. BRK is recognised pre-translation
+            // by the dispatch loop (it injects an EL1 debug exception); HLT
+            // halts. Fail loud (the block is rejected at the safety gate).
+            Brk { .. } | Hlt { .. } => {
                 enc.emit_ud2(); // real exception → hypervisor handles via EPT/NPT fault.
             }
 
@@ -2103,11 +2408,247 @@ impl IntLower {
                 );
             }
 
+            // NEON MOVI/MVNI — store the resolved 128-bit immediate to the ctx
+            // q-slot for V`d`. No SSA operands, so SCRATCH0 (RAX) is free to use
+            // as the imm64 staging register for the two 8-byte stores.
+            VecMoviImm { d, lo, hi } => {
+                let disp = crate::runtime::context::vec_disp(*d);
+                enc.emit_mov_r64_imm64(SCRATCH0, *lo as i64);
+                enc.emit_mov_mem_r64(CONTEXT_REG, disp, SCRATCH0);
+                enc.emit_mov_r64_imm64(SCRATCH0, *hi as i64);
+                enc.emit_mov_mem_r64(CONTEXT_REG, disp + 8, SCRATCH0);
+            }
+            // ── NEON copy family → direct ctx-memory ops on the q-reg file ──────
+            // The guest q-registers live in ctx at vec_disp(reg); UMOV/SMOV read a
+            // lane, INS writes a lane, DUP(general) broadcasts a GPR to all lanes —
+            // all as plain memory loads/stores, no XMM. `size` is element BYTES.
+            VecExtractLane { dst, n, lane, size, signed } => {
+                let (rd, spilled) = Self::dest_work(alloc, *dst, SCRATCH0);
+                let disp = crate::runtime::context::vec_disp(*n)
+                    + (*lane as i32) * (*size as i32);
+                match (*size, *signed) {
+                    (1, false) => enc.emit_movzx_r64_mem8(rd, CONTEXT_REG, disp),
+                    (1, true) => enc.emit_movsx_r64_mem8(rd, CONTEXT_REG, disp),
+                    (2, false) => enc.emit_movzx_r64_mem16(rd, CONTEXT_REG, disp),
+                    (2, true) => enc.emit_movsx_r64_mem16(rd, CONTEXT_REG, disp),
+                    (4, false) => enc.emit_mov_r32_mem(rd, CONTEXT_REG, disp), // zero-extends
+                    (4, true) => enc.emit_movsxd_r64_mem32(rd, CONTEXT_REG, disp),
+                    _ => enc.emit_mov_r64_mem(rd, CONTEXT_REG, disp), // 8 = dword
+                }
+                Self::store_dest(alloc, enc, *dst, rd, spilled);
+            }
+            VecInsGpr { d, lane, src, size } => {
+                let rs = Self::src_in(alloc, enc, *src, SCRATCH0);
+                let disp = crate::runtime::context::vec_disp(*d)
+                    + (*lane as i32) * (*size as i32);
+                match *size {
+                    1 => enc.emit_mov_mem8_r64(CONTEXT_REG, disp, rs),
+                    2 => enc.emit_mov_mem16_r64(CONTEXT_REG, disp, rs),
+                    4 => enc.emit_mov_mem32_r64(CONTEXT_REG, disp, rs),
+                    _ => enc.emit_mov_mem_r64(CONTEXT_REG, disp, rs),
+                }
+            }
+            VecDupGpr { d, src, size, q } => {
+                // Store gpr(src)'s low `size` bytes to every lane (unrolled).
+                let rs = Self::src_in(alloc, enc, *src, SCRATCH0);
+                let disp = crate::runtime::context::vec_disp(*d);
+                let total: i32 = if *q { 16 } else { 8 };
+                let mut off = 0i32;
+                while off < total {
+                    match *size {
+                        1 => enc.emit_mov_mem8_r64(CONTEXT_REG, disp + off, rs),
+                        2 => enc.emit_mov_mem16_r64(CONTEXT_REG, disp + off, rs),
+                        4 => enc.emit_mov_mem32_r64(CONTEXT_REG, disp + off, rs),
+                        _ => enc.emit_mov_mem_r64(CONTEXT_REG, disp + off, rs),
+                    }
+                    off += *size as i32;
+                }
+                if !*q {
+                    enc.emit_xor_zero_r32(SCRATCH1); // zero the upper 64 bits
+                    enc.emit_mov_mem_r64(CONTEXT_REG, disp + 8, SCRATCH1);
+                }
+            }
+            // ── NEON CNT / UADDLV → scalar ctx-memory SWAR (no XMM) ─────────────
+            // bionic's power-of-2 check: `cnt v0.8b, v0.8b; uaddlv h0, v0.8b`.
+            VecCnt { d, n, q } => {
+                // Per-byte population count via the classic SWAR on each 64-bit
+                // half: x-=(x>>1)&0x55; x=(x&0x33)+((x>>2)&0x33); x=(x+(x>>4))&0x0f.
+                let dn = crate::runtime::context::vec_disp(*n);
+                let dd = crate::runtime::context::vec_disp(*d);
+                enc.emit_push_r64(2); // RDX is allocatable — save for the constants
+                let halves: i32 = if *q { 2 } else { 1 };
+                let mut h = 0i32;
+                while h < halves {
+                    let off = h * 8;
+                    enc.emit_mov_r64_mem(SCRATCH0, CONTEXT_REG, dn + off);
+                    // x -= (x >> 1) & 0x5555_5555_5555_5555
+                    enc.emit_mov_rr64(SCRATCH1, SCRATCH0);
+                    enc.emit_shr_r64_imm8(SCRATCH1, 1);
+                    enc.emit_mov_r64_imm64(2, 0x5555_5555_5555_5555u64 as i64);
+                    enc.emit_and_rr64(SCRATCH1, 2);
+                    enc.emit_sub_rr64(SCRATCH0, SCRATCH1);
+                    // x = (x & 0x3333..) + ((x >> 2) & 0x3333..)
+                    enc.emit_mov_r64_imm64(2, 0x3333_3333_3333_3333u64 as i64);
+                    enc.emit_mov_rr64(SCRATCH1, SCRATCH0);
+                    enc.emit_and_rr64(SCRATCH0, 2);
+                    enc.emit_shr_r64_imm8(SCRATCH1, 2);
+                    enc.emit_and_rr64(SCRATCH1, 2);
+                    enc.emit_add_rr64(SCRATCH0, SCRATCH1);
+                    // x = (x + (x >> 4)) & 0x0F0F..
+                    enc.emit_mov_rr64(SCRATCH1, SCRATCH0);
+                    enc.emit_shr_r64_imm8(SCRATCH1, 4);
+                    enc.emit_add_rr64(SCRATCH0, SCRATCH1);
+                    enc.emit_mov_r64_imm64(2, 0x0F0F_0F0F_0F0F_0F0Fu64 as i64);
+                    enc.emit_and_rr64(SCRATCH0, 2);
+                    enc.emit_mov_mem_r64(CONTEXT_REG, dd + off, SCRATCH0);
+                    h += 1;
+                }
+                if !*q {
+                    enc.emit_xor_zero_r32(SCRATCH1);
+                    enc.emit_mov_mem_r64(CONTEXT_REG, dd + 8, SCRATCH1);
+                }
+                enc.emit_pop_r64(2);
+            }
+            VecAddvLong { d, n, esize, q, signed } => {
+                // Add-long across lanes: accumulate every lane (sign/zero-extended)
+                // into RAX, zero Vd, store the 2×-wide scalar to lane 0.
+                let dn = crate::runtime::context::vec_disp(*n);
+                let dd = crate::runtime::context::vec_disp(*d);
+                let total: i32 = if *q { 16 } else { 8 };
+                let es = *esize as i32;
+                enc.emit_xor_zero_r32(SCRATCH0); // accumulator = 0 (clears all of RAX)
+                let mut i = 0i32;
+                while i < total {
+                    let disp = dn + i;
+                    match (*esize, *signed) {
+                        (1, false) => enc.emit_movzx_r64_mem8(SCRATCH1, CONTEXT_REG, disp),
+                        (1, true) => enc.emit_movsx_r64_mem8(SCRATCH1, CONTEXT_REG, disp),
+                        (2, false) => enc.emit_movzx_r64_mem16(SCRATCH1, CONTEXT_REG, disp),
+                        (2, true) => enc.emit_movsx_r64_mem16(SCRATCH1, CONTEXT_REG, disp),
+                        (4, true) => enc.emit_movsxd_r64_mem32(SCRATCH1, CONTEXT_REG, disp),
+                        _ => enc.emit_mov_r32_mem(SCRATCH1, CONTEXT_REG, disp), // 4, unsigned
+                    }
+                    enc.emit_add_rr64(SCRATCH0, SCRATCH1);
+                    i += es;
+                }
+                enc.emit_xor_zero_r32(SCRATCH1);
+                enc.emit_mov_mem_r64(CONTEXT_REG, dd, SCRATCH1);
+                enc.emit_mov_mem_r64(CONTEXT_REG, dd + 8, SCRATCH1);
+                match es * 2 {
+                    2 => enc.emit_mov_mem16_r64(CONTEXT_REG, dd, SCRATCH0),
+                    4 => enc.emit_mov_mem32_r64(CONTEXT_REG, dd, SCRATCH0),
+                    _ => enc.emit_mov_mem_r64(CONTEXT_REG, dd, SCRATCH0), // 8
+                }
+            }
+            VecReduceAdd { d, n, esize, q } => {
+                // ADDV — sum all lanes (same width) into RAX, store the low `esize`
+                // bytes to V[d] lane 0 (rest zeroed; ADDV result is a scalar).
+                let dn = crate::runtime::context::vec_disp(*n);
+                let dd = crate::runtime::context::vec_disp(*d);
+                let total: i32 = if *q { 16 } else { 8 };
+                let es = *esize as i32;
+                enc.emit_xor_zero_r32(SCRATCH0); // accumulator
+                let mut i = 0i32;
+                while i < total {
+                    let disp = dn + i;
+                    match *esize {
+                        1 => enc.emit_movzx_r64_mem8(SCRATCH1, CONTEXT_REG, disp),
+                        2 => enc.emit_movzx_r64_mem16(SCRATCH1, CONTEXT_REG, disp),
+                        4 => enc.emit_mov_r32_mem(SCRATCH1, CONTEXT_REG, disp), // zero-extends
+                        _ => enc.emit_mov_r64_mem(SCRATCH1, CONTEXT_REG, disp),
+                    }
+                    enc.emit_add_rr64(SCRATCH0, SCRATCH1);
+                    i += es;
+                }
+                enc.emit_xor_zero_r32(SCRATCH1);
+                enc.emit_mov_mem_r64(CONTEXT_REG, dd, SCRATCH1);
+                enc.emit_mov_mem_r64(CONTEXT_REG, dd + 8, SCRATCH1);
+                match *esize {
+                    1 => enc.emit_mov_mem8_r64(CONTEXT_REG, dd, SCRATCH0),
+                    2 => enc.emit_mov_mem16_r64(CONTEXT_REG, dd, SCRATCH0),
+                    4 => enc.emit_mov_mem32_r64(CONTEXT_REG, dd, SCRATCH0),
+                    _ => enc.emit_mov_mem_r64(CONTEXT_REG, dd, SCRATCH0),
+                }
+            }
+            VecBicOrrImm { d, imm, is_bic, q } => {
+                // RMW Vd: BIC = Vd & ~imm, ORR = Vd | imm (per 64-bit half). The
+                // D-form (q=false) zeroes the upper 64 (FP register-write rule).
+                let disp = crate::runtime::context::vec_disp(*d);
+                let mask = if *is_bic { !*imm } else { *imm };
+                enc.emit_mov_r64_imm64(SCRATCH1, mask as i64);
+                enc.emit_mov_r64_mem(SCRATCH0, CONTEXT_REG, disp);
+                if *is_bic {
+                    enc.emit_and_rr64(SCRATCH0, SCRATCH1);
+                } else {
+                    enc.emit_or_rr64(SCRATCH0, SCRATCH1);
+                }
+                enc.emit_mov_mem_r64(CONTEXT_REG, disp, SCRATCH0);
+                if *q {
+                    enc.emit_mov_r64_mem(SCRATCH0, CONTEXT_REG, disp + 8);
+                    if *is_bic {
+                        enc.emit_and_rr64(SCRATCH0, SCRATCH1);
+                    } else {
+                        enc.emit_or_rr64(SCRATCH0, SCRATCH1);
+                    }
+                    enc.emit_mov_mem_r64(CONTEXT_REG, disp + 8, SCRATCH0);
+                } else {
+                    enc.emit_xor_zero_r32(SCRATCH0);
+                    enc.emit_mov_mem_r64(CONTEXT_REG, disp + 8, SCRATCH0);
+                }
+            }
+
             // ── M4b-6 V-register-numbered SIMD/FP/crypto ops ──────────────────
+            // SCVTF/UCVTF: convert the GPR `src` (resolved via alloc) to a scalar
+            // FP register. cvtsi2ss/sd into a zeroed XMM keeps the scalar in the
+            // low 32/64 bits with the rest cleared (FP-write semantics), then store
+            // the 128-bit reg. Signed cvt; unsigned is exact for values < 2^63
+            // (array sizes / counts — the realistic UCVTF inputs).
+            FpCvtIntScalar { d, src, to_dbl, .. } => {
+                use crate::regalloc::x86_regs::VS1;
+                let rs = Self::src_in(alloc, enc, *src, SCRATCH0);
+                let disp = crate::runtime::context::vec_disp(*d);
+                enc.emit_pxor(VS1, VS1);
+                if *to_dbl {
+                    enc.emit_cvtsi2sd_r64(VS1, rs);
+                } else {
+                    enc.emit_cvtsi2ss_r64(VS1, rs);
+                }
+                enc.emit_movdqu_store(CONTEXT_REG, disp, VS1);
+            }
+            // FCVT{N,P,M,Z,A}{S,U}: scalar FP → int GPR. Load the FP reg, round per
+            // mode (roundss/sd; Zero needs none — cvtt* truncates), then convert.
+            // cvtt* is signed; unsigned results are exact for values < 2^63 (Tier-0).
+            FpCvtToIntScalar { dst, n, from_dbl, to_64, round } => {
+                use crate::regalloc::x86_regs::VS0;
+                use crate::ir::ops::RoundMode;
+                let disp = crate::runtime::context::vec_disp(*n);
+                let (rd, spilled) = Self::dest_work(alloc, *dst, SCRATCH0);
+                // roundss/sd imm: 0=nearest 1=-inf 2=+inf 3=trunc, |0x08 suppresses inexact.
+                let pre: Option<u8> = match round {
+                    RoundMode::Zero | RoundMode::Current => None,
+                    RoundMode::Nearest | RoundMode::NearestTiesAway => Some(0x08),
+                    RoundMode::PosInf => Some(0x0A),
+                    RoundMode::NegInf => Some(0x09),
+                };
+                if *from_dbl {
+                    enc.emit_movsd_load(VS0, CONTEXT_REG, disp);
+                    if let Some(m) = pre { enc.emit_roundsd(VS0, VS0, m); }
+                    if *to_64 { enc.emit_cvttsd2si_r64(rd, VS0); } else { enc.emit_cvttsd2si_r32(rd, VS0); }
+                } else {
+                    enc.emit_movss_load(VS0, CONTEXT_REG, disp);
+                    if let Some(m) = pre { enc.emit_roundss(VS0, VS0, m); }
+                    if *to_64 { enc.emit_cvttss2si_r64(rd, VS0); } else { enc.emit_cvttss2si_r32(rd, VS0); }
+                }
+                Self::store_dest(alloc, enc, *dst, rd, spilled);
+            }
             // Delegated to the ctx-template lowerer (BUILDSPEC §7). These carry
             // no IrValueId/IrFlagsId operands, so neither `alloc` nor
             // `branch_patches` is needed.
             VecBin { .. } | VecUn { .. } | VecShift { .. } | VecCmp { .. }
+            | VecCmpZero { .. } | VecShiftNarrow { .. } | VecShiftLong { .. }
+            | VecExt { .. } | VecMulLong { .. } | VecRev64 { .. }
+            | VecAddLongPair { .. }
+            | VecUnzip { .. }
             | VecPair { .. } | VecReduce { .. } | VecAddLong { .. } | VecFp { .. }
             | FpFromInt { .. } | FpToIntR { .. } | FpRound { .. } | FpCvt2 { .. }
             | FpMov { .. } | FpBin { .. } | FpUn { .. } | FpCmpN { .. }

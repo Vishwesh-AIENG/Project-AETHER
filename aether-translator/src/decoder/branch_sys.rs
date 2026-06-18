@@ -260,10 +260,22 @@ fn decode_uncond_branch_reg(word: u32) -> Result<DecodedInsn, DecodeErr> {
     let op3 = (word >> 10) & 0x3F; // bits[15:10]
     let rn = Reg(((word >> 5) & 0x1F) as u8);
     let op4 = (word & 0x1F) as u8; // bits[4:0]
+    // PAC-protected variants (ARMv8.3-PAuth): op3 selects PAC form.
+    //   op3=000010 = ...AA (key IA / modifier in op4 or SP for Z forms)
+    //   op3=000011 = ...AB (key IB)
+    // Because this DBT does NOT enforce real pointer authentication
+    // (PACIASP/AUTIASP are lifted as no-ops), the correct behaviour for
+    // PAC indirect-branches is to silently strip any PAC bits from Rn
+    // and branch normally. Decoding them as their plain BR/BLR/RET
+    // counterparts achieves that (Rn's value has no PAC bits set because
+    // PACIASP was a no-op when it was signed). Without this, BLRAA/BRAA
+    // returned Unimplemented and the DBT terminated the block with a
+    // synthetic fall-through PC -- the indirect call was SKIPPED entirely,
+    // starving init paths that rely on those calls.
     Ok(match opc {
-        0b0000 => DecodedInsn::Br { rn },
-        0b0001 => DecodedInsn::Blr { rn },
-        0b0010 => DecodedInsn::Ret { rn },
+        0b0000 => DecodedInsn::Br { rn },             // BR / BRAAZ / BRABZ
+        0b0001 => DecodedInsn::Blr { rn },            // BLR / BLRAAZ / BLRABZ
+        0b0010 => DecodedInsn::Ret { rn },            // RET / RETAA / RETAB
         // ERET — exception return (C6.2.ERET). Plain (non-PAC) form requires
         //   op3=000000, Rn=11111, op4=00000. ERETAA/ERETAB (PAC variants) use
         //   op3=000010/000011 with op4=11111 and are left Unimplemented so they
@@ -276,8 +288,13 @@ fn decode_uncond_branch_reg(word: u32) -> Result<DecodedInsn, DecodeErr> {
                 return Err(DecodeErr::Unimplemented);
             }
         }
+        // BRAA / BRAB: opc=1000 / 1010 — register-modifier variants.
+        // The modifier (op4 = Rm) is irrelevant since we don't auth.
+        0b1000 | 0b1010 => DecodedInsn::Br { rn },
+        // BLRAA / BLRAB: opc=1001 / 1011.
+        0b1001 | 0b1011 => DecodedInsn::Blr { rn },
         // 0b0101 = DRPS (debug restore PE state) — Phase A models no debug state.
-        // 0b0011 reserved; 0b1000/0b1001 = BRAA/BLRAA (PAC) — later revisions.
+        // 0b0011 reserved.
         _ => return Err(DecodeErr::Unimplemented),
     })
 }

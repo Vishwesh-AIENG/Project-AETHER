@@ -49,7 +49,7 @@ fn at9_every_value_assigned() {
         0xd65f03c0,    // RET
     ];
     let result = make_and_alloc(&words);
-    for (&_vid, &assign) in &result.assignments {
+    for (_vid, &assign) in result.assignments.iter() {
         match assign {
             Assignment::Gpr(r) => assert!(r < 15, "GPR index {r} out of range"),
             Assignment::Xmm(r) => assert!(r < 16, "XMM index {r} out of range"),

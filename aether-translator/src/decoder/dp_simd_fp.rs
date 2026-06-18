@@ -9,7 +9,7 @@
 //! a sub-family's mask doesn't already pin every fixed bit, a follow-up
 //! `validate_*` helper checks the remaining spec constraints.
 
-use super::{DecodeErr, DecodedInsn, VReg};
+use super::{DecodeErr, DecodedInsn, Reg, VReg};
 
 pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     // ===== Crypto =====
@@ -19,7 +19,11 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if (word & 0xFF20_8C00) == 0x5E00_0000 {
         return decode_crypto_sha_3reg(word);
     }
-    if (word & 0xFFFF_FC00) == 0x5E28_0800 {
+    // 2-register SHA (SHA1H/SHA1SU1/SHA256SU0). The fixed bits are [31:22],
+    // [21:17]=10100 and [11:10]=10; the 5-bit opcode at [16:12] VARIES, so it must
+    // NOT be pinned. The old mask 0xFFFF_FC00 wrongly pinned [16:12]=0, matching
+    // ONLY SHA1H — SHA256SU0 (opcode 00010) fell through to TranslateFail.
+    if (word & 0xFFFE_0C00) == 0x5E28_0800 {
         return decode_crypto_sha_2reg(word);
     }
     if (word & 0xFFE0_0000) == 0xCE60_0000 {
@@ -45,7 +49,10 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if (word & 0xFF20_1C00) == 0x1E20_1000 {
         return decode_fp_imm(word);
     }
-    if (word & 0xFF20_0C00) == 0x1E20_2000 {
+    // FP compare: bits[15:10] = 00_1000 (op=00, then 1000). The old 0x..0C00 mask
+    // only pinned bits[11:10] and left bit13 (set in the 0x..2000 target) unmasked,
+    // so this branch could NEVER match and every FCMP fell through to Reserved.
+    if (word & 0xFF20_FC00) == 0x1E20_2000 {
         return decode_fp_compare(word);
     }
     if (word & 0xFF20_0C00) == 0x1E20_0400 {
@@ -54,8 +61,12 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if (word & 0xFF20_0C00) == 0x1E20_0C00 {
         return decode_fp_csel(word);
     }
-    // FP <-> integer convert (uses bits[31:21]=0X011110001 + bits[15:10]=000000)
-    if (word & 0x7F3F_FC00) == 0x1E20_0000 {
+    // FP <-> integer convert: pin bits[30:24]=0011110, bit21=1, bits[15:10]=0
+    // (scale=0 distinguishes from fixed-point convert below). Leave sf, type,
+    // rmode, opcode free so the converter sees every (rmode,opcode) — the old
+    // 0x7F3F_FC00 mask pinned bits[20:16]=0 and routed ONLY rmode=00/opcode=000,
+    // so FMOV (opcode=110/111), SCVTF, FCVTZS etc. fell through to Reserved.
+    if (word & 0x7F20_FC00) == 0x1E20_0000 {
         return decode_fp_int_convert(word);
     }
     // FP <-> fixed-point convert: bit 21 = 0 (vs convert above which has bit 21 = 1)
@@ -77,11 +88,38 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if (word & 0x9F20_0400) == 0x0E00_8400 {
         return decode_simd_3same_extra(word);
     }
-    if (word & 0x9F20_8C00) == 0x0E20_0000 {
+    // 3-different: bit21=1, bits[11:10]=00. The opcode is bits[15:12] — its top
+    // bit (bit15) is part of the opcode (1xxx = the *-LONG multiply forms UMLAL/
+    // UMLSL/UMULL/PMULL), so it must NOT be pinned. The old 0x..8C00 mask pinned
+    // bit15=0 and dropped every multiply-long op into a fatal TranslateFail.
+    if (word & 0x9F20_0C00) == 0x0E20_0000 {
         return decode_simd_3diff(word);
+    }
+    // CMEQ Vd,Vn,#0 — 2reg-misc compare-against-zero (opcode 0b01001, U=0). The
+    // narrowed 2reg-misc mask below pins bit15=0 (opcode[3]) and misses this
+    // bit15=1 opcode, so route it explicitly. (Q/size free; U=0 pinned.)
+    if (word & 0xBF3F_FC00) == 0x0E20_9800 {
+        let q = (word >> 30) & 1;
+        let size = (word >> 22) & 0x3;
+        if size == 0b11 && q == 0 {
+            return Err(DecodeErr::Reserved); // .2d needs Q=1
+        }
+        let rn = ((word >> 5) & 0x1F) as u8;
+        let rd = (word & 0x1F) as u8;
+        return Ok(DecodedInsn::SimdCmeqZero {
+            rd: VReg(rd),
+            rn: VReg(rn),
+            size: size as u8,
+            q: q == 1,
+        });
     }
     if (word & 0x9F3F_8C00) == 0x0E20_0800 {
         return decode_simd_2reg_misc(word);
+    }
+    // ADDV (across-lanes, opcode 0b11011) — the general across-lanes mask below
+    // pins opcode[4:3]=0 and misses this high opcode, so route it explicitly.
+    if (word & 0xBF3F_FC00) == 0x0E31_B800 {
+        return decode_simd_across_lanes(word);
     }
     if (word & 0x9F3F_8C00) == 0x0E30_0800 {
         return decode_simd_across_lanes(word);
@@ -89,7 +127,15 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if (word & 0x9FE0_8400) == 0x0E00_0400 {
         return decode_simd_copy(word);
     }
-    if (word & 0x9F80_1C00) == 0x0F00_0400 {
+    // SHRN/SHRN2 (shift-imm narrow, U=0, opcode 0b10000) — its encoding overlaps
+    // the modimm dispatch mask below, so route it explicitly first.
+    if (word & 0xBF80_FC00) == 0x0F00_8400 {
+        return decode_shrn(word);
+    }
+    // Modified-immediate (MOVI/MVNI/ORR/BIC/FMOV-vec). Pin [28:24]=01111,
+    // bits[23:19]=0, bit10=1; leave cmode free (the old 0x9F80_1C00 mask pinned
+    // bits[12:10] and so missed the odd-cmode ORR/BIC forms).
+    if (word & 0x9FF8_0400) == 0x0F00_0400 {
         return decode_simd_modimm(word);
     }
     if (word & 0x9F80_0400) == 0x0F00_0400 {
@@ -98,7 +144,10 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if (word & 0x9F00_0400) == 0x0F00_0000 {
         return decode_simd_indexed(word);
     }
-    if (word & 0xBFA0_8C00) == 0x0E00_0800 {
+    // ZIP/UZP/TRN permute. Pin [28:24]=01110, bit21=0, bit15=0, bits[11:10]=10;
+    // leave size (bits[23:22]) FREE — the old 0xBFA0_8C00 pinned bit23 and so
+    // dropped the .4s/.2d (size>=10) forms (e.g. uzp1 v.4s).
+    if (word & 0xBF20_8C00) == 0x0E00_0800 {
         return decode_simd_permute(word);
     }
     // EXT (extract) has bit 29 = 1 fixed in its encoding family (op=1).
@@ -245,6 +294,65 @@ fn decode_fp_int_convert(word: u32) -> Result<DecodedInsn, DecodeErr> {
     // valid via fixed-point path; here rmode=11 opcode=011 = FCVTZU).
     let rmode = (word >> 19) & 0x3;
     let opcode = (word >> 16) & 0x7;
+
+    // FMOV (general) — a pure bit-move between a GPR and an FP register, with no
+    // numeric conversion. Intercept the implemented forms as a typed variant so
+    // they lift to direct q-register-file moves (the rest of the conversions
+    // stay coarse FpScalar). ftype: 00=S(32), 01=D(64), 10=Q-high(128).
+    let sf = (word >> 31) & 1;
+    let ftype = (word >> 22) & 0x3;
+    let rn = ((word >> 5) & 0x1F) as u8;
+    let rd = (word & 0x1F) as u8;
+    match (rmode, opcode) {
+        // FMOV Wd,Sn / Xd,Dn — FP lane 0 -> GPR.
+        (0b00, 0b110) if (sf == 0 && ftype == 0b00) || (sf == 1 && ftype == 0b01) => {
+            let size = if sf == 1 { 8 } else { 4 };
+            return Ok(DecodedInsn::FmovGen {
+                to_gpr: true,
+                rd: Reg(rd),
+                vn: VReg(rn),
+                lane: 0,
+                size,
+                zero_rest: false,
+            });
+        }
+        // FMOV Sd,Wn / Dd,Xn — GPR -> FP lane 0 (zero the rest of the V reg).
+        (0b00, 0b111) if (sf == 0 && ftype == 0b00) || (sf == 1 && ftype == 0b01) => {
+            let size = if sf == 1 { 8 } else { 4 };
+            return Ok(DecodedInsn::FmovGen {
+                to_gpr: false,
+                rd: Reg(rn),
+                vn: VReg(rd),
+                lane: 0,
+                size,
+                zero_rest: true,
+            });
+        }
+        // FMOV Xd,Vn.D[1] — high 64 bits -> GPR (sf=1, ftype=10 only).
+        (0b01, 0b110) if sf == 1 && ftype == 0b10 => {
+            return Ok(DecodedInsn::FmovGen {
+                to_gpr: true,
+                rd: Reg(rd),
+                vn: VReg(rn),
+                lane: 1,
+                size: 8,
+                zero_rest: false,
+            });
+        }
+        // FMOV Vd.D[1],Xn — GPR -> high 64 bits (keep lane 0).
+        (0b01, 0b111) if sf == 1 && ftype == 0b10 => {
+            return Ok(DecodedInsn::FmovGen {
+                to_gpr: false,
+                rd: Reg(rn),
+                vn: VReg(rd),
+                lane: 1,
+                size: 8,
+                zero_rest: false,
+            });
+        }
+        _ => {}
+    }
+
     // Allow rmode=00 with opcode in {000(FCVTNS), 001(FCVTNU), 010(SCVTF),
     // 011(UCVTF), 100(FCVTAS), 101(FCVTAU), 110(FMOV-to-int), 111(FMOV-to-fp)}
     // Allow rmode=01 with opcode in {000(FCVTPS), 001(FCVTPU), 110/111(FMOV
@@ -434,6 +542,26 @@ fn decode_simd_3diff(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if opcode == 0b1110 && size != 0b00 {
         return Err(DecodeErr::Reserved);
     }
+    // Integer multiply-long forms: UMULL/SMULL (1100), UMLAL/SMLAL (1000),
+    // UMLSL/SMLSL (1010). `Q` selects the low/high source half (the `2` variant);
+    // `U` selects unsigned/signed; widen `size`-byte elements to 2×, multiply,
+    // then (MLAL) add to / (MLSL) subtract from Vd, or (MULL) replace Vd.
+    if matches!(opcode, 0b1000 | 0b1010 | 0b1100) {
+        let q = (word >> 30) & 1;
+        let rm = ((word >> 16) & 0x1F) as u8;
+        let rn = ((word >> 5) & 0x1F) as u8;
+        let rd = (word & 0x1F) as u8;
+        return Ok(DecodedInsn::SimdMulLong {
+            rd: VReg(rd),
+            rn: VReg(rn),
+            rm: VReg(rm),
+            size: size as u8,
+            q: q == 1,
+            signed: u == 0,
+            accum: opcode != 0b1100,
+            sub: opcode == 0b1010,
+        });
+    }
     Ok(DecodedInsn::AdvSimd { raw: word })
 }
 
@@ -445,8 +573,91 @@ fn decode_simd_2reg_misc(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if q == 0 && size == 0b11 {
         return Err(DecodeErr::Reserved);
     }
-    let _ = opcode;
+    // CNT (opcode 0b00101) — per-byte popcount; size MUST be 00 (byte form only).
+    if opcode == 0b00101 {
+        if size != 0b00 {
+            return Err(DecodeErr::Reserved);
+        }
+        let rn = ((word >> 5) & 0x1F) as u8;
+        let rd = (word & 0x1F) as u8;
+        return Ok(DecodedInsn::SimdCnt { rd: VReg(rd), rn: VReg(rn), q: q == 1 });
+    }
+    // SADDLP (U=0) / UADDLP (U=1) — add-long pairwise (opcode 0b00010). Source
+    // element `size` (0=B,1=H,2=S) widens to 2×; size=11 reserved.
+    if opcode == 0b00010 {
+        if size == 0b11 {
+            return Err(DecodeErr::Reserved);
+        }
+        let u = (word >> 29) & 1;
+        let rn = ((word >> 5) & 0x1F) as u8;
+        let rd = (word & 0x1F) as u8;
+        return Ok(DecodedInsn::SimdAddLongPair {
+            rd: VReg(rd),
+            rn: VReg(rn),
+            size: size as u8,
+            q: q == 1,
+            signed: u == 0,
+        });
+    }
+    // REV64/REV32/REV16 — reverse the order of `size`-element groups within each
+    // `container`-byte group. The container needs ≥2 elements (else a no-op /
+    // reserved):
+    //   REV64 (U=0, opcode 0b00000): container=8, size ∈ {0=B,1=H,2=S} (3 resvd)
+    //   REV32 (U=1, opcode 0b00000): container=4, size ∈ {0=B,1=H}    (2,3 resvd)
+    //   REV16 (U=0, opcode 0b00001): container=2, size == 0=B         (else resvd)
+    let u = (word >> 29) & 1;
+    let rev_container: Option<u8> = match (opcode, u) {
+        (0b00000, 0) => Some(8),
+        (0b00000, 1) => Some(4),
+        (0b00001, 0) => Some(2),
+        _ => None,
+    };
+    if let Some(container) = rev_container {
+        // size (element bytes = 1<<size) must be strictly smaller than container.
+        if (1u32 << size) >= container as u32 {
+            return Err(DecodeErr::Reserved);
+        }
+        let rn = ((word >> 5) & 0x1F) as u8;
+        let rd = (word & 0x1F) as u8;
+        return Ok(DecodedInsn::SimdRev64 {
+            rd: VReg(rd),
+            rn: VReg(rn),
+            size: size as u8,
+            q: q == 1,
+            container,
+        });
+    }
     Ok(DecodedInsn::AdvSimd { raw: word })
+}
+
+/// SHRN/SHRN2 — shift-right-narrow. `immh` selects the result element size
+/// (0001→.8b, 001x→.4h, 01xx→.2s); `shift = 2*esize_bits - UInt(immh:immb)`.
+/// `Q` selects SHRN (low 64, false) vs SHRN2 (high 64, true).
+fn decode_shrn(word: u32) -> Result<DecodedInsn, DecodeErr> {
+    let immh = (word >> 19) & 0xF;
+    let immb = (word >> 16) & 0x7;
+    if immh == 0 || immh & 0b1000 != 0 {
+        return Err(DecodeErr::Reserved); // immh=0 is modimm; immh=1xxx reserved here
+    }
+    let immhimmb = (immh << 3) | immb;
+    let (esize_out, esize_bits): (u8, u32) = if immh & 0b0100 != 0 {
+        (4, 32)
+    } else if immh & 0b0010 != 0 {
+        (2, 16)
+    } else {
+        (1, 8) // immh == 0001
+    };
+    let shift = (2 * esize_bits) - immhimmb;
+    let q = (word >> 30) & 1;
+    let rn = ((word >> 5) & 0x1F) as u8;
+    let rd = (word & 0x1F) as u8;
+    Ok(DecodedInsn::SimdShrn {
+        rd: VReg(rd),
+        rn: VReg(rn),
+        shift: shift as u8,
+        esize_out,
+        high: q == 1,
+    })
 }
 
 fn decode_simd_across_lanes(word: u32) -> Result<DecodedInsn, DecodeErr> {
@@ -462,7 +673,33 @@ fn decode_simd_across_lanes(word: u32) -> Result<DecodedInsn, DecodeErr> {
     // opcode bits[16:12], valid: 00011 (SADDLV), 01010 (SMAXV), 11010 (UMAXV),
     // 01011 (SMINV), 11011 (UMINV), 11000 (FMAXNMV), 11100 (FMAXV), 11000+u
     // (FMINNMV), 11100+u (FMINV).
-    let _opcode = (word >> 12) & 0x1F;
+    let opcode = (word >> 12) & 0x1F;
+    // SADDLV / UADDLV (opcode 0b00011): add-long across all lanes. U(bit29)=0 is
+    // signed (SADDLV), U=1 unsigned (UADDLV). Source element size = `size`; the
+    // result is twice as wide (so size must be 0=B,1=H,2=S — never D).
+    if opcode == 0b00011 {
+        let u = (word >> 29) & 1;
+        let rn = ((word >> 5) & 0x1F) as u8;
+        let rd = (word & 0x1F) as u8;
+        return Ok(DecodedInsn::SimdAddvLong {
+            rd: VReg(rd),
+            rn: VReg(rn),
+            size: size as u8,
+            q: q == 1,
+            signed: u == 0,
+        });
+    }
+    // ADDV (opcode 0b11011, U=0) — reduce-add across lanes (same element width).
+    if opcode == 0b11011 && (word >> 29) & 1 == 0 {
+        let rn = ((word >> 5) & 0x1F) as u8;
+        let rd = (word & 0x1F) as u8;
+        return Ok(DecodedInsn::SimdReduceAdd {
+            rd: VReg(rd),
+            rn: VReg(rn),
+            size: size as u8,
+            q: q == 1,
+        });
+    }
     Ok(DecodedInsn::AdvSimd { raw: word })
 }
 
@@ -474,32 +711,197 @@ fn decode_simd_copy(word: u32) -> Result<DecodedInsn, DecodeErr> {
     let q = (word >> 30) & 1;
     let op = (word >> 29) & 1;
     let imm4 = (word >> 11) & 0xF;
-    // INS (element) writes into a Q-register — Q must be 1.
-    if op == 1 && q == 0 {
+    let rn = ((word >> 5) & 0x1F) as u8;
+    let rd = (word & 0x1F) as u8;
+
+    // Element size + lane index from imm5: the lowest set bit selects B/H/S/D,
+    // the bits above it are the lane index. imm5==0b10000 (128-bit) is not a
+    // valid element form for these copy ops.
+    let (size, lane): (u8, u8) = if imm5 & 1 != 0 {
+        (0, ((imm5 >> 1) & 0xF) as u8) // B
+    } else if imm5 & 2 != 0 {
+        (1, ((imm5 >> 2) & 0x7) as u8) // H
+    } else if imm5 & 4 != 0 {
+        (2, ((imm5 >> 3) & 0x3) as u8) // S
+    } else if imm5 & 8 != 0 {
+        (3, ((imm5 >> 4) & 0x1) as u8) // D
+    } else {
         return Err(DecodeErr::Reserved);
+    };
+
+    if op == 1 {
+        // INS (element): Vd.<T>[dst] <- Vn.<T>[src] (vector→vector). Q must be 1.
+        // dst lane = `lane` (from imm5); src lane = imm4 >> size (log2 element).
+        if q == 0 {
+            return Err(DecodeErr::Reserved);
+        }
+        return Ok(DecodedInsn::SimdInsElem {
+            rd: VReg(rd),
+            rn: VReg(rn),
+            dst_lane: lane,
+            src_lane: (imm4 >> size) as u8,
+            size,
+        });
     }
-    // For op=0 (DUP/SMOV/UMOV), imm4 must be in the valid set:
-    //   0000 DUP (element), 0001 DUP (general),
-    //   0101 SMOV, 0111 UMOV.
-    // op=1 (INS element) accepts arbitrary imm4 (lane index).
-    if op == 0 && !matches!(imm4, 0b0000 | 0b0001 | 0b0101 | 0b0111) {
-        return Err(DecodeErr::Reserved);
+    // op == 0
+    match imm4 {
+        0b0001 => {
+            // DUP (general): Vd.<T> <- Rn. D element requires Q=1 (a 2D dup).
+            if size == 3 && q == 0 {
+                return Err(DecodeErr::Reserved);
+            }
+            Ok(DecodedInsn::SimdDupGen { rd: VReg(rd), rn: Reg(rn), size, q: q == 1 })
+        }
+        // INS (general): Vd.<T>[lane] <- Rn.
+        0b0011 => Ok(DecodedInsn::SimdInsGen { rd: VReg(rd), lane, rn: Reg(rn), size }),
+        0b0111 => {
+            // UMOV: Rd <- zext(Vn.<T>[lane]). B/H/S → Wd (Q=0); D → Xd (Q=1).
+            let valid = (size < 3 && q == 0) || (size == 3 && q == 1);
+            if !valid {
+                return Err(DecodeErr::Reserved);
+            }
+            Ok(DecodedInsn::SimdMovToGen {
+                rd: Reg(rd), rn: VReg(rn), lane, size, signed: false, dst_x: q == 1,
+            })
+        }
+        0b0101 => {
+            // SMOV: Rd <- sext(Vn.<T>[lane]). Wd (Q=0): B/H; Xd (Q=1): B/H/S.
+            let valid = match size {
+                0 | 1 => true,
+                2 => q == 1,
+                _ => false,
+            };
+            if !valid {
+                return Err(DecodeErr::Reserved);
+            }
+            Ok(DecodedInsn::SimdMovToGen {
+                rd: Reg(rd), rn: VReg(rn), lane, size, signed: true, dst_x: q == 1,
+            })
+        }
+        // DUP (element) 0b0000 (vector lane → vector) stays coarse for now — not
+        // on the memset/memcpy path; surfaces as UD2 if hit and gets typed then.
+        0b0000 => Ok(DecodedInsn::AdvSimd { raw: word }),
+        _ => Err(DecodeErr::Reserved),
     }
-    Ok(DecodedInsn::AdvSimd { raw: word })
+}
+
+/// ARM `AdvSIMDExpandImm` — the 64-bit expansion of the MOVI/MVNI modified
+/// immediate (ARM ARM shared pseudocode J1.3). `imm8` = a:b:c:d:e:f:g:h.
+/// Returns `None` for the FMOV (cmode=1111) forms which need float expansion
+/// (left as a coarse `AdvSimd` for now).
+fn adv_simd_expand_imm(op: u32, cmode: u32, imm8: u64) -> Option<u64> {
+    let cmode_hi = (cmode >> 1) & 0b111;
+    let cmode_lo = cmode & 1;
+    let rep32 = |x: u64| (x & 0xFFFF_FFFF) | ((x & 0xFFFF_FFFF) << 32);
+    let rep16 = |x: u64| {
+        let x = x & 0xFFFF;
+        x | (x << 16) | (x << 32) | (x << 48)
+    };
+    let imm64 = match cmode_hi {
+        0b000 => rep32(imm8),               // 32-bit element, no shift
+        0b001 => rep32(imm8 << 8),          // lsl 8
+        0b010 => rep32(imm8 << 16),         // lsl 16
+        0b011 => rep32(imm8 << 24),         // lsl 24
+        0b100 => rep16(imm8),               // 16-bit element, no shift
+        0b101 => rep16(imm8 << 8),          // 16-bit lsl 8
+        0b110 => {
+            // MSL (ones shifted in).
+            if cmode_lo == 0 {
+                rep32((imm8 << 8) | 0xFF)
+            } else {
+                rep32((imm8 << 16) | 0xFFFF)
+            }
+        }
+        0b111 => {
+            if cmode_lo == 0 {
+                if op == 0 {
+                    // 8-bit element: replicate imm8 to all 8 bytes.
+                    imm8.wrapping_mul(0x0101_0101_0101_0101)
+                } else {
+                    // op=1, cmode=1110: MOVI 2D — each bit a..h -> a full byte.
+                    let mut v = 0u64;
+                    let mut i = 0;
+                    while i < 8 {
+                        if (imm8 >> i) & 1 != 0 {
+                            v |= 0xFFu64 << (i * 8);
+                        }
+                        i += 1;
+                    }
+                    v
+                }
+            } else {
+                // cmode=1111: FMOV vector immediate — float expansion, deferred.
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    Some(imm64)
 }
 
 fn decode_simd_modimm(word: u32) -> Result<DecodedInsn, DecodeErr> {
-    // cmode + op selection. cmode in bits[15:12], op in bit 29 (Q same).
-    // Several (cmode, op, ftype) combinations are reserved.
-    let cmode = (word >> 12) & 0xF;
-    let op = (word >> 29) & 1;
-    // For op=1, cmode in 1101/1110/1111 valid (FMOV/MVNI variants).
-    // For op=0, all cmode values valid.
-    if op == 1 && cmode != 0b1101 && cmode != 0b1110 && cmode != 0b1111 && cmode < 0b1000 {
-        // Some op=1 with cmode < 8 are reserved.
+    // Advanced SIMD modified immediate. cmode[15:12], op@29, Q@30.
+    //   imm8 = a:b:c:d:e:f:g:h = bits[18:16] : bits[9:5].
+    // The SETTING forms — MOVI (op=0) / MVNI (op=1) / MOVI-2D (op=1,cmode=1110)
+    // — are decoded into `SimdMoviImm` carrying the final 128-bit value so the
+    // lift writes the q-register file directly. The register-MODIFYING forms
+    // (ORR/BIC immediate, cmode odd in 0xx1/10x1) and FMOV-vector (cmode=1111)
+    // still need vd / float handling, so they stay the coarse `AdvSimd`.
+    // The dispatch mask (0x9F80_1C00) pins bits[28:23], bits[12:11] and bit[10]
+    // but NOT bits[22:19], which the full encoding (bits[28:19]=0111100000)
+    // requires to be 0. A non-zero value is an UNDEFINED encoding (capstone
+    // rejects it) — fail loud rather than mis-decode it as a MOVI/MVNI.
+    if (word >> 19) & 0xF != 0 {
         return Err(DecodeErr::Reserved);
     }
-    Ok(DecodedInsn::AdvSimd { raw: word })
+    let cmode = (word >> 12) & 0xF;
+    let op = (word >> 29) & 1;
+    let q = (word >> 30) & 1;
+    let cmode_hi = (cmode >> 1) & 0b111;
+    let cmode_lo = cmode & 1;
+
+    let is_orr_bic =
+        matches!(cmode_hi, 0b000 | 0b001 | 0b010 | 0b011 | 0b100 | 0b101) && cmode_lo == 1;
+    let is_fmov = cmode_hi == 0b111 && cmode_lo == 1;
+    if is_orr_bic {
+        // ORR (op=0) / BIC (op=1) vector immediate: RMW Vd with the cmode-expanded
+        // pattern (no op-inversion, so expand with op=0; the op bit selects OR vs
+        // AND-NOT in the lowering).
+        let abc = (word >> 16) & 0x7;
+        let defgh = (word >> 5) & 0x1F;
+        let imm8 = ((abc << 5) | defgh) as u64;
+        let imm = match adv_simd_expand_imm(0, cmode, imm8) {
+            Some(v) => v,
+            None => return Ok(DecodedInsn::AdvSimd { raw: word }),
+        };
+        let rd = (word & 0x1F) as u8;
+        return Ok(DecodedInsn::SimdBicOrrImm {
+            rd: VReg(rd),
+            imm,
+            is_bic: op == 1,
+            q: q == 1,
+        });
+    }
+    if is_fmov {
+        return Ok(DecodedInsn::AdvSimd { raw: word });
+    }
+
+    let abc = (word >> 16) & 0x7;
+    let defgh = (word >> 5) & 0x1F;
+    let imm8 = ((abc << 5) | defgh) as u64;
+    let rd = (word & 0x1F) as u8;
+
+    let imm64 = match adv_simd_expand_imm(op, cmode, imm8) {
+        Some(v) => v,
+        None => return Ok(DecodedInsn::AdvSimd { raw: word }),
+    };
+    // op=1 is MVNI (bitwise-NOT) EXCEPT the cmode=1110 MOVI-2D form, which is a
+    // plain MOVI despite op=1.
+    let movi_2d = cmode_hi == 0b111 && cmode_lo == 0 && op == 1;
+    let val = if op == 1 && !movi_2d { !imm64 } else { imm64 };
+    // Q=0 zeroes the upper 64 bits of the V register.
+    let hi = if q == 1 { val } else { 0 };
+    Ok(DecodedInsn::SimdMoviImm { rd, lo: val, hi })
 }
 
 fn decode_simd_shift_imm(word: u32) -> Result<DecodedInsn, DecodeErr> {
@@ -517,7 +919,48 @@ fn decode_simd_shift_imm(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if q == 0 && immh & 0b1000 != 0 {
         return Err(DecodeErr::Reserved);
     }
+    // USHLL/SSHLL/UXTL/SXTL (opcode 0b10100) — shift-left-long (widening). Route
+    // to a typed decode; everything else in this group stays the coarse AdvSimd
+    // fallback until its semantics land.
+    if opcode == 0b10100 {
+        return decode_ushll(word);
+    }
     Ok(DecodedInsn::AdvSimd { raw: word })
+}
+
+/// USHLL/SSHLL{2} — shift-left-long. `immh` selects the SOURCE element size
+/// (0001→.8b, 001x→.4h, 01xx→.2s); `shift = UInt(immh:immb) - esize_bits`.
+/// `Q` selects the low 64 (USHLL, false) vs high 64 (USHLL2, true) of Vn;
+/// `U` selects unsigned/zero-extend (USHLL) vs signed/sign-extend (SSHLL).
+fn decode_ushll(word: u32) -> Result<DecodedInsn, DecodeErr> {
+    let immh = (word >> 19) & 0xF;
+    let immb = (word >> 16) & 0x7;
+    // immh==0 is the modified-immediate group; immh top bit (1xxx) would mean a
+    // 64-bit source which cannot widen — reserved for USHLL.
+    if immh == 0 || immh & 0b1000 != 0 {
+        return Err(DecodeErr::Reserved);
+    }
+    let immhimmb = (immh << 3) | immb;
+    let (esize_in, esize_bits): (u8, u32) = if immh & 0b0100 != 0 {
+        (4, 32) // .2s source -> .2d dest
+    } else if immh & 0b0010 != 0 {
+        (2, 16) // .4h source -> .4s dest
+    } else {
+        (1, 8) // immh == 0001: .8b source -> .8h dest
+    };
+    let shift = immhimmb - esize_bits;
+    let q = (word >> 30) & 1;
+    let u = (word >> 29) & 1;
+    let rn = ((word >> 5) & 0x1F) as u8;
+    let rd = (word & 0x1F) as u8;
+    Ok(DecodedInsn::SimdUshll {
+        rd: VReg(rd),
+        rn: VReg(rn),
+        shift: shift as u8,
+        esize_in,
+        high: q == 1,
+        signed: u == 0,
+    })
 }
 
 fn decode_simd_indexed(word: u32) -> Result<DecodedInsn, DecodeErr> {
@@ -568,6 +1011,29 @@ fn decode_simd_permute(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if opcode == 0b000 || opcode == 0b100 {
         return Err(DecodeErr::Reserved);
     }
+    // .2d (size=11) requires Q=1 for every permute form.
+    if (word >> 22) & 0x3 == 0b11 && (word >> 30) & 1 == 0 {
+        return Err(DecodeErr::Reserved);
+    }
+    // UZP1 (001) / UZP2 (101) — typed; ZIP/TRN stay coarse for now.
+    if opcode == 0b001 || opcode == 0b101 {
+        let q = (word >> 30) & 1;
+        let size = (word >> 22) & 0x3;
+        if size == 0b11 && q == 0 {
+            return Err(DecodeErr::Reserved); // .2d needs Q=1
+        }
+        let rm = ((word >> 16) & 0x1F) as u8;
+        let rn = ((word >> 5) & 0x1F) as u8;
+        let rd = (word & 0x1F) as u8;
+        return Ok(DecodedInsn::SimdUnzip {
+            rd: VReg(rd),
+            rn: VReg(rn),
+            rm: VReg(rm),
+            size: size as u8,
+            q: q == 1,
+            odd: opcode == 0b101,
+        });
+    }
     Ok(DecodedInsn::AdvSimd { raw: word })
 }
 
@@ -578,7 +1044,16 @@ fn decode_simd_extract(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if q == 0 && imm4 >= 8 {
         return Err(DecodeErr::Reserved);
     }
-    Ok(DecodedInsn::AdvSimd { raw: word })
+    let rm = ((word >> 16) & 0x1F) as u8;
+    let rn = ((word >> 5) & 0x1F) as u8;
+    let rd = (word & 0x1F) as u8;
+    Ok(DecodedInsn::SimdExt {
+        rd: VReg(rd),
+        rn: VReg(rn),
+        rm: VReg(rm),
+        imm: imm4 as u8,
+        q: q == 1,
+    })
 }
 
 fn decode_simd_table(word: u32) -> Result<DecodedInsn, DecodeErr> {

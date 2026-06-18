@@ -275,6 +275,9 @@ mod arm64_entry {
             cmdline_len,
             initrd_start: 0,
             initrd_end:   0,
+            // ARM tier has no PMEM system image (native Android, real block devs).
+            pmem_base:    0,
+            pmem_size:    0,
         };
 
         puts(&uart, "  ch36: Building Android DTB (4-core SMP + IRQ forwarding)...\r\n");

@@ -120,7 +120,7 @@ impl AtomicLower {
                 let _ = ty;
             }
 
-            IrOp::AtomicRmw { dst, op: atomic_op, addr, val, order } => {
+            IrOp::AtomicRmw { dst, op: atomic_op, addr, val, order, .. } => {
                 let rd = gpr(alloc, *dst);
                 let ra = gpr(alloc, *addr);
                 let rv = gpr(alloc, *val);
@@ -186,7 +186,7 @@ impl AtomicLower {
                 let _ = order;
             }
 
-            IrOp::AtomicCas { dst, addr, expected, new, order } => {
+            IrOp::AtomicCas { dst, addr, expected, new, order, .. } => {
                 // CAS: compare [addr] with expected; if equal, swap with new.
                 // LOCK CMPXCHG: RAX = expected; [addr] compared with RAX;
                 //   if equal, [addr] = new; else RAX = [addr].

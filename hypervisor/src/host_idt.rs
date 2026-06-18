@@ -206,6 +206,46 @@ pub extern "C" fn host_exception_handler(
             _ => dual_puts(b"\n[idt] (other vector)\n"),
         }
 
+        // Dump the recent guest-PC ring (oldest→newest). The LAST entry is the
+        // ARM64 block whose translated x86 just faulted; the prior entries are
+        // the branch/call chain into it. This is the culprit-block locator for
+        // a host fault in translated code.
+        {
+            let idx = *core::ptr::addr_of!(crate::boot_x86::DBG_GUEST_PC_IDX);
+            dual_puts(b"[idt] recent guest block PCs (oldest->newest):\n");
+            let mut k: usize = 0;
+            while k < 16 {
+                let slot = (idx + k) % 16;
+                let p = *core::ptr::addr_of!(crate::boot_x86::DBG_GUEST_PC_RING[slot]);
+                if p != 0 {
+                    dual_puts(b"[idt]   guest_pc=");
+                    dual_puthex64(p);
+                    dual_puts(b"\n");
+                }
+                k += 1;
+            }
+        }
+
+        // Dump the live guest GPR file (x0..x30). On a host #PF from a translated
+        // block's guest-memory access, these say WHAT the guest was computing —
+        // e.g. a garbage PFN in a sparsemem mem_section lookup vs a sane one.
+        {
+            let g = &*core::ptr::addr_of!(crate::boot_x86::NPF_GUEST_CTX);
+            dual_puts(b"[idt] guest GPRs x0..x30:\n");
+            let mut r: usize = 0;
+            while r < 31 {
+                dual_puts(b"[idt]   x");
+                dual_puthex64(r as u64);
+                dual_puts(b"=");
+                dual_puthex64(g[r]);
+                dual_puts(b"\n");
+                r += 1;
+            }
+            dual_puts(b"[idt]   sp=");
+            dual_puthex64(g[0xF8 / 8]);
+            dual_puts(b"\n");
+        }
+
         // Distinctive cue: 5 high beeps (vs halt()'s 3x440 Hz).
         beep_n(5, 1200);
     }

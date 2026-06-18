@@ -773,6 +773,9 @@ pub fn build_production_android_dtb(
     b.prop_u32(b"#address-cells", 2)?;
     b.prop_u32(b"#size-cells", 2)?;
     b.prop_str(b"compatible", b"aether,android-partition")?;
+    // Global interrupt parent (see kernel::build_android_dtb): without this the
+    // /timer PPIs never map to a virq and the scheduler tick never fires.
+    b.prop_u32(b"interrupt-parent", crate::kernel::GIC_PHANDLE)?;
 
     // ── /memory ───────────────────────────────────────────────────────────────
     {
@@ -838,6 +841,7 @@ pub fn build_production_android_dtb(
             (base.gicr_base >> 32) as u32, base.gicr_base as u32,
             (base.gicr_size >> 32) as u32, base.gicr_size as u32,
         ])?;
+        b.prop_u32(b"phandle", crate::kernel::GIC_PHANDLE)?;
         b.end_node()?;
     }
 
@@ -1193,6 +1197,8 @@ mod tests {
             cmdline_len:  0,
             initrd_start: 0,
             initrd_end:   0,
+            pmem_base:    0,
+            pmem_size:    0,
         };
         // Minimal cmdline.
         let cl = b"console=ttyAMA0 androidboot.hardware=aether";

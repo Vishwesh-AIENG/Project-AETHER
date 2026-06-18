@@ -488,18 +488,23 @@ pub unsafe fn assign_gpu_vfs(
     unsafe { enable_vfs(ecam, config.pf_addr, cap_off, AETHER_GPU_NUM_VFS) };
 
     // ── Step 5: Map VF BARs into Stage 2 ─────────────────────────────────────
-    let mut all_vfs_have_bars = true;
+    // Map EVERY enabled VF's BARs (both VFs need device-memory access in Stage 2),
+    // but the GATE criterion tracks only the ANDROID VF (VF 0). VF 1 is reserved
+    // for a future Windows guest; its BARs being absent must NOT fail Android's
+    // GPU bring-up. This matches the gate doc above ("for VF 0 (Android's VF)")
+    // and the sibling network_passthrough.rs, which checks only the Android VF.
+    let mut android_vf_has_bars = false;
     for vf_index in 0..AETHER_GPU_NUM_VFS {
         let vf_addr = compute_vf_addr(config.pf_addr, first_vf_offset, vf_stride, vf_index);
         let has_bar =
             unsafe { map_vf_bars(ecam, vf_addr, s2_tables, alloc) }?;
-        if !has_bar {
-            all_vfs_have_bars = false;
+        if vf_index == ANDROID_VF_INDEX {
+            android_vf_has_bars = has_bar;
         }
     }
-    // Gate: vf_bars_mapped requires at least one BAR per VF.  Report even if
-    // the pipeline continues — the DRM driver will fail to access the GPU.
-    gate.vf_bars_mapped = all_vfs_have_bars;
+    // Gate: vf_bars_mapped requires ≥1 BAR for the Android VF (VF 0). Reported
+    // even if the pipeline continues — without it the DRM driver can't reach the GPU.
+    gate.vf_bars_mapped = android_vf_has_bars;
 
     // ── Step 6: Configure SMMU STEs ───────────────────────────────────────────
     for (vf_index, &stream_id) in config.stream_ids.iter().enumerate() {

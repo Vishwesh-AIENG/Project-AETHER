@@ -31,6 +31,13 @@ fex_linked = ["aether-translator/dbt_linked"]
 # under software emulation). Port I/O is still issued; only the hold duration
 # shrinks, so real-HW diagnostics are unaffected when this feature is OFF.
 qemu = []
+# WHPX host-mode: skip VMXON / init_vtx_foundation / init_svm_foundation / EPT
+# (the only nested-virt requirement) and run the host-mode DBT dispatch loop
+# directly. The live DBT never VMLAUNCHes — it CALLs translated x86 with a
+# software MMU under the UEFI identity-mapped host CR3 — so VMX is unnecessary.
+# Lets AETHER run under QEMU `-accel whpx` (no nested VMX) at ~10-100x TCG, which
+# is what makes the Android display gate reachable. See docs/phase-g/WHPX-ACCEL-PLAN.md.
+whpx_hostmode = []
 
 [dependencies]
 # AT-24: AETHER ARM64 -> x86_64 dynamic binary translator. Pure Rust, no_std

@@ -1301,9 +1301,9 @@ pub unsafe fn handle_vm_exit(state: &mut VtxFoundationState) -> VtxExitAction {
                                 return VtxExitAction::Resume;
                             }
                             unsafe {
-                                crate::boot_x86::dual_puts(b"[dbt] dispatch failed pc=");
-                                crate::boot_x86::dual_puthex64(pc);
-                                crate::boot_x86::dual_puts(b"\n");
+                                crate::dbgout::dual_puts(b"[dbt] dispatch failed pc=");
+                                crate::dbgout::dual_puthex64(pc);
+                                crate::dbgout::dual_puts(b"\n");
                             }
                         } else {
                             // Translation failed — print the exact (pc, word,
@@ -1312,20 +1312,20 @@ pub unsafe fn handle_vm_exit(state: &mut VtxFoundationState) -> VtxExitAction {
                             let (fpc, fw, fkind) =
                                 aether_translator::dbt::aether_dbt_last_failure();
                             unsafe {
-                                crate::boot_x86::dual_puts(b"[dbt] TranslateFail pc=");
-                                crate::boot_x86::dual_puthex64(fpc);
-                                crate::boot_x86::dual_puts(b" word=");
-                                crate::boot_x86::dual_puthex64(fw as u64);
-                                crate::boot_x86::dual_puts(b" kind=");
-                                crate::boot_x86::dual_puthex64(fkind as u64);
-                                crate::boot_x86::dual_puts(b" (1=decode 2=lift 3=short 4=empty)\n");
+                                crate::dbgout::dual_puts(b"[dbt] TranslateFail pc=");
+                                crate::dbgout::dual_puthex64(fpc);
+                                crate::dbgout::dual_puts(b" word=");
+                                crate::dbgout::dual_puthex64(fw as u64);
+                                crate::dbgout::dual_puts(b" kind=");
+                                crate::dbgout::dual_puthex64(fkind as u64);
+                                crate::dbgout::dual_puts(b" (1=decode 2=lift 3=short 4=empty)\n");
                             }
                         }
                     } else {
                         unsafe {
-                            crate::boot_x86::dual_puts(b"[dbt] EPT window read failed pc=");
-                            crate::boot_x86::dual_puthex64(pc);
-                            crate::boot_x86::dual_puts(b"\n");
+                            crate::dbgout::dual_puts(b"[dbt] EPT window read failed pc=");
+                            crate::dbgout::dual_puthex64(pc);
+                            crate::dbgout::dual_puts(b"\n");
                         }
                     }
                 }

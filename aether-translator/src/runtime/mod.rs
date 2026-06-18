@@ -25,6 +25,7 @@ pub mod block_cache;
 pub mod branch_chain;
 pub mod cache_persist;
 pub mod context;
+pub mod crypto_rt;
 pub mod dispatcher;
 pub mod exception_forward;
 pub mod exceptions;
