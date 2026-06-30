@@ -71,7 +71,7 @@ AETHER is a bare-metal Rust hypervisor that boots from UEFI firmware, takes EL2 
 
 ## Chapter Progress
 
-**33 / 70 chapters complete · 47% · v1.0 ships at Chapter 70**
+**58 / 70 chapters complete · 82% · v1.0 ships at Chapter 70**
 
 <details>
 <summary><strong>Part I — The Hypervisor Core  (Chapters 1–16) · ✅ Complete</strong></summary>
@@ -151,11 +151,11 @@ AETHER is a bare-metal Rust hypervisor that boots from UEFI firmware, takes EL2 
 
 | # | Title | Status | Deliverable |
 |---|-------|--------|-------------|
-| 50 | Intel VT-x Foundation | 🔲 | VMCS initialized; EPT active; first VM exit (HLT) handled on Intel |
-| 51 | AMD-V Foundation | 🔲 | VMCB + NPT; first VM exit on AMD; runtime CPU detection |
-| 52 | FEX-Emu Integration in Hypervisor | 🔲 | `no_std` FEX linked in EFI binary; ARM64 ELF runs on x86 hardware |
-| 53 | Android on x86 — Userspace | 🔲 | Android home screen on Intel/AMD through FEX DBT layer |
-| 54 | x86 Tier Hardware Validation | 🔲 | Both Intel AND AMD boot Android on real hardware; no workarounds |
+| 50 | Intel VT-x Foundation | ✅ | VMCS initialized; EPT active; first VM exit (HLT) handled on Intel |
+| 51 | AMD-V Foundation | ✅ | VMCB + NPT; first VM exit on AMD; runtime CPU detection |
+| 52 | FEX-Emu Integration in Hypervisor | ✅ | `no_std` FEX linked in EFI binary; ARM64 ELF runs on x86 hardware |
+| 53 | Android on x86 — Userspace | ✅ | Android home screen on Intel/AMD through FEX DBT layer |
+| 54 | x86 Tier Hardware Validation | ✅ | Both Intel AND AMD boot Android on real hardware; no workarounds |
 
 </details>
 
@@ -164,10 +164,10 @@ AETHER is a bare-metal Rust hypervisor that boots from UEFI firmware, takes EL2 
 
 | # | Title | Status | Deliverable |
 |---|-------|--------|-------------|
-| 55 | Hardware Compatibility Checker | 🔲 | Standalone binary: structured JSON report; no admin required |
-| 56 | AETHER Installer CLI | 🔲 | `aether-install install` — partition NVMe, flash EFI, write UEFI entry |
-| 57 | Secure Boot Integration | 🔲 | `hypervisor.efi` boots with Secure Boot ON via shim + MOK enrollment |
-| 58 | UEFI Boot Selector | 🔲 | 5-second timeout menu at startup; `[A]ndroid [W]indows [S]ettings` |
+| 55 | Hardware Compatibility Checker | ✅ | Standalone binary: structured JSON report; no admin required |
+| 56 | AETHER Installer CLI | ✅ | `aether-install install` — partition NVMe, flash EFI, write UEFI entry |
+| 57 | Secure Boot Integration | ✅ | `hypervisor.efi` boots with Secure Boot ON via shim + MOK enrollment |
+| 58 | UEFI Boot Selector | ✅ | 5-second timeout menu at startup; `[A]ndroid [W]indows [S]ettings` |
 | 59 | Setup Wizard — GUI Frontend | 🔲 | Tauri 2 app; 7 screens; double-click-and-install; no terminal needed |
 | 60 | Configuration App | 🔲 | Host Tauri app + Android AETHER Manager system app; USB rerouting |
 | 61 | OTA Update System | 🔲 | A/B EFI slots; Android OTA via `update_engine`; auto-rollback on panic |
