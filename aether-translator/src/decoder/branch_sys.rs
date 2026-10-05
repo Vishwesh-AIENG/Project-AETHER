@@ -14,8 +14,12 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
         // Same shape with bit 31 set: 1_00101 — BL
         0b000 | 0b100 => decode_uncond_branch_imm(word),
 
-        // Conditional branch (immediate): 01010100_imm19_cond
-        0b010 if (word >> 25) & 0xF == 0b0101 && (word >> 24) & 1 == 0 => {
+        // Conditional branch (immediate): top byte == 0x54. (The prior guard
+        // `(word>>25)&0xF==0b0101 && (word>>24)&1==0` was arithmetically
+        // impossible for a real B.cond — bits[28:25]=0b1010 — so b.cond only
+        // ever decoded via the `.or_else` fallback below. Decode it directly
+        // here; the fallback now stays as harmless belt-and-braces.) — B33
+        0b010 if (word >> 24) & 0xFF == 0x54 => {
             decode_cond_branch(word)
         }
 
@@ -275,7 +279,20 @@ fn decode_uncond_branch_reg(word: u32) -> Result<DecodedInsn, DecodeErr> {
     Ok(match opc {
         0b0000 => DecodedInsn::Br { rn },             // BR / BRAAZ / BRABZ
         0b0001 => DecodedInsn::Blr { rn },            // BLR / BLRAAZ / BLRABZ
-        0b0010 => DecodedInsn::Ret { rn },            // RET / RETAA / RETAB
+        0b0010 => {
+            // RET (op3=000000, Rn=x30) vs RETAA (op3=000010) / RETAB (op3=000011).
+            // For the PAC forms the return target is the IMPLICIT x30 — the Rn
+            // field instead holds the modifier (SP=31), so decoding `Ret{rn}`
+            // would return to XZR(=0) and crash. Rust (`-mbranch-protection`,
+            // keystore2 et al.) returns via the fused RETAA, so this is a HARD
+            // control-flow bug. Force x30; PACIASP was a no-op so x30 is the
+            // plain unsigned return address (this DBT does not authenticate).
+            if op3 == 0b000010 || op3 == 0b000011 {
+                DecodedInsn::Ret { rn: Reg(30) }
+            } else {
+                DecodedInsn::Ret { rn }
+            }
+        }
         // ERET — exception return (C6.2.ERET). Plain (non-PAC) form requires
         //   op3=000000, Rn=11111, op4=00000. ERETAA/ERETAB (PAC variants) use
         //   op3=000010/000011 with op4=11111 and are left Unimplemented so they
@@ -315,6 +332,20 @@ mod tests {
         // RET x30 = 0xD65F03C0 — guard against the new ERET arm shadowing RET.
         let insn = decode_instruction(0xD65F_03C0).expect("RET must decode");
         assert_eq!(insn, DecodedInsn::Ret { rn: Reg(30) });
+    }
+
+    #[test]
+    fn retaa_retab_target_implicit_x30() {
+        // RETAA = 0xD65F0BFF, RETAB = 0xD65F0FFF (fused PAC authenticate-and-
+        // return, emitted by Rust `-mbranch-protection`). The Rn field is 31
+        // (SP modifier), NOT the target — the target is the IMPLICIT x30. The
+        // decoder must force x30, else `Ret{rn:31}` returns to XZR=0 → crash
+        // (the keystore2 deterministic SIGSEGV). C/C++ uses unfused AUTIASP;RET
+        // so only Rust binaries hit this.
+        let a = decode_instruction(0xD65F_0BFF).expect("RETAA must decode");
+        assert_eq!(a, DecodedInsn::Ret { rn: Reg(30) }, "RETAA target = x30");
+        let b = decode_instruction(0xD65F_0FFF).expect("RETAB must decode");
+        assert_eq!(b, DecodedInsn::Ret { rn: Reg(30) }, "RETAB target = x30");
     }
 
     #[test]

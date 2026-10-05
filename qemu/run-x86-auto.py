@@ -136,11 +136,21 @@ def main():
     # does not expose it). ~10-100x faster than TCG; the only realistic way to
     # drive the Android boot to the display gate. -cpu host (TCG uses -cpu max).
     if os.environ.get("WHPX"):
-        accel = "whpx"
-        # Disable VMX/SVM in the guest CPU: the whpx_hostmode hypervisor never
-        # executes VMXON, so it does not need them, and exposing them makes QEMU
-        # try to enable NESTED virtualization (which WHPX rejects: hr=80370302).
-        cpu = "host,-vmx,-svm"
+        # kernel-irqchip=off is REQUIRED for WHPX (split irqchip unsupported).
+        accel = "whpx,kernel-irqchip=off"
+        # VMX-less explicit model (NOT -cpu host). Root cause of the prior OVMF
+        # #GP: with -cpu host under WHPX, QEMU's forced-nested injects VMX into
+        # guest CPUID; OVMF's PlatformPei then programs IA32_FEATURE_CONTROL
+        # (MSR 0x3A), and WHPX #GPs that wrmsr (no WRMSR permission — QEMU #2461).
+        # A named model carries no vmx/svm unless +vmx is added -> no VMX in
+        # CPUID -> OVMF never programs FEATURE_CONTROL -> no #GP. Under WHPX the
+        # guest executes on the real Ryzen, so the DBT's SSE4.1/SSSE3/LZCNT/AES
+        # (no AVX) run natively regardless of the model's advertised flags.
+        # hv_* enlightenments prevent OVMF rdmsr #GPs; enforce=off stops QEMU
+        # aborting if WHPX can't provide a model feature. Proven WHPX+OVMF combo
+        # (FreeBSD-on-WHPX). Override the model via WHPX_CPU=… (e.g. EPYC-Milan).
+        cpu = os.environ.get(
+            "WHPX_CPU", "kvm64,hv_relaxed,hv_time,hv_synic,enforce=off")
     else:
         accel = "tcg,tb-size=512"
         cpu = "max"
@@ -175,11 +185,60 @@ def main():
     # translator JIT cache + bump arena at 8 GiB. PML4[0]'s PDPT has free 1-GiB
     # slots [12..15] for AETHER's host-CR3 identity map.
     PMEM_SYSTEM_PA = 0x3_0000_0000
+    # vendor.raw staged CONTIGUOUS right after system.raw (3 GiB) → 15 GiB. Exposed
+    # as the 2nd pmem-region DT node → /dev/pmem1 → /vendor (SELinux policy +
+    # HALs). MUST match hypervisor::android_handoff::PMEM_VENDOR_PA.
+    PMEM_VENDOR_PA = PMEM_SYSTEM_PA + 0xC000_0000  # 0x3_C000_0000 (15 GiB)
     IMG_DIR = os.path.join(HERE, "images")
     sys_raw = os.path.join(IMG_DIR, "system.raw")
     if os.path.exists(sys_raw):
         cmd += ["-device",
                 f"loader,file={sys_raw},addr={PMEM_SYSTEM_PA:#x},force-raw=on"]
+    ven_raw = os.path.join(IMG_DIR, "vendor.raw")
+    if os.path.exists(ven_raw):
+        cmd += ["-device",
+                f"loader,file={ven_raw},addr={PMEM_VENDOR_PA:#x},force-raw=on"]
+
+    # /data — PRIMARY path is a tmpfs /data mounted by the DT fstab
+    # (hypervisor::kernel::build_android_dtb emits an android,data node with
+    # type=tmpfs; no encryption, no /metadata). That needs NO staged image, so
+    # by default there is nothing to load here and /data is volatile in RAM.
+    #
+    # OPTIONAL: if you want a PERSISTENT /data instead of tmpfs, drop a blank
+    # ext4 image at qemu/images/userdata.raw (e.g.
+    #   dd if=/dev/zero of=userdata.raw bs=1M count=2048 &&
+    #   mkfs.ext4 -F userdata.raw
+    # ), stage it as a THIRD pmem-region here (/dev/pmem2), and switch the DT
+    # /data fstab entry to dev=/dev/block/pmem2 type=ext4. Staged CONTIGUOUS
+    # right after vendor.raw (15 GiB + 1 GiB = 16 GiB → bump MEM above 16G so
+    # the high-RAM band actually backs it). Left commented/guarded so the
+    # default tmpfs path stays the simple, image-free one.
+    PMEM_USERDATA_PA = PMEM_VENDOR_PA + 0x4000_0000  # 0x4_0000_0000 (16 GiB)
+    data_raw = os.path.join(IMG_DIR, "userdata.raw")
+    if os.path.exists(data_raw):
+        cmd += ["-device",
+                f"loader,file={data_raw},addr={PMEM_USERDATA_PA:#x},force-raw=on"]
+
+    # ── Checkpoint / restore (resume a boot across crashes) ──────────────────
+    # WHPX BLOCKS QEMU savevm/snapshot (non-migratable vCPU), but `pmemsave`
+    # works. The ARM64 guest's writable DRAM is host PA [0x8000_0000, +1 GiB);
+    # the efi periodically writes a magic header (M2_REGFILE + resume PC) into the
+    # top page and prints CHECKPOINT_READY, then busy-waits while we pmemsave the
+    # 1 GiB to checkpoint.raw. On RESTORE=1 we reload it at the same PA; the efi
+    # sees the magic and re-enters the DBT dispatch loop at the saved PC (the x86
+    # vCPU is fresh — never migrated). CHECKPOINT=1 enables the periodic save.
+    # Guest DRAM relocated to [4 GiB, 8 GiB) — raw, hole-free `-m 16G` high-RAM,
+    # below the JIT cache at 8 GiB. Must match
+    # aether_translator::runtime::mmu::GUEST_PA_BASE/SIZE and the host-CR3
+    # identity map in boot_x86 (host_pt_map_identity_1g(GUEST_PA_BASE, 4)).
+    CHECKPOINT_RAW = os.path.join(HERE, "checkpoint.raw")
+    GUEST_DRAM_PA = 0x1_0000_0000
+    GUEST_DRAM_SIZE = 0x1_0000_0000
+    if os.environ.get("RESTORE") and os.path.exists(CHECKPOINT_RAW):
+        cmd += ["-device",
+                f"loader,file={CHECKPOINT_RAW},addr={GUEST_DRAM_PA:#x},force-raw=on"]
+        print(f"==> RESTORE: reloading {CHECKPOINT_RAW} at {GUEST_DRAM_PA:#x}")
+
     # QDBG=1: log host CPU exceptions + resets to qemu/qdbg.log. `int` shows each
     # exception vector + RIP + error code as it is taken (so a #PF -> #DF -> reset
     # nested-fault triple-fault is visible with the ORIGINAL faulting RIP/CR2);
@@ -229,10 +288,36 @@ def main():
     start = time.time()
     last_size = -1
     last_change = time.time()
+    last_ckpt = 0  # count of CHECKPOINT_READY markers already handled
+    do_checkpoint = bool(os.environ.get("CHECKPOINT"))
     while time.time() - start < timeout:
         if proc.poll() is not None:
             print("==> QEMU process exited on its own")
             break
+        # Checkpoint monitor: when the efi prints CHECKPOINT_READY it then
+        # busy-waits ~40 s WITHOUT mutating guest DRAM, giving us a consistent
+        # window to pmemsave the 1 GiB DRAM (incl. the magic header) to disk.
+        if do_checkpoint and os.path.exists(SERIAL_LOG):
+            try:
+                with open(SERIAL_LOG, "rb") as f:
+                    n = f.read().count(b"CHECKPOINT_READY")
+                if n > last_ckpt:
+                    last_ckpt = n
+                    tmp = CHECKPOINT_RAW + ".tmp"
+                    print(f"==> CHECKPOINT_READY #{n} — pmemsave {GUEST_DRAM_SIZE>>20} MiB ...")
+                    t0 = time.time()
+                    sock.settimeout(300)
+                    qmp(sock, "pmemsave", val=GUEST_DRAM_PA, size=GUEST_DRAM_SIZE,
+                        filename=tmp.replace("\\", "/"))
+                    sock.settimeout(120)
+                    if os.path.exists(tmp) and os.path.getsize(tmp) == GUEST_DRAM_SIZE:
+                        os.replace(tmp, CHECKPOINT_RAW)  # atomic: a crash mid-save keeps the old one
+                        print(f"==> CHECKPOINT saved ({time.time()-t0:.1f}s) -> {CHECKPOINT_RAW}")
+                    else:
+                        got = os.path.getsize(tmp) if os.path.exists(tmp) else -1
+                        print(f"==> CHECKPOINT pmemsave INCOMPLETE (got {got} of {GUEST_DRAM_SIZE})")
+            except Exception as e:
+                print("checkpoint error:", e)
         sz = os.path.getsize(SERIAL_LOG) if os.path.exists(SERIAL_LOG) else 0
         if sz != last_size:
             last_size = sz

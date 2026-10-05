@@ -1,0 +1,56 @@
+diff --git a/net/core/sysctl_net_core.c b/net/core/sysctl_net_core.c
+index 5b1ce656b..68008dd85 100644
+--- a/net/core/sysctl_net_core.c
++++ b/net/core/sysctl_net_core.c
+@@ -315,6 +315,22 @@ proc_dolongvec_minmax_bpf_restricted(struct ctl_table *table, int write,
+ }
+ #endif
+ 
++/*
++ * AETHER DBT shim: NetBpfLoad (system/bpf bpfloader) unconditionally writes "1"
++ * to /proc/sys/net/core/bpf_jit_enable on every boot and treats an open()
++ * failure (ENOENT when CONFIG_BPF_JIT=n) as fatal -> reboot,bpfloader-failed.
++ * AETHER keeps CONFIG_BPF_JIT=n on purpose (the ARM64->x86 DBT mistranslates
++ * JIT-compiled eBPF), so the real bpf_jit_enable symbol does not exist. Provide
++ * a private write-sink int and an always-present sysctl entry so the write
++ * succeeds. NOTHING in the kernel reads this variable when CONFIG_BPF_JIT=n
++ * (ebpf_jit_enabled() hard-returns false in that build), so eBPF stays
++ * INTERPRETED regardless of the value written here.
++ */
++#ifndef CONFIG_BPF_JIT
++static int aether_bpf_jit_enable_sink __read_mostly;
++static int aether_bpf_jit_kallsyms_sink __read_mostly;
++#endif
++
+ static struct ctl_table net_core_table[] = {
+ 	{
+ 		.procname	= "wmem_max",
+@@ -427,6 +443,28 @@ static struct ctl_table net_core_table[] = {
+ 		.extra1		= SYSCTL_LONG_ONE,
+ 		.extra2		= &bpf_jit_limit_max,
+ 	},
++#else
++	{
++		/* AETHER write-sink so NetBpfLoad does not ENOENT->reboot. */
++		.procname	= "bpf_jit_enable",
++		.data		= &aether_bpf_jit_enable_sink,
++		.maxlen		= sizeof(int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= SYSCTL_TWO,
++	},
++	{
++		/* AETHER write-sink: NetBpfLoad also tunes bpf_jit_kallsyms on
++		 * startup; same ENOENT->reboot hazard as bpf_jit_enable above. */
++		.procname	= "bpf_jit_kallsyms",
++		.data		= &aether_bpf_jit_kallsyms_sink,
++		.maxlen		= sizeof(int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= SYSCTL_ZERO,
++		.extra2		= SYSCTL_ONE,
++	},
+ #endif
+ 	{
+ 		.procname	= "netdev_tstamp_prequeue",

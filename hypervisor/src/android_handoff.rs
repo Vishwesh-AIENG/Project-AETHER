@@ -61,25 +61,21 @@ pub const GUEST_DTB_SIZE: u64 = 2 * 1024 * 1024;
 /// The total mapped guest RAM (HANDOFF_REGION_SIZE) is what the DTB
 /// `/memory` node advertises to the kernel.
 ///
-/// Phase-F: keep this at 1 GiB to maximise what the kernel can see; the
-/// runtime probe (`probe_handoff_writable_extent` in boot_x86.rs)
-/// truncates DOWN to the actually-writable extent reported by UEFI.
-/// With the full HANDOFF_REGION_SIZE UEFI allocation (Phase-F change in
-/// boot_x86.rs) the writable extent IS the full 1 GiB, but kernel
-/// behaviour shifts: a much larger code surface gets translated which
-/// triggers more JIT bump arena pressure AND surfaces a register-spill
-/// UD2 in paging_init's map_mem path (block at 0xffffffc008041834,
-/// inside create_kpti_ng_temp_pgd). Phase F+G need this lower_int
-/// spill fix to land first; until then a smaller advertised range
-/// (256 MiB) avoids the over-pressured block while we wait.
-pub const KERNEL_WORKING_RAM_SIZE: u64 = 1024 * 1024 * 1024
+/// RELOCATION: guest DRAM moved to the 4 GiB window [4 GiB, 8 GiB)
+/// (aether_translator::runtime::mmu::GUEST_PA_BASE/SIZE) — raw, hole-free
+/// `-m 16G` high-RAM, so the runtime hole-probe is SKIPPED and the FULL window
+/// is advertised. Sized at 4 GiB total so the kernel sees the design-target RAM
+/// (zygote / system_server / graphics need ≥1-2 GiB to reach SurfaceFlinger;
+/// the old ~562 MiB cap — `Memory: 573440K` — could not).
+pub const KERNEL_WORKING_RAM_SIZE: u64 = 4 * 1024 * 1024 * 1024
     - STAGED_BOOT_IMG_SIZE
     - GUEST_DTB_SIZE;
 
-/// Total contiguous host PA span the EPT/NPT identity map must cover for
-/// the Android handoff: boot.img window + DTB region + kernel working RAM.
-/// Fits in a single 1-GiB PDPT entry (512 × 2-MiB PDE leaves = 1 GiB),
-/// which is also the upper bound for `build_ept_2mib_range` (one PD table).
+/// Total contiguous host PA span the host-CR3 identity map must cover for the
+/// Android handoff: boot.img window + DTB region + kernel working RAM = 4 GiB,
+/// exactly the relocated [4 GiB, 8 GiB) window. Mapped by four 1-GiB host-CR3
+/// identity leaves (boot_x86::host_pt_map_identity_1g). MUST equal
+/// `aether_translator::runtime::mmu::GUEST_PA_SIZE`.
 pub const HANDOFF_REGION_SIZE: u64 =
     STAGED_BOOT_IMG_SIZE + GUEST_DTB_SIZE + KERNEL_WORKING_RAM_SIZE;
 
@@ -101,12 +97,24 @@ pub const HANDOFF_REGION_SIZE: u64 =
 pub const PMEM_SYSTEM_PA: u64 = 0x3_0000_0000;
 /// Size of the PMEM `/system` region (3 GiB == `qemu/images/system.raw`).
 pub const PMEM_SYSTEM_SIZE: u64 = 0xC000_0000;
+/// Base PA of the PMEM `/vendor` region — placed CONTIGUOUS right after the
+/// system image so a single WIN2 span (`PMEM_SYSTEM_SIZE + PMEM_VENDOR_SIZE`)
+/// covers both. Exposed as a second `pmem-region` DT node → /dev/pmem1 →
+/// /vendor, so second-stage init can read /vendor/etc/selinux (the SELinux
+/// policy compile that FATAL-rebooted when /vendor was absent).
+pub const PMEM_VENDOR_PA: u64 = PMEM_SYSTEM_PA + PMEM_SYSTEM_SIZE; // 0x3_C000_0000
+/// Size of the PMEM `/vendor` region (1 GiB == `qemu/images/vendor.raw`).
+pub const PMEM_VENDOR_SIZE: u64 = 0x4000_0000;
 
-/// Boot the AOSP `system.raw` directly as root (`root=/dev/pmem0`) instead of
-/// running the boot.img ramdisk's first-stage init. The image is a system-as-root
-/// layout (`/init` -> `/system/bin/init`), so this bypasses the ramdisk
-/// switch_root that fails in the DBT. See `prepare_android_handoff`.
-pub const BOOT_SYSTEM_AS_ROOT: bool = true;
+/// Boot via the generic-ramdisk flow (advertise the boot.img ramdisk as initrd)
+/// rather than system-as-root. The ramdisk carries `/init` + a patched
+/// `/fstab.aether` (mount `/system` directly off `/dev/block/pmem0`, no A/B /
+/// super / AVB), so first-stage init reads the fstab from the ramdisk root —
+/// available BEFORE the switch_root pivot, unlike the DT fstab which becomes
+/// unreachable post-chroot when `/sys` detaches. The switch_root getmntent
+/// empty-mnt_dir bug is handled by the MOVE_FAKE root-skip in exceptions.rs.
+/// Set true to fall back to the old `root=/dev/pmem0` system-as-root path.
+pub const BOOT_SYSTEM_AS_ROOT: bool = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DbtInitialRegs — ARM64 GPR file at kernel entry
@@ -224,12 +232,14 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
     let mut cfg = AndroidDtbConfig {
         cpu_count: 1,
         cpu_mpidr: [0u64; MAX_ANDROID_CPUS],
-        // memory_base MUST match STAGED_BOOT_IMG_PA — that is where the EPT/NPT
-        // identity-map starts. Old QEMU-virt default (0x4000_0000) would leave
+        // memory_base MUST match the host-CR3 identity-map base — the relocated
+        // 4 GiB guest-DRAM window. prepare_android_handoff_at overrides this with
+        // the live `stage_pa` (also GUEST_PA_BASE), so the default and the
+        // runtime value agree. Old QEMU-virt default (0x4000_0000) would leave
         // the kernel accessing unmapped guest physical addresses on every load.
-        memory_base: STAGED_BOOT_IMG_PA,
-        // memory_size MUST equal what the EPT/NPT actually covers. Anything
-        // the kernel tries beyond this range produces an EPT/NPT violation.
+        memory_base: aether_translator::runtime::mmu::GUEST_PA_BASE,
+        // memory_size MUST equal what the host CR3 actually covers (4 GiB).
+        // Anything the kernel tries beyond this range faults the host.
         memory_size: HANDOFF_REGION_SIZE,
         gicd_base: 0x0800_0000,
         gicd_size: 0x10000,
@@ -247,6 +257,9 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
         // block device (/dev/pmem0) — the kernel has no virtio-blk driver.
         pmem_base: PMEM_SYSTEM_PA,
         pmem_size: PMEM_SYSTEM_SIZE,
+        // Second PMEM region: the /vendor image → /dev/pmem1 (SELinux policy).
+        pmem_base2: PMEM_VENDOR_PA,
+        pmem_size2: PMEM_VENDOR_SIZE,
     };
     // Default kernel cmdline — same string AETHER's BoardConfig.mk emits.
     // `earlycon=pl011,mmio32,0x9000000` enables Linux's earlycon PL011 driver
@@ -260,10 +273,13 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
     // updating for slotselect" if no suffix is available — even though our DT
     // fstab uses direct, non-slotselect `/dev/block/vda` (which therefore keeps
     // its name; the suffix only appends to entries that actually set slotselect).
-    // `root=/dev/pmem0 rootwait ro`: boot the system.raw PMEM device as root
-    // (system-as-root). `androidboot.force_normal_boot=1`: skip recovery and do a
-    // normal boot even though there is no boot/recovery ramdisk distinction.
-    // `rootwait` blocks until of_pmem has created /dev/pmem0. (See BOOT_SYSTEM_AS_ROOT.)
+    // `root=/dev/pmem0 rootwait rw`: the post-pivot root — once the boot.img
+    // initrd ramdisk (advertised when BOOT_SYSTEM_AS_ROOT==false, see below) runs
+    // its first-stage `/init` and switch_root's onto `/system`, `root=` names the
+    // PMEM device that backs it. `rw` (not `ro`) so first-stage mount can fix up
+    // the rootfs. `androidboot.force_normal_boot=1`: skip recovery and do a normal
+    // boot even though there is no boot/recovery ramdisk distinction. `rootwait`
+    // blocks until of_pmem has created /dev/pmem0. (See BOOT_SYSTEM_AS_ROOT.)
     // `initcall_debug ignore_loglevel`: DIAGNOSTIC — print every initcall as it
     // runs ("calling X+0x0/0x0 @ 1" before, "initcall X returned … after N usecs"
     // after). The last `calling …` with no matching `returned` names the hanging
@@ -275,18 +291,73 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
     // Kprobe/ftrace tracing is a debug feature not needed for boot or production,
     // so blacklist it. (Multiple names comma-separated if more tracing initcalls
     // hang.) initcall_blacklist is parsed by init/main.c, always available.
-    // `init=/system/bin/init`: with system-as-root and NO initramfs, the kernel
-    // never sets ramdisk_execute_command (=/init), so kernel_init falls through its
-    // default list /sbin/init → /etc/init → /bin/init → /bin/sh. On an AOSP image
-    // /etc → /system/etc and /etc/init is a DIRECTORY → execve EACCES (-13); only
-    // /bin/init (→/system/bin/init) eventually runs. Pointing `init=` straight at
-    // /system/bin/init runs Android's real init immediately and skips the two
-    // failed candidate execs (no ambiguity, no -13 noise).
+    // `init=/system/bin/init`: the post-ramdisk init target. With the boot.img
+    // initrd present the kernel runs the ramdisk `/init` first (first-stage mount +
+    // switch_root); `init=` is the command kernel_init uses for the real init once
+    // root is the PMEM `/system` — pointing it straight at /system/bin/init avoids
+    // kernel_init's default fallthrough /sbin/init → /etc/init (a DIRECTORY on AOSP
+    // → execve EACCES -13) → /bin/init, so Android's real init runs with no
+    // ambiguity and no -13 noise. (If BOOT_SYSTEM_AS_ROOT is flipped true the
+    // ramdisk is not advertised and this becomes the sole, first-stage init.)
+    // NOTE: `initcall_debug ignore_loglevel` is KEPT. It is nominally a kernel-boot
+    // diagnostic, but removing it under WHPX re-exposes a TIMING-SENSITIVE init
+    // stall: with the firehose gone the kernel boots with a different printk/IRQ
+    // cadence and init blocks in-kernel after a handful of syscalls (the
+    // [stall] detector fires, [pcr] PCs all in 0xffffffc008…). With the firehose
+    // present, init runs healthily (validated: 760+ syscalls climbing, demand-
+    // paging). The extra PL011 serial does cost COM1 VMEXITs under WHPX, but the
+    // boot is still ~100× faster than TCG and init STABILITY wins over the marginal
+    // kernel-boot speedup. (Proper fix = make IRQ/timer delivery timing-robust;
+    // tracked separately.) Re-removing this WILL re-introduce the init stall.
+    // `devtmpfs.mount=1`: force the kernel to auto-mount devtmpfs on /dev at boot
+    // (CONFIG_DEVTMPFS=y is in the defconfig). Our init reaches second-stage but
+    // creates ZERO device nodes (no mknodat) — so it relies on devtmpfs to
+    // populate /dev, and without the auto-mount /dev/null is absent, making every
+    // forked service's bionic stdio-to-/dev/null setup fail (ENOENT) → exit(1) →
+    // "Attempted to kill init" panic. Auto-mounting devtmpfs provides /dev/null
+    // (and the other core nodes) before init runs.
+    // `transparent_hugepage=never`: DIAGNOSTIC — disable THP / khugepaged so it
+    // never collapses init's freshly-faulted anon page. Tests the livelock theory
+    // for the change_protection(set PTE) ↔ move_page_tables(ptep_get_and_clear)
+    // loop on 0x7fba854000: if init clears the loop, khugepaged collapse was the
+    // cause; if it persists, the tear-down comes from elsewhere.
+    // androidboot.android_dt_dir: redirect first-stage init's DT-fstab lookup
+    // from the legacy /proc/device-tree symlink (which this kernel does not
+    // create — every /proc/device-tree/... open returns ENOENT) to the live
+    // OF sysfs tree at /sys/firmware/devicetree/base, which CONFIG_OF_KOBJ=y
+    // populates. libfstab reads <dir>/compatible + <dir>/fstab from here.
+    //
+    // ┌─────────────────────────────────────────────────────────────────────────┐
+    // │ BRING-UP-ONLY: androidboot.selinux=permissive                           │
+    // ├─────────────────────────────────────────────────────────────────────────┤
+    // │ The flat-PMEM boot exposes /system off /dev/block/pmem0 and /vendor off  │
+    // │ /dev/block/pmem1. The of_pmem block devices are UNLABELED (no genfscon / │
+    // │ device-label rule covers them yet), and several HAL service domains lack │
+    // │ contexts in this hand-rolled flat layout. Under `enforcing` that         │
+    // │ produces a live `avc: denied` storm that SILENTLY kills vold (block-dev  │
+    // │ access denied), gralloc, and SurfaceFlinger during bring-up — the boot   │
+    // │ never reaches the display gate even though every binary is present.      │
+    // │ `permissive` LOGS the denials but lets the processes run, so we can      │
+    // │ drive the boot to SurfaceFlinger and collect the exact denial set.       │
+    // │                                                                          │
+    // │ PRODUCTION MUST RE-ENABLE ENFORCING. The ro.build.type=user invariant    │
+    // │ (Hardware Authenticity, CLAUDE.md) REQUIRES SELinux enforcing. Restoring │
+    // │ it requires, BEFORE flipping this back to `enforcing`:                   │
+    // │   1. genfscon / device labels for the pmem block devices (pmem0/pmem1)   │
+    // │      so vold/fs_mgr may open them (e.g. `block_device` u:object_r:…).    │
+    // │   2. The 5 AETHER_SEPOLICY_FIXES (userspace_boot::AETHER_SEPOLICY_FIXES) │
+    // │      — gralloc dma-buf, sensors iio, AETHER hwbinder, vold nvme, ueventd │
+    // │      dev-node TE rules.                                                  │
+    // │ ro.build.type is LEFT =user (set in the image, not the cmdline) — this   │
+    // │ relaxation does NOT touch it; it is the SELinux mode only.               │
+    // └─────────────────────────────────────────────────────────────────────────┘
     let cmd = b"earlycon=pl011,mmio32,0x9000000 console=ttyAMA0,115200 \
-                root=/dev/pmem0 rootwait ro androidboot.force_normal_boot=1 \
-                init=/system/bin/init \
-                androidboot.hardware=aether androidboot.selinux=enforcing \
+                root=/dev/pmem0 rootwait rw androidboot.force_normal_boot=1 \
+                init=/system/bin/init devtmpfs.mount=1 transparent_hugepage=never \
+                androidboot.hardware=aether androidboot.selinux=permissive \
+                androidboot.android_dt_dir=/sys/firmware/devicetree/base/firmware/android \
                 androidboot.verifiedbootstate=green androidboot.slot_suffix=_a \
+                androidboot.dynamic_partitions=false \
                 initcall_debug ignore_loglevel initcall_blacklist=init_kprobe_trace";
     let n = if cmd.len() < MAX_KERNEL_CMDLINE_LEN { cmd.len() } else { MAX_KERNEL_CMDLINE_LEN };
     cfg.cmdline[..n].copy_from_slice(&cmd[..n]);
@@ -370,6 +441,32 @@ pub unsafe fn prepare_android_handoff_at(
     if !BOOT_SYSTEM_AS_ROOT && layout.ramdisk_size > 0 {
         dtb_cfg.initrd_start = layout.ramdisk_pa;
         dtb_cfg.initrd_end   = layout.ramdisk_pa + layout.ramdisk_size as u64;
+    }
+    // ── Display Gap 1: simple-framebuffer ────────────────────────────────────
+    // Carve a framebuffer from the TOP of the EPT/NPT-mapped guest RAM (boot.img,
+    // kernel, ramdisk and DTB all sit near the bottom, so the top is free) and
+    // register its geometry (from the host GOP FB) so build_android_dtb emits the
+    // reserved-memory + "simple-framebuffer" nodes → the kernel's simpledrm binds
+    // and creates /dev/dri/card0. The hypervisor copies guest-FB → real GOP FB each
+    // vblank (boot_x86 dispatch loop). x86-only: `boot_x86` is not built for ARM64.
+    #[cfg(target_arch = "x86_64")]
+    if let Some(hfb) = crate::boot_x86::host_framebuffer() {
+        if hfb.base != 0 && hfb.width != 0 && hfb.height != 0 {
+            let stride = (hfb.pitch_px as u64).saturating_mul(4); // 32bpp
+            let raw = stride.saturating_mul(hfb.height as u64);
+            let fb_size = (raw + 0x1F_FFFF) & !0x1F_FFFFu64; // round up 2 MiB
+            if fb_size > 0 && fb_size < region_size_out / 2 {
+                let fb_base = (stage_pa + region_size_out - fb_size) & !0x1F_FFFFu64;
+                crate::kernel::set_dtb_framebuffer(crate::kernel::DtbFramebuffer {
+                    base: fb_base,
+                    size: fb_size,
+                    width: hfb.width,
+                    height: hfb.height,
+                    stride: stride as u32,
+                    bgr: hfb.bgr_format,
+                });
+            }
+        }
     }
     let dtb_buf: &mut [u8] = unsafe {
         core::slice::from_raw_parts_mut(dtb_pa as *mut u8, dtb_size as usize)
@@ -520,11 +617,14 @@ mod tests {
             HANDOFF_REGION_SIZE,
             STAGED_BOOT_IMG_SIZE + GUEST_DTB_SIZE + KERNEL_WORKING_RAM_SIZE
         );
-        // Must fit in a single 1 GiB PDPT entry (the EPT/NPT 2-MiB-leaf
-        // helper assumes one PD table covering ≤ 1 GiB).
-        assert!(HANDOFF_REGION_SIZE <= 1024 * 1024 * 1024);
-        // 2-MiB aligned for PDE leaves.
-        assert_eq!(HANDOFF_REGION_SIZE & 0x1F_FFFF, 0);
+        // RELOCATED: the 4 GiB window is mapped by FOUR 1-GiB host-CR3 identity
+        // leaves (host_pt_map_identity_1g), not a single 1-GiB PDPT entry, so the
+        // old ≤1 GiB ceiling no longer applies. It MUST exactly equal the
+        // translator's GUEST_PA_SIZE (the walker's confinement window) = 4 GiB.
+        assert_eq!(HANDOFF_REGION_SIZE, 4 * 1024 * 1024 * 1024);
+        assert_eq!(HANDOFF_REGION_SIZE, aether_translator::runtime::mmu::GUEST_PA_SIZE);
+        // 1-GiB aligned so it tiles into whole 1-GiB host-CR3 leaves.
+        assert_eq!(HANDOFF_REGION_SIZE & ((1 << 30) - 1), 0);
     }
 
     #[test]
@@ -532,8 +632,12 @@ mod tests {
         // The DTB MUST advertise exactly the region we EPT/NPT-identity-map,
         // otherwise the kernel hits unmapped GPAs on early allocations.
         let cfg = default_dtb_config();
-        assert_eq!(cfg.memory_base, STAGED_BOOT_IMG_PA);
+        assert_eq!(cfg.memory_base, aether_translator::runtime::mmu::GUEST_PA_BASE);
         assert_eq!(cfg.memory_size, HANDOFF_REGION_SIZE);
+        // Relocated window must exactly fill [GUEST_PA_BASE, +GUEST_PA_SIZE).
+        assert_eq!(cfg.memory_size, aether_translator::runtime::mmu::GUEST_PA_SIZE);
+        assert_eq!(cfg.memory_base, 0x1_0000_0000);
+        assert_eq!(cfg.memory_size, 0x1_0000_0000);
     }
 
     #[test]

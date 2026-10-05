@@ -3,7 +3,6 @@
 
 #![cfg(all(test, target_arch = "x86_64", windows))]
 
-use std::collections::BTreeMap;
 use aether_translator::backend::{IntLower, X86Encoder};
 use aether_translator::decoder::decode_instruction;
 use aether_translator::ir::IrFunction;
@@ -23,7 +22,7 @@ fn translate(words: &[u32], pc: u64) -> Vec<u8> {
     }
     let alloc = regalloc::allocate(&func);
     let mut enc = X86Encoder::new();
-    let mut patches: BTreeMap<usize, aether_translator::ir::BlockId> = BTreeMap::new();
+    let mut patches: Vec<(usize, aether_translator::ir::BlockId)> = Vec::new();
     for blk in &func.blocks {
         IntLower::lower_block_with_pc(blk, pc, &alloc, &mut enc, &mut patches);
     }

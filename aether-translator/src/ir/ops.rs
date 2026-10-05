@@ -283,6 +283,10 @@ pub enum IrOp {
         to_bits: u8,
     },
 
+    /// Diagnostic: stamp `FAULT_OP_PC` with this instruction's PC. No operands;
+    /// lowers to a single immediate store. Inserted per-instruction by `lift_at`.
+    StampFaultPc(u64),
+
     // ----- Memory -----
     Load {
         dst: IrValueId,
@@ -413,6 +417,56 @@ pub enum IrOp {
         high: bool,
         signed: bool,
     },
+    /// NEON `SSHL`/`USHL` — register variable per-lane shift. Each `size`-byte lane
+    /// of V`n` is shifted by the signed byte in the corresponding lane of V`m`
+    /// (positive → left, negative → right; `signed` selects arithmetic (SSHL) vs
+    /// logical (USHL) for the right direction; |amt| ≥ element-bits → 0, or sign-fill
+    /// for the arithmetic-right case). x86 has no per-lane variable shift pre-AVX2,
+    /// so the lowerer scalarizes through ctx memory. `size`: 0=B,1=H,2=S,3=D.
+    /// Ctx-template op (writes ctx memory).
+    VecShiftReg {
+        d: u8,
+        n: u8,
+        m: u8,
+        size: u8,
+        q: bool,
+        signed: bool,
+    },
+    /// NEON `SRI`/`SLI` — shift-right/left-and-insert by immediate. `left`=false
+    /// (SRI): `Vd = (Vd & top_mask) | (Vn >>u shift)`, preserving Vd's top `shift`
+    /// bits per element. `left`=true (SLI): `Vd = (Vd & low_mask) | (Vn << shift)`,
+    /// preserving Vd's low `shift` bits. `size`: 0=B,1=H,2=S,3=D. `d` is read AND
+    /// written. Ctx-template op (writes ctx memory).
+    VecShiftIns {
+        d: u8,
+        n: u8,
+        shift: u8,
+        size: u8,
+        q: bool,
+        left: bool,
+    },
+    /// NEON saturating/rounding narrowing shift-right by immediate — `SQSHRN`/
+    /// `UQSHRN`/`SQSHRUN`/`SQRSHRN`/`UQRSHRN`/`SQRSHRUN`/`RSHRN`. Each
+    /// `2*esize_out`-byte source lane of V`n` is shifted right by `shift` (adding a
+    /// round bias of `1<<(shift-1)` first when `round`), then saturated to the
+    /// destination `esize_out`-byte element range. `src_signed` interprets the
+    /// source; `dst_signed` selects the saturation range (SQSHRUN/SQRSHRUN are
+    /// signed-source, unsigned-dest). `modular`=true is RSHRN/RSHRN2: the narrow is
+    /// a plain low-bits truncation (NOT a clamp), and it is the only signal that
+    /// separates RSHRN from UQRSHRN (identical `round`/`src_signed`/`dst_signed`).
+    /// `high`=false writes Vd[63:0] (zeroing the upper 64), true writes Vd[127:64]
+    /// (the `2` form). Ctx-template op.
+    VecShiftNarrowSat {
+        d: u8,
+        n: u8,
+        shift: u8,
+        esize_out: u8,
+        high: bool,
+        round: bool,
+        src_signed: bool,
+        dst_signed: bool,
+        modular: bool,
+    },
     /// NEON `EXT` — `Vd = (CONCAT(Vm, Vn) >> imm*8)`. `q`=false is the 8-byte form
     /// (upper 64 of Vd zeroed). Ctx-template op (writes ctx memory).
     VecExt {
@@ -421,6 +475,45 @@ pub enum IrOp {
         m: u8,
         imm: u8,
         q: bool,
+    },
+    /// NEON single-register `TBL` byte-permute (ctx-template). `n` is the table
+    /// reg, `m` the index reg: `Vd[i] = (Vm[i] < 16) ? Vn[Vm[i]] : 0`. `q`=false
+    /// zeroes Vd[127:64] (.8b form).
+    VecTbl1 {
+        d: u8,
+        n: u8,
+        m: u8,
+        q: bool,
+    },
+    /// NEON multi-register `TBL`/`TBX` byte-permute (ctx-template). `n` is the
+    /// first table reg, `m` the index reg; the table spans `len+1` consecutive
+    /// V regs (`n`, `n+1`, … wrapping mod 32) = a 16/32/48/64-byte table.
+    /// `op`=0 → TBL (out-of-range lanes = 0); `op`=1 → TBX (out-of-range lanes
+    /// keep the old `Vd` byte). `q`=false zeroes `Vd[127:64]` (.8b form).
+    VecTblN {
+        d: u8,
+        n: u8,
+        m: u8,
+        len: u8,
+        op: u8,
+        q: bool,
+    },
+    /// NEON `DUP` (element) — broadcast lane `lane` (size = log2 element bytes)
+    /// of Vn to all lanes of Vd. Ctx-template.
+    VecDupElem {
+        d: u8,
+        n: u8,
+        size: u8,
+        lane: u8,
+        q: bool,
+    },
+    /// NEON `PMULL`/`PMULL2` `.1q` — 64×64→128 carryless multiply (GHASH/GCM).
+    /// `high`=true uses each source's high 64 bits (PMULL2). Ctx-template.
+    VecPmull {
+        d: u8,
+        n: u8,
+        m: u8,
+        high: bool,
     },
     /// NEON integer multiply-long (`UMULL`/`SMULL`/`UMLAL`/`SMLAL`/`UMLSL`/`SMLSL`).
     /// Widen `size`-byte elements (`signed`) to 2×, multiply; `accum`+`sub` select
@@ -526,6 +619,22 @@ pub enum IrOp {
         new: IrValueId,
         order: MemOrder,
         /// Access width in BYTES (1/2/4/8) — see [`IrOp::AtomicRmw::size`].
+        size: u8,
+    },
+
+    /// CASP — compare-and-swap PAIR (single-vCPU non-atomic load/compare/store).
+    /// Reads the {elem,elem} pair at `[addr]`; if it equals
+    /// {`expected_a`,`expected_b`} writes {`new_a`,`new_b`}; ALWAYS writes the
+    /// loaded old pair to {`dst_a`,`dst_b`}. `size` = per-element bytes (4 or 8).
+    AtomicCasPair {
+        dst_a: IrValueId,
+        dst_b: IrValueId,
+        addr: IrValueId,
+        expected_a: IrValueId,
+        expected_b: IrValueId,
+        new_a: IrValueId,
+        new_b: IrValueId,
+        order: MemOrder,
         size: u8,
     },
 
@@ -988,6 +1097,10 @@ pub enum IrOp {
     VecUn { op: VecUnOp, size: u8, q: bool, d: u8, n: u8 },
     /// NEON shift by immediate (logical/arith, left/right).
     VecShift { op: VecShiftOp, size: u8, q: bool, d: u8, n: u8, amount: u8 },
+    /// NEON shift-right-and-accumulate by immediate (SSRA/USRA):
+    /// `Vd[e] += (Vn[e] >> amount)`. `signed` selects arithmetic (SSRA) vs
+    /// logical (USRA). `d` is use+def (read AND written).
+    VecShiftAcc { signed: bool, size: u8, q: bool, d: u8, n: u8, amount: u8 },
     /// NEON compare (per-lane all-ones / zero result).
     VecCmp { op: VecCmpOp, size: u8, q: bool, d: u8, n: u8, m: u8 },
     /// NEON pairwise (ADDP/SMAXP/SMINP/UMAXP/UMINP).
@@ -996,8 +1109,41 @@ pub enum IrOp {
     VecReduce { op: VecReduceOp, size: u8, q: bool, d: u8, n: u8 },
     /// NEON widening reduce/pairwise (across=SADDLV/UADDLV, !across=SADDLP/UADDLP).
     VecAddLong { across: bool, signed: bool, size: u8, q: bool, d: u8, n: u8 },
-    /// NEON FP 3-same (FADD/FSUB/FMUL/FDIV/FMIN/FMAX), single (dbl=false) | double.
+    /// NEON FP 3-same (FADD/FSUB/FMUL/FDIV/FMIN/FMAX/FMAXNM/FMINNM/FMLA/FMLS/FABD),
+    /// single (dbl=false) | double. For Mla/Mls, `d` is read+written (accumulate).
     VecFp { op: VecFpOp, dbl: bool, q: bool, d: u8, n: u8, m: u8 },
+    /// NEON FP per-lane compare (FCMEQ/FCMGT/FCMGE), 3-same register form when
+    /// `zero==false`, vs #0.0 (FCMEQ/FCMGT/FCMGE/FCMLT/FCMLE) when `zero==true`.
+    /// Produces an all-ones / all-zeros mask per lane. `m` is unused when `zero`.
+    VecFpCmp { op: VecFpCmpOp, dbl: bool, q: bool, d: u8, n: u8, m: u8, zero: bool },
+    /// NEON FP 2-reg-misc single-source (FABS/FNEG/FSQRT), single | double.
+    VecFpUn { op: VecFpUnOp, dbl: bool, q: bool, d: u8, n: u8 },
+
+    /// NEON FP / int multiply-accumulate BY ELEMENT (`FMUL`/`FMLA`/`FMLS`/`MUL`
+    /// `Vd, Vn, Vm.<Ts>[idx]`). The single scalar lane `idx` of `Vm` is broadcast
+    /// to every lane, then the chosen op is applied against `Vn`. `is_fp` selects
+    /// the FP path (FMUL/FMLA/FMLS) vs integer (MUL). `op` reuses VecFpOp's
+    /// Mul/Mla/Mls (FP) — integer MUL ignores it. `dbl` (FP only) = .2d. For
+    /// Mla/Mls, `d` is read+written (accumulate). Ctx-template op (writes ctx).
+    VecByElem { op: VecFpOp, is_fp: bool, dbl: bool, size: u8, q: bool, d: u8, n: u8, m: u8, idx: u8 },
+
+    /// NEON vector integer↔FP convert (2-reg-misc): SCVTF/UCVTF (int→FP) and
+    /// FCVTZS/FCVTZU (FP→int, round-toward-zero). `to_fp` selects int→FP; `signed`
+    /// selects the S vs U form; `dbl` = .2d (64-bit element) else .4s/.2s (32-bit).
+    /// Ctx-template op (writes ctx memory). The unsigned and double forms beyond
+    /// the wired signed-.4s path fail-loud (UD2) in the lowerer.
+    VecCvtFp { to_fp: bool, signed: bool, dbl: bool, q: bool, d: u8, n: u8 },
+
+    /// NEON `ZIP1`/`ZIP2`/`TRN1`/`TRN2` permute. `kind`: 0=ZIP1, 1=ZIP2, 2=TRN1,
+    /// 3=TRN2. `size` = log2 element bytes (0=B,1=H,2=S,3=D). `q` selects 128- vs
+    /// 64-bit. Interleaves the elements of Vn:Vm. Ctx-template op (writes ctx).
+    VecZipTrn { kind: u8, size: u8, q: bool, d: u8, n: u8, m: u8 },
+
+    /// Scalar pairwise reduce — `ADDP d0,Vn.2d` (`is_fp=false`) / `FADDP {s,d}0,
+    /// Vn.2{s,d}` (`is_fp=true`): sum the two lanes of Vn into Vd lane 0, the rest
+    /// of the 128-bit register zeroed. `dbl` selects the 64-bit (D/.2d) vs 32-bit
+    /// (S/.2s) element. Ctx-template op (writes ctx memory).
+    VecScalarPair { is_fp: bool, dbl: bool, d: u8, n: u8 },
 
     /// Int(GPR) -> FP (SCVTF/UCVTF). from_bits=GPR width(32|64); to_bits=FP(16|32|64).
     FpFromInt { d: u8, n_gpr: u8, from_bits: u8, to_bits: u8, signed: bool },
@@ -1005,12 +1151,27 @@ pub enum IrOp {
     FpToIntR { d_gpr: u8, n: u8, from_bits: u8, to_bits: u8, signed: bool, round: RoundMode },
     /// Round to integral, FP result (FRINTN/P/M/Z/A/X/I).
     FpRound { d: u8, n: u8, dbl: bool, round: RoundMode, raise_inexact: bool },
+    /// VECTOR round-to-integral, FP result (`FRINT{N,P,M,Z,A}` `Vd.<T>,Vn.<T>`).
+    /// Per-lane round of Vn into Vd using ROUNDPS/ROUNDPD with the x86 rounding
+    /// mode: N→nearest-even, M→floor, P→ceil, Z→truncate. `NearestTiesAway` (the
+    /// A form) has no direct x86 mode and is emulated with a magnitude add/sub of
+    /// 0.5 toward the sign then truncate. `dbl` selects .2d (64-bit lane) vs
+    /// .4s/.2s (32-bit). `q`=false zeroes Vd[127:64]. Ctx-template op.
+    VecFpRound { d: u8, n: u8, dbl: bool, q: bool, round: RoundMode },
     /// FP precision convert (FCVT S<->D<->H).
     FpCvt2 { d: u8, n: u8, from_bits: u8, to_bits: u8 },
+    /// FP conditional select (FCSEL Dd, Dn, Dm, cond): Dd = cond ? Dn : Dm.
+    /// Reads the packed ARM NZCV; ctx-template op on the q-register file.
+    FpCsel { d: u8, n: u8, m: u8, cond: crate::decoder::Cond, dbl: bool },
     /// FP reg->reg move (FMOV Sd,Sn / Dd,Dn) with upper-lane zeroing.
     FpMov { d: u8, n: u8, width_bits: u8 },
     /// Scalar FP 2-src (FADD/FSUB/FMUL/FDIV/FMIN/FMAX/FNMUL).
     FpBin { op: FpBinOp, dbl: bool, d: u8, n: u8, m: u8 },
+    /// Scalar FP 3-src fused multiply-add (FMADD/FMSUB/FNMADD/FNMSUB Sd,Sn,Sm,Sa):
+    ///   FMADD  Sd = Sa + Sn*Sm   FMSUB  Sd = Sa - Sn*Sm
+    ///   FNMADD Sd = -Sa - Sn*Sm  FNMSUB Sd = -Sa + Sn*Sm
+    /// Single fused rounding (matches x86 FMA3). `a` is the accumulator (Sa).
+    FpFma { op: FpFmaOp, dbl: bool, d: u8, n: u8, m: u8, a: u8 },
     /// Scalar FP 1-src (FABS/FNEG/FSQRT).
     FpUn { op: FpUnOp, dbl: bool, d: u8, n: u8 },
     /// FP compare -> NZCV (FCMP/FCMPE); with-zero when `zero`.
@@ -1023,12 +1184,16 @@ pub enum IrOp {
     /// to a scalar FP register V`d` (`to_dbl`=false → S/32-bit, true → D/64-bit).
     /// Carries an `IrValueId` (unlike `FpFromInt`'s raw `n_gpr`) so the lowerer can
     /// read the GPR's x86 register via the alloc map. `signed` selects SCVTF/UCVTF.
-    FpCvtIntScalar { d: u8, src: IrValueId, to_dbl: bool, signed: bool },
+    /// `src_64` is the ARM source-register width (`sf`): false → W (32-bit), true →
+    /// X (64-bit). MUST be honored — a signed W-form convert of e.g. 0xFFFFFFFF
+    /// (ARM −1) must sign-interpret the low 32 bits (→ −1.0), NOT the zero-extended
+    /// 64-bit value (→ +2^32). Dropping `src_64` is a silent sign/magnitude bug.
+    FpCvtIntScalar { d: u8, src: IrValueId, to_dbl: bool, signed: bool, src_64: bool },
     /// FCVT{N,P,M,Z,A}{S,U}: convert scalar FP reg `n` to an integer SSA value
     /// `dst` (a GPR result, consumed by a following write_reg). `from_dbl` = S vs
     /// D source; `to_64` = W vs X result; `round` selects the rounding mode.
     /// Defines `dst` (mirrors `VecExtractLane`); lowered in IntLower.
-    FpCvtToIntScalar { dst: IrValueId, n: u8, from_dbl: bool, to_64: bool, round: RoundMode },
+    FpCvtToIntScalar { dst: IrValueId, n: u8, from_dbl: bool, to_64: bool, round: RoundMode, signed: bool },
 
     /// AES round step. kind: 0=AESE 1=AESD 2=AESMC 3=AESIMC 4=FusedEnc 5=FusedDec.
     CryptoAesR { kind: u8, d: u8, n: u8, m: u8 },
@@ -1061,6 +1226,12 @@ pub enum VecBinOp {
     // BIT inserts Vn where Vm=1; BIF inserts Vn where Vm=0. lower_vecbin
     // special-cases these (they read Vd, unlike the n-op-m forms). Append-only.
     Bsl, Bit, Bif,
+    // Halving subtract (SHSUB/UHSUB, three-same opcode 0b00100): (a-b)>>1 with
+    // no intermediate overflow. `SHsub` uses the arithmetic per-element shift,
+    // `UHsub` the logical one; both subtract the per-element borrow bit. The
+    // rounding-halving-add pair (SrHadd/UrHadd) and the truncating pair
+    // (SHadd/UHadd) already exist above. Append-only (discriminants 29,30).
+    SHsub, UHsub,
 }
 /// NEON 2-reg-misc single-source operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1068,9 +1239,12 @@ pub enum VecUnOp { Abs, Neg }
 /// NEON vector shift-by-immediate direction/signedness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VecShiftOp { Shl, SShr, UShr }
-/// NEON per-lane compare (CMEQ/CMGT/CMGE/CMHI/CMHS).
+/// NEON per-lane compare (CMEQ/CMGT/CMGE/CMHI/CMHS/CMTST). `SLt`/`SLe` are only
+/// produced by the signed compare-VS-ZERO forms (CMLT #0 / CMLE #0), which have
+/// no register-register counterpart. Discriminants are serialized as `v as u8` —
+/// only APPEND (Eq=0..Tst=5 are AOT-cache-stable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VecCmpOp { Eq, SGt, SGe, UGt, UGe }
+pub enum VecCmpOp { Eq, SGt, SGe, UGt, UGe, Tst, SLt, SLe }
 /// NEON pairwise op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VecPairOp { Add, SMax, SMin, UMax, UMin }
@@ -1078,14 +1252,31 @@ pub enum VecPairOp { Add, SMax, SMin, UMax, UMin }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VecReduceOp { Add, SMax, SMin, UMax, UMin }
 /// NEON / scalar FP binary op (also used for vector FP).
+/// Discriminants 0..=5 are AOT-cache-stable — only append.
+/// `MaxNm`/`MinNm` are the IEEE maxNum/minNum (return the non-NaN operand);
+/// `Max`/`Min` propagate NaN (ARM default). `Mla`/`Mls` accumulate into Vd;
+/// `Abd` is |Vn-Vm|.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VecFpOp { Add, Sub, Mul, Div, Min, Max }
+pub enum VecFpOp { Add, Sub, Mul, Div, Min, Max, MaxNm, MinNm, Mla, Mls, Abd }
+/// NEON FP per-lane compare op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VecFpCmpOp { Eq, Gt, Ge, Lt, Le }
+/// NEON FP 2-reg-misc single-source op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VecFpUnOp { Abs, Neg, Sqrt }
 /// Scalar FP binary op.
+/// Discriminants 0..=6 are AOT-cache-stable — only append.
+/// `MaxNm`/`MinNm` are the IEEE maxNum/minNum (return the non-NaN operand when
+/// exactly one operand is NaN); `Max`/`Min` propagate NaN (ARM default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FpBinOp { Add, Sub, Mul, Div, Min, Max, NMul }
+pub enum FpBinOp { Add, Sub, Mul, Div, Min, Max, NMul, MaxNm, MinNm }
+/// Scalar FP fused-multiply-add op (3-source). Maps 1:1 to ARM
+/// FMADD/FMSUB/FNMADD/FNMSUB. Serialized by discriminant — append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FpFmaOp { Madd, Msub, NMadd, NMsub }
 /// Scalar FP unary op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FpUnOp { Abs, Neg, Sqrt }
+pub enum FpUnOp { Abs, Neg, Sqrt, Mov }
 /// Rounding mode for FP<->int convert and FRINT.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoundMode { Nearest, NegInf, PosInf, Zero, NearestTiesAway, Current }
@@ -1122,6 +1313,7 @@ impl IrOp {
             IrOp::LoadPair { dst_a, dst_b, .. } => { f(dst_a); f(dst_b); }
             IrOp::StoreExclusive { status, .. } => f(status),
             IrOp::AtomicRmw { dst, .. } | IrOp::AtomicCas { dst, .. } => f(dst),
+            IrOp::AtomicCasPair { dst_a, dst_b, .. } => { f(dst_a); f(dst_b); }
             IrOp::VecExtractLane { dst, .. } | IrOp::FpCvtToIntScalar { dst, .. } => f(dst),
 
             IrOp::VAdd { dst, .. } | IrOp::VSub { dst, .. } | IrOp::VMul { dst, .. }
@@ -1193,11 +1385,15 @@ impl IrOp {
             IrOp::StoreExclusive { val, addr, .. } => { f(val); f(addr); }
             IrOp::LoadPair { addr, .. } => f(addr),
             IrOp::StorePair { val_a, val_b, addr, .. } => { f(val_a); f(val_b); f(addr); }
+            IrOp::StampFaultPc(_) => {} // diagnostic stamp — no value uses
             IrOp::ZeroBlock { addr } => f(addr),
             IrOp::VecDupGpr { src, .. } | IrOp::VecInsGpr { src, .. }
             | IrOp::FpCvtIntScalar { src, .. } => f(src),
             IrOp::AtomicRmw { addr, val, .. } => { f(addr); f(val); }
             IrOp::AtomicCas { addr, expected, new, .. } => { f(addr); f(expected); f(new); }
+            IrOp::AtomicCasPair { addr, expected_a, expected_b, new_a, new_b, .. } => {
+                f(addr); f(expected_a); f(expected_b); f(new_a); f(new_b);
+            }
 
             IrOp::IndirectBranch { target } | IrOp::Call { target, .. }
             | IrOp::Return { target } => f(target),
@@ -1373,6 +1569,9 @@ impl IrOp {
                 IrOp::AtomicRmw { dst, op, addr: vr(addr), val: vr(val), order, size },
             IrOp::AtomicCas { dst, addr, expected, new, order, size } =>
                 IrOp::AtomicCas { dst, addr: vr(addr), expected: vr(expected), new: vr(new), order, size },
+            IrOp::AtomicCasPair { dst_a, dst_b, addr, expected_a, expected_b, new_a, new_b, order, size } =>
+                IrOp::AtomicCasPair { dst_a, dst_b, addr: vr(addr), expected_a: vr(expected_a),
+                    expected_b: vr(expected_b), new_a: vr(new_a), new_b: vr(new_b), order, size },
 
             // Control flow
             IrOp::Branch { .. } => self,
@@ -1464,17 +1663,21 @@ impl IrOp {
             | IrOp::FpCvtToIntScalar { .. }
             | IrOp::VecCnt { .. } | IrOp::VecAddvLong { .. }
             | IrOp::VecCmpZero { .. } | IrOp::VecShiftNarrow { .. }
+            | IrOp::VecShiftReg { .. } | IrOp::VecShiftIns { .. }
+            | IrOp::VecShiftNarrowSat { .. }
             | IrOp::VecShiftLong { .. } | IrOp::VecExt { .. }
+            | IrOp::VecTbl1 { .. } | IrOp::VecTblN { .. }
+            | IrOp::VecDupElem { .. } | IrOp::VecPmull { .. }
             | IrOp::VecMulLong { .. } | IrOp::VecRev64 { .. }
-            | IrOp::CryptoSha256 { .. }
+            | IrOp::CryptoSha256 { .. } | IrOp::VecFpRound { .. }
             | IrOp::VecBicOrrImm { .. } | IrOp::VecAddLongPair { .. }
             | IrOp::VecUnzip { .. } | IrOp::VecReduceAdd { .. }
             | IrOp::Dmb { .. } | IrOp::Dsb { .. }
             | IrOp::Isb | IrOp::Sb | IrOp::Hint { .. } => self,
             IrOp::VecDupGpr { d, src, size, q } =>
                 IrOp::VecDupGpr { d, src: vr(src), size, q },
-            IrOp::FpCvtIntScalar { d, src, to_dbl, signed } =>
-                IrOp::FpCvtIntScalar { d, src: vr(src), to_dbl, signed },
+            IrOp::FpCvtIntScalar { d, src, to_dbl, signed, src_64 } =>
+                IrOp::FpCvtIntScalar { d, src: vr(src), to_dbl, signed, src_64 },
             IrOp::VecInsGpr { d, lane, src, size } =>
                 IrOp::VecInsGpr { d, lane, src: vr(src), size },
             IrOp::TlbInval { va } => IrOp::TlbInval { va: va.map(&mut vr) },
@@ -1501,14 +1704,21 @@ impl IrOp {
             // M4b-6 V-register-numbered SIMD/FP/crypto ops: all-Copy fields, no
             // IrValueId/IrFlagsId uses to remap — return unchanged.
             IrOp::VecBin { .. } | IrOp::VecUn { .. } | IrOp::VecShift { .. }
+            | IrOp::VecShiftAcc { .. }
             | IrOp::VecCmp { .. } | IrOp::VecPair { .. } | IrOp::VecReduce { .. }
             | IrOp::VecAddLong { .. } | IrOp::VecFp { .. }
+            | IrOp::VecFpCmp { .. } | IrOp::VecFpUn { .. }
+            | IrOp::VecByElem { .. } | IrOp::VecCvtFp { .. } | IrOp::VecZipTrn { .. }
+            | IrOp::VecScalarPair { .. }
             | IrOp::FpFromInt { .. } | IrOp::FpToIntR { .. } | IrOp::FpRound { .. }
-            | IrOp::FpCvt2 { .. } | IrOp::FpMov { .. } | IrOp::FpBin { .. }
+            | IrOp::FpCvt2 { .. } | IrOp::FpCsel { .. } | IrOp::FpMov { .. } | IrOp::FpBin { .. }
+            | IrOp::FpFma { .. }
             | IrOp::FpUn { .. } | IrOp::FpCmpN { .. } | IrOp::FpToGpr { .. }
             | IrOp::FpFromGpr { .. } | IrOp::CryptoAesR { .. } | IrOp::CryptoShaR { .. } => self,
 
             IrOp::Unimplemented(w) => IrOp::Unimplemented(w),
+
+            IrOp::StampFaultPc(pc) => IrOp::StampFaultPc(pc), // diagnostic — no remap
         }
     }
 

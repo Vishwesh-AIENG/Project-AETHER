@@ -85,6 +85,13 @@ pub const SYSREG_SLOTS: usize = 64;
 pub const SYSREG_SLOT0: usize = SYSREG_BASE / 8; // 101
 /// Sink slot index for unmodeled / RO-on-write registers.
 pub const SYSREG_SINK_IDX: usize = 63;
+/// B25: single-vCPU exclusive monitor — reserved granule VA (slot 61) and a
+/// valid flag (slot 62). LoadExclusive (LDXR/LDAXR) records the granule and
+/// sets valid; StoreExclusive (STXR/STLXR) succeeds (status 0) only if the
+/// reservation is still valid for the same granule, then clears it. (Slots
+/// 56-58 = pending-fault, 59/60 = MMU scratch, 63 = sink.)
+pub const RESV_VA_DISP: i32 = (SYSREG_BASE + 61 * 8) as i32; // 0x510
+pub const RESV_VALID_DISP: i32 = (SYSREG_BASE + 62 * 8) as i32; // 0x518
 /// First byte offset of the 64-slot linear-scan spill area.
 pub const SPILL_BASE: usize = 0x528;
 /// Number of spill slots.
@@ -129,7 +136,13 @@ pub fn seed_sysregs(ctx: &mut [u64]) {
     ctx[s(48)] = 0x0000_0000_0010_1122; // ID_AA64MMFR0 — 40-bit PA, 4K granule
     ctx[s(49)] = 0; // ID_AA64MMFR1
     ctx[s(50)] = 0; // ID_AA64MMFR2
-    ctx[s(51)] = 0x0000_1000_1011_0000; // ID_AA64ISAR0
+    // ID_AA64ISAR0 — Atomic field [23:20] = 2 (FEAT_LSE present). The kernel then
+    // patches cmpxchg_double/atomic alternatives to the single-instruction LSE
+    // forms (CAS/CASP/LDADD/SWP), which the DBT now decodes+lowers correctly.
+    // (Was 0x..1011.. = Atomic 1, an invalid value that forced the LL/SC path —
+    // a workaround from before CASP was implemented; the LL/SC cmpxchg_double
+    // double-allocated the SLUB vma freelist at the first fork.)
+    ctx[s(51)] = 0x0000_1000_1021_0000; // ID_AA64ISAR0
     ctx[s(52)] = 0; // ID_AA64ISAR1
     ctx[s(53)] = 0x0A20_0023; // CLIDR_EL1  — L1 I+D, L2 unified
     ctx[s(54)] = 0; // REVIDR_EL1

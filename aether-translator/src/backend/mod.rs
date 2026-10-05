@@ -15,7 +15,11 @@ pub mod lower_int;
 pub mod lower_simd;
 pub mod lower_simd_ctx;
 
-pub use code_buf::{CodeBlock, CodeBuf, CodeBufError, Protection};
+pub use code_buf::{CodeBuf, CodeBufError, Protection};
+// `CodeBlock` is part of the `cfg(test)`-gated per-block registry (test-only;
+// the production path uses `BlockCache`). See `code_buf::CodeBuf::blocks`.
+#[cfg(test)]
+pub use code_buf::CodeBlock;
 pub use encode::X86Encoder;
 pub use lower_int::IntLower;
 pub use lower_simd::SimdLower;

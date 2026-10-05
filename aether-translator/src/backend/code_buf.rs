@@ -89,6 +89,12 @@ pub enum Protection {
 }
 
 /// A single translated block slot in the code arena.
+///
+/// Part of the `cfg(test)`-gated per-block registry (see `CodeBuf::blocks`).
+/// It is only constructed/read by the AT-15 gate tests and the in-crate
+/// `smcode_test_iteration` harness; the production translate/dispatch path
+/// tracks blocks via `runtime::block_cache::BlockCache` instead.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct CodeBlock {
     /// Byte offset of this block within the arena.
@@ -116,7 +122,28 @@ pub struct CodeBuf {
     /// Committed offset — bytes up to here have been serialized and are safe to
     /// execute (in the structural model; actual RX promotion is caller's job).
     committed_len: usize,
-    /// All blocks ever allocated, keyed by insertion order.
+    /// Per-block registry, keyed by insertion order. Used ONLY by the AT-15
+    /// gate tests (block lookup / SMC invalidate-by-guest-PC / generation
+    /// tracking) and the in-crate `smcode_test_iteration` harness.
+    ///
+    /// It is gated on `cfg(test)` so it exists only when the crate is compiled
+    /// in test mode (`cargo test`). The AT-15 gate tests therefore live in the
+    /// in-module `#[cfg(test)] mod at15_*` blocks below — NOT under `tests/`,
+    /// because an integration test compiles the library as a normal dependency
+    /// where `cfg(test)` is unset, which would hide these `pub` methods.
+    ///
+    /// The production VMEXIT translate/dispatch path never reads this Vec.
+    /// PC→host-offset lookup goes through `runtime::block_cache::BlockCache`,
+    /// and production SMC handling flushes the whole cache via
+    /// `BlockCache::flush_all` (see `dbt::DbtRuntime::translate_block`).
+    /// Keeping this Vec in release builds would grow it once per cold
+    /// translate and never free it — under the hypervisor's never-freeing
+    /// bump heap that is a permanent leak that exhausts memory across an
+    /// Android boot's millions of unique blocks (the ~1.5 GiB OOM before
+    /// SurfaceFlinger). So in the production build the field, its per-translate
+    /// push, and all readers are compiled out and `alloc_block` only advances
+    /// the watermark.
+    #[cfg(test)]
     blocks: Vec<CodeBlock>,
     /// Dirty flag: true when bytes have been written since last commit.
     dirty: bool,
@@ -134,6 +161,7 @@ impl CodeBuf {
             buf,
             written_len: 0,
             committed_len: 0,
+            #[cfg(test)]
             blocks: Vec::new(),
             dirty: false,
             prot: Protection::ReadWrite,
@@ -191,6 +219,11 @@ impl CodeBuf {
     /// Returns the offset of the emitted block.
     pub fn alloc_block(&mut self, guest_pc: u64, code: &[u8]) -> Result<usize, CodeBufError> {
         let offset = self.emit(code)?;
+        // Per-block bookkeeping is registry-only (gated on `std`) — see the
+        // `blocks` field doc. In the production build this records nothing:
+        // the watermark already advanced in `emit`, and the PC→offset mapping
+        // the live dispatcher needs is owned by `BlockCache`, not `CodeBuf`.
+        #[cfg(test)]
         self.blocks.push(CodeBlock {
             offset,
             len: code.len(),
@@ -198,6 +231,8 @@ impl CodeBuf {
             committed: false,
             generation: 0,
         });
+        #[cfg(not(test))]
+        let _ = guest_pc;
         Ok(offset)
     }
 
@@ -213,7 +248,9 @@ impl CodeBuf {
         self.needs_serialize = false;
         self.committed_len = self.written_len;
 
-        // Mark all pending blocks as committed.
+        // Mark all pending blocks as committed (registry-only, gated on `std`;
+        // the executable-state invariant is tracked by `committed_len`/`prot`).
+        #[cfg(test)]
         for blk in &mut self.blocks {
             if !blk.committed {
                 blk.committed = true;
@@ -269,10 +306,16 @@ impl CodeBuf {
     // ── Invalidation ──────────────────────────────────────────────────────────
 
     /// Invalidate all blocks that translate guest PC `guest_pc`.
-    /// Called by the self-modifying-code handler (AT-23) when an EPT/NPT
-    /// write fault to a translated page is detected.
+    ///
+    /// Test-only. The production self-modifying-code path does NOT invalidate
+    /// per guest PC through `CodeBuf` — it flushes the whole `BlockCache` via
+    /// `BlockCache::flush_all` and lets `reset()` zero the arena (see
+    /// `dbt::DbtRuntime::translate_block`'s capacity-pressure branch). This
+    /// fine-grained variant exists only to exercise the AT-15 generation /
+    /// commit-state invariants in unit tests.
     ///
     /// Returns the number of invalidated blocks.
+    #[cfg(test)]
     pub fn invalidate_guest_pc(&mut self, guest_pc: u64) -> usize {
         let mut count = 0;
         for blk in &mut self.blocks {
@@ -293,6 +336,7 @@ impl CodeBuf {
     pub fn reset(&mut self) {
         self.written_len = 0;
         self.committed_len = 0;
+        #[cfg(test)]
         self.blocks.clear();
         self.dirty = false;
         self.needs_serialize = false;
@@ -320,12 +364,16 @@ impl CodeBuf {
         self.prot
     }
 
-    /// Iterate over all committed blocks for a given guest PC.
+    /// Iterate over all committed blocks for a given guest PC. Registry-only
+    /// (gated on `std`) — the live dispatcher looks up via `BlockCache`.
+    #[cfg(test)]
     pub fn lookup_guest_pc(&self, guest_pc: u64) -> impl Iterator<Item = &CodeBlock> {
         self.blocks.iter().filter(move |b| b.guest_pc == guest_pc && b.committed)
     }
 
-    /// Iterate over all blocks (committed or not).
+    /// Iterate over all blocks (committed or not). Registry-only view (gated
+    /// on `std`).
+    #[cfg(test)]
     pub fn all_blocks(&self) -> &[CodeBlock] {
         &self.blocks
     }
@@ -340,7 +388,8 @@ impl CodeBuf {
         &self.buf[..self.written_len]
     }
 
-    /// Total number of committed blocks.
+    /// Total number of committed blocks. Registry-only view (gated on `std`).
+    #[cfg(test)]
     pub fn n_committed_blocks(&self) -> usize {
         self.blocks.iter().filter(|b| b.committed).count()
     }
@@ -365,7 +414,12 @@ pub enum CodeBufError {
 ///   4. Invalidate.
 ///   5. Verify the block is no longer committed.
 ///
+/// Registry-only harness (gated on `cfg(test)`): it drives the `blocks`
+/// registry and `invalidate_guest_pc`, neither of which exists in the
+/// production build.
+///
 /// Returns `Ok(())` if all invariants hold.
+#[cfg(test)]
 pub fn smcode_test_iteration(
     buf: &mut CodeBuf,
     guest_pc: u64,
@@ -407,4 +461,310 @@ pub fn smcode_test_iteration(
     }
 
     Ok(())
+}
+
+// ── AT-15 gate tests ─────────────────────────────────────────────────────────
+//
+// These live in-module (not under `tests/`) because they exercise the
+// `cfg(test)`-gated per-block registry (`blocks`, `n_committed_blocks`,
+// `lookup_guest_pc`, `all_blocks`, `invalidate_guest_pc`, `smcode_test_iteration`).
+// An integration test under `tests/` compiles the library as a normal
+// dependency where `cfg(test)` is unset, so those `pub fn`s would not exist;
+// keeping the registry out of the production (non-test) build is what closes
+// the per-translate `CodeBuf.blocks` heap leak. Coverage is identical to the
+// former `tests/at15_code_buf.rs`.
+#[cfg(test)]
+mod at15_tests {
+    use super::{smcode_test_iteration, CodeBuf, Protection};
+
+    // ── Basic emit / commit ──────────────────────────────────────────────────
+
+    #[test]
+    fn at15_new_buf_is_empty() {
+        let buf = CodeBuf::new(4096);
+        assert_eq!(buf.written_len(), 0);
+        assert_eq!(buf.n_committed_blocks(), 0);
+    }
+
+    #[test]
+    fn at15_emit_bytes_advances_written_len() {
+        let mut buf = CodeBuf::new(4096);
+        buf.emit(&[0x90, 0x90, 0x90]).unwrap(); // 3 × NOP
+        assert_eq!(buf.written_len(), 3);
+        assert_eq!(buf.n_committed_blocks(), 0);
+    }
+
+    #[test]
+    fn at15_alloc_block_then_commit_makes_block_committed() {
+        let mut buf = CodeBuf::new(4096);
+        buf.alloc_block(0x1000, &[0x90u8; 8]).unwrap();
+        buf.commit();
+        assert_eq!(buf.n_committed_blocks(), 1);
+    }
+
+    #[test]
+    fn at15_committed_bytes_match_emitted() {
+        let code = [0x48u8, 0x31, 0xC0, 0xC3]; // XOR RAX,RAX; RET
+        let mut buf = CodeBuf::new(4096);
+        let off = buf.alloc_block(0x2000, &code).unwrap();
+        buf.commit();
+        let stored = buf.read_bytes(off, 4);
+        assert_eq!(stored, &code);
+    }
+
+    #[test]
+    fn at15_two_blocks_committed() {
+        let mut buf = CodeBuf::new(4096);
+        buf.alloc_block(0x1000, &[0x90u8; 4]).unwrap();
+        buf.alloc_block(0x1008, &[0xC3u8; 2]).unwrap();
+        buf.commit();
+        assert_eq!(buf.n_committed_blocks(), 2);
+    }
+
+    // ── Protection state machine ──────────────────────────────────────────────
+
+    #[test]
+    fn at15_initial_protection_is_rw() {
+        let buf = CodeBuf::new(4096);
+        assert_eq!(buf.protection(), Protection::ReadWrite);
+    }
+
+    #[test]
+    fn at15_commit_promotes_to_rx() {
+        let mut buf = CodeBuf::new(4096);
+        buf.emit(&[0x90u8]).unwrap();
+        buf.commit();
+        assert_eq!(buf.protection(), Protection::ReadExecute);
+    }
+
+    #[test]
+    fn at15_emit_after_commit_returns_to_rw() {
+        let mut buf = CodeBuf::new(4096);
+        buf.emit(&[0x90u8]).unwrap();
+        buf.commit();
+        buf.emit(&[0x90u8]).unwrap();
+        assert_eq!(buf.protection(), Protection::ReadWrite);
+    }
+
+    // ── Overflow / capacity ───────────────────────────────────────────────────
+
+    #[test]
+    fn at15_capacity_at_least_as_large_as_requested() {
+        let buf = CodeBuf::new(1024);
+        assert!(buf.capacity() >= 1024);
+    }
+
+    #[test]
+    fn at15_overflow_returns_error() {
+        let mut buf = CodeBuf::new(4);
+        // First 4 bytes succeed
+        buf.emit(&[0x90u8; 4]).unwrap();
+        // 5th byte must fail
+        let result = buf.emit(&[0x90u8]);
+        assert!(result.is_err(), "emit past capacity must return Err");
+    }
+
+    // ── Block registry ────────────────────────────────────────────────────────
+
+    #[test]
+    fn at15_lookup_guest_pc_finds_committed_block() {
+        let mut buf = CodeBuf::new(4096);
+        buf.alloc_block(0x3000, &[0x90u8; 4]).unwrap();
+        buf.commit();
+        let blk = buf.lookup_guest_pc(0x3000).next().expect("block must be found");
+        assert_eq!(blk.guest_pc, 0x3000);
+        assert_eq!(blk.len, 4);
+        assert!(blk.committed);
+    }
+
+    #[test]
+    fn at15_uncommitted_block_not_returned_by_lookup() {
+        let mut buf = CodeBuf::new(4096);
+        buf.alloc_block(0x4000, &[0xC3u8]).unwrap();
+        // not committed
+        assert!(buf.lookup_guest_pc(0x4000).next().is_none());
+    }
+
+    #[test]
+    fn at15_multiple_blocks_lookup() {
+        let mut buf = CodeBuf::new(4096);
+        for pc in [0x1000u64, 0x2000, 0x3000] {
+            buf.alloc_block(pc, &[0x90u8; 2]).unwrap();
+        }
+        buf.commit();
+        assert!(buf.lookup_guest_pc(0x1000).next().is_some());
+        assert!(buf.lookup_guest_pc(0x2000).next().is_some());
+        assert!(buf.lookup_guest_pc(0x3000).next().is_some());
+    }
+
+    // ── Invalidation ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn at15_invalidate_marks_block_uncommitted() {
+        let mut buf = CodeBuf::new(4096);
+        buf.alloc_block(0x5000, &[0x90u8]).unwrap();
+        buf.commit();
+        assert_eq!(buf.n_committed_blocks(), 1);
+        buf.invalidate_guest_pc(0x5000);
+        assert_eq!(buf.n_committed_blocks(), 0);
+    }
+
+    #[test]
+    fn at15_invalidate_increments_generation() {
+        let mut buf = CodeBuf::new(4096);
+        buf.alloc_block(0x6000, &[0x90u8]).unwrap();
+        buf.commit();
+        let gen_before = buf.all_blocks()[0].generation;
+        buf.invalidate_guest_pc(0x6000);
+        let gen_after = buf.all_blocks()[0].generation;
+        assert!(gen_after > gen_before, "generation must increment on invalidation");
+    }
+
+    #[test]
+    fn at15_invalidate_nonexistent_pc_is_noop() {
+        let mut buf = CodeBuf::new(4096);
+        let n = buf.invalidate_guest_pc(0xDEAD_BEEF);
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn at15_reinject_after_invalidate_succeeds() {
+        let mut buf = CodeBuf::new(4096);
+        buf.alloc_block(0x7000, &[0x90u8]).unwrap();
+        buf.commit();
+        buf.invalidate_guest_pc(0x7000);
+        // Re-emit same PC
+        buf.alloc_block(0x7000, &[0xC3u8]).unwrap();
+        buf.commit();
+        assert!(buf.lookup_guest_pc(0x7000).next().is_some());
+    }
+
+    // ── Reset ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn at15_reset_clears_all_state() {
+        let mut buf = CodeBuf::new(4096);
+        buf.alloc_block(0x8000, &[0x90u8; 16]).unwrap();
+        buf.commit();
+        buf.reset();
+        assert_eq!(buf.written_len(), 0);
+        assert_eq!(buf.n_committed_blocks(), 0);
+        assert!(buf.all_blocks().is_empty());
+        assert_eq!(buf.protection(), Protection::ReadWrite);
+    }
+
+    #[test]
+    fn at15_reset_allows_fresh_emit() {
+        let mut buf = CodeBuf::new(4096);
+        buf.alloc_block(0x1000, &[0x90u8; 4]).unwrap();
+        buf.commit();
+        buf.reset();
+        buf.alloc_block(0x2000, &[0xC3u8]).unwrap();
+        buf.commit();
+        assert_eq!(buf.written_len(), 1);
+        assert_eq!(buf.n_committed_blocks(), 1);
+    }
+
+    // ── needs_serialize / dirty invariant ────────────────────────────────────
+
+    #[test]
+    fn at15_dirty_after_emit() {
+        let mut buf = CodeBuf::new(4096);
+        buf.emit(&[0x90u8]).unwrap();
+        assert!(buf.is_dirty());
+    }
+
+    #[test]
+    fn at15_not_dirty_after_commit() {
+        let mut buf = CodeBuf::new(4096);
+        buf.emit(&[0x90u8]).unwrap();
+        buf.commit();
+        assert!(!buf.is_dirty());
+    }
+
+    #[test]
+    fn at15_executable_after_commit() {
+        let mut buf = CodeBuf::new(4096);
+        buf.emit(&[0x90u8]).unwrap();
+        buf.commit();
+        assert!(buf.is_executable());
+    }
+
+    #[test]
+    fn at15_not_executable_when_dirty() {
+        let mut buf = CodeBuf::new(4096);
+        buf.emit(&[0x90u8]).unwrap();
+        assert!(!buf.is_executable());
+    }
+
+    // ── Self-modifying code surrogate (AT-15 gate) ────────────────────────────
+
+    /// One SMC cycle via the `smcode_test_iteration` harness.
+    #[test]
+    fn at15_smc_single_cycle_succeeds() {
+        let mut buf = CodeBuf::new(65536);
+        smcode_test_iteration(
+            &mut buf,
+            0xA000,
+            &[0x90u8], // NOP v1
+            &[0xC3u8], // RET v2
+        )
+        .expect("single SMC cycle must succeed");
+    }
+
+    /// Verify generation increments after SMC cycle.
+    #[test]
+    fn at15_smc_generation_advances_after_cycle() {
+        let mut buf = CodeBuf::new(65536);
+        smcode_test_iteration(&mut buf, 0xB000, &[0x90u8], &[0xC3u8])
+            .expect("SMC cycle");
+        // After cycle buf has been reset + rebuilt; all_blocks has generation=1 for v2 block.
+        let max_gen = buf.all_blocks().iter().map(|b| b.generation).max().unwrap_or(0);
+        assert!(max_gen >= 1, "generation must be ≥ 1 after one SMC cycle");
+    }
+
+    /// 1 000-iteration fast surrogate (runs in normal CI).
+    #[test]
+    fn at15_smc_1k_iterations_structural_fast() {
+        const ITERS: u32 = 1_000;
+        let mut buf = CodeBuf::new(4096);
+        for _ in 0..ITERS {
+            smcode_test_iteration(&mut buf, 0xC000, &[0x90u8], &[0xC3u8])
+                .expect("SMC iteration must succeed");
+        }
+    }
+
+    /// 1 000 000-iteration structural surrogate — marked #[ignore] for normal CI.
+    /// Run with `cargo test -- --include-ignored at15_smc_1m` for the full gate.
+    #[test]
+    #[ignore]
+    fn at15_smc_1m_iterations_structural() {
+        const ITERS: u32 = 1_000_000;
+        let mut buf = CodeBuf::new(4096);
+        for i in 0..ITERS {
+            smcode_test_iteration(&mut buf, 0xD000, &[0x90u8], &[0xC3u8])
+                .unwrap_or_else(|e| panic!("SMC iteration {i} failed: {e}"));
+        }
+    }
+
+    // ── Byte-exact stored content ─────────────────────────────────────────────
+
+    /// Bytes written must survive through commit unchanged.
+    #[test]
+    fn at15_xor_rax_rax_ret_survives_commit() {
+        let code = [0x48u8, 0x31, 0xC0, 0xC3]; // XOR RAX,RAX; RET
+        let mut buf = CodeBuf::new(4096);
+        let off = buf.alloc_block(0xE000, &code).unwrap();
+        buf.commit();
+        assert_eq!(buf.read_bytes(off, 4), &code);
+    }
+
+    #[test]
+    fn at15_mfence_encoding_survives_commit() {
+        let mfence = [0x0Fu8, 0xAE, 0xF0];
+        let mut buf = CodeBuf::new(4096);
+        let off = buf.alloc_block(0xF000, &mfence).unwrap();
+        buf.commit();
+        assert_eq!(buf.read_bytes(off, 3), &mfence);
+    }
 }

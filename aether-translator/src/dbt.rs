@@ -27,7 +27,6 @@
 //! standard EL2/VMX-root single-vCPU pattern used throughout the hypervisor).
 //! Multi-vCPU is out of scope for Step A; per-vCPU runtime is a future change.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::backend::code_buf::{CodeBuf, CodeBufError};
@@ -160,6 +159,15 @@ pub struct DbtRuntime {
     /// disjoint field from `scratch_func`/`scratch_enc`, so the result can be
     /// borrowed through the lowering loop while those two are taken out.
     scratch_regalloc: regalloc::RegallocScratch,
+    /// Reused, capacity-retaining buffer for branch patch records (same leak
+    /// rationale as the other scratch_* fields): `translate_block` previously
+    /// allocated a fresh `BTreeMap` per cold block, whose B-tree nodes leaked
+    /// permanently into the never-freeing bump heap. `branch_patches` is
+    /// write-only/dead in the single-block translation model (lowered into but
+    /// never read back), so a `Vec` (cleared per block) is semantically
+    /// identical and reuses its capacity. `mem::take`n + cleared per block,
+    /// then restored.
+    scratch_branch_patches: alloc::vec::Vec<(usize, crate::ir::BlockId)>,
 }
 
 impl DbtRuntime {
@@ -181,6 +189,7 @@ impl DbtRuntime {
             scratch_func: IrFunction::new(0),
             scratch_enc:  X86Encoder::new(),
             scratch_regalloc: regalloc::RegallocScratch::default(),
+            scratch_branch_patches: alloc::vec::Vec::new(),
         }
     }
 
@@ -240,9 +249,17 @@ impl DbtRuntime {
                 | DecodedInsn::Stlr { .. }
                 | DecodedInsn::Ldapr { .. }
                 | DecodedInsn::Cas { .. }
+                | DecodedInsn::Casp { .. }
                 | DecodedInsn::LdAtomicRmw { .. }
                 | DecodedInsn::Swp { .. }
                 | DecodedInsn::SysDc { .. }
+                // NEON structured loads/stores (LD1/ST1 — bionic strlen/memchr/
+                // strchr scan strings with these). They lower through
+                // aether_mmu_xlate and CAN fault, so they MUST stamp PC_SLOT or a
+                // demand-fault resumes at a stale PC → re-execution → corruption.
+                | DecodedInsn::SimdLd1Multi { .. }
+                | DecodedInsn::SimdLd1Rep { .. }
+                | DecodedInsn::SimdLd1Lane { .. }
         )
     }
 
@@ -335,9 +352,17 @@ impl DbtRuntime {
             // /init constructor `mov x8,x0; mov w0,wzr; ldr q,[..]; str wzr,[x8]`
             // restarts after the `ldr` faults, re-runs `mov x8,x0` on the
             // already-zeroed x0 -> x8=0 -> NULL store -> SIGSEGV / kill init.
-            // (The block's first insn already resumes correctly: the dispatcher
-            // seeds PC_SLOT = block start, so no stamp is needed for it.)
-            if insns_lifted > 0 && Self::is_mem_access(&insn) {
+            // Stamp EVERY memory access (including the block's first insn). The
+            // dispatcher seeds PC_SLOT = block start on a normal dispatch, BUT
+            // block-chaining jumps directly into a chained block and bypasses that
+            // seed — so a chained block whose FIRST instruction is a memory access
+            // would fault with a STALE PC_SLOT (the previous block's PC), making
+            // the kernel ERET to the wrong instruction and re-execute earlier
+            // code (e.g. a demand-paged userspace ldr → resume at a stale syscall
+            // stub → corrupted pointer → SIGSEGV / kill init). Always stamping is
+            // idempotent for the non-chained first insn (writes the same PC the
+            // dispatcher already seeded).
+            if Self::is_mem_access(&insn) {
                 let v = block.new_value(crate::ir::value::IrValueKind::I64);
                 block.push_op(crate::ir::IrOp::ConstI64 { dst: v, val: cur_pc as i64 });
                 block.push_op(crate::ir::IrOp::WritePc { src: v });
@@ -419,10 +444,17 @@ impl DbtRuntime {
         // Reuse the runtime's scratch encoder (reset KEEPS its Vec capacity).
         let mut enc = core::mem::take(&mut self.scratch_enc);
         enc.reset();
-        let mut branch_patches: BTreeMap<usize, crate::ir::BlockId> = BTreeMap::new();
+        // Reuse the runtime's branch-patch scratch Vec (clear KEEPS its
+        // capacity). branch_patches is write-only here, so push order is
+        // irrelevant and a Vec is semantically identical to the old BTreeMap.
+        let mut branch_patches = core::mem::take(&mut self.scratch_branch_patches);
+        branch_patches.clear();
         for blk in &func.blocks {
             IntLower::lower_block_with_pc(blk, pc, alloc, &mut enc, &mut branch_patches);
         }
+        // Restore the scratch buffer HERE — before the OutOfCapacity early
+        // returns below — so its warm capacity is never lost on a fail path.
+        self.scratch_branch_patches = branch_patches;
         // Block epilogue: RET. Cheapest possible "return to dispatcher" —
         // production lowering inserts the AT-19 context-save/restore here,
         // which is out of Step A's narrow scope.
@@ -650,6 +682,37 @@ pub fn aether_dbt_init(
         // Already initialised — caller may be the test harness; not an error.
         AetherDbtResult::AlreadyInitialised
     }
+}
+
+/// Defensive host-feature probe for the two x86 ISA extensions the DBT backend
+/// emits without a fallback:
+///   - **LZCNT/ABM** (`CPUID.80000001h:ECX[5]`) — used by `emit_lzcnt_r64` for
+///     CLZ/CLS. On a non-ABM host the `F3` prefix is ignored and the byte decodes
+///     as `BSR`, whose result is UNDEFINED for input 0 — silently wrong.
+///   - **SSE4.2** (`CPUID.1:ECX[20]`) — the `crc32` instruction used for the
+///     CRC32C* lowering. Absent → `#UD` at the first Castagnoli CRC.
+///
+/// Returns `true` only when BOTH are present. The hypervisor's x86 boot pipeline
+/// should call this once and refuse the DBT (or warn) on a host that lacks them;
+/// the ch54 validation targets (Meteor Lake-H, Raphael) both satisfy it. This is
+/// a query, not a gate — `aether_dbt_init` does not block on it (there is no
+/// log sink inside the no_std translator).
+#[cfg(target_arch = "x86_64")]
+pub fn aether_dbt_host_supports_isa() -> bool {
+    // `__cpuid` is a safe intrinsic (CPUID is unconditionally available on every
+    // x86_64 host), so no `unsafe` is needed — and the crate denies `unsafe_code`.
+    let ext = core::arch::x86_64::__cpuid(0x8000_0001);
+    let std1 = core::arch::x86_64::__cpuid(0x0000_0001);
+    let has_lzcnt = (ext.ecx & (1 << 5)) != 0; // ABM/LZCNT
+    let has_sse42 = (std1.ecx & (1 << 20)) != 0; // SSE4.2 (crc32)
+    has_lzcnt && has_sse42
+}
+
+/// Non-x86 build stub: the DBT only runs translated x86 on x86_64 hosts, so on
+/// any other host this is vacuously false (the DBT path is not taken).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn aether_dbt_host_supports_isa() -> bool {
+    false
 }
 
 /// Load and validate an ARM64 ELF binary.

@@ -88,6 +88,19 @@ impl DcePass {
     }
 }
 
+/// True if `op` has a side effect that DCE must preserve **even when the op
+/// defines no live `IrValueId`**. This is the DCE-liveness seed set for every
+/// op that mutates guest-visible state — the q-register file, guest memory, the
+/// NZCV bank, the PC, a sysreg, or the host fault-PC slot — through a path the
+/// SSA def/use graph does NOT model.
+///
+/// Membership rule: an op belongs here iff it writes observable state with **no
+/// `IrValueId` def**. Ops that DO define an `IrValueId` (e.g. `VecExtractLane`,
+/// `FpCvtToIntScalar`, `Mrs`, `Load`) are kept alive transitively by the normal
+/// liveness walk and must NOT be listed — listing them would only pessimise DCE.
+/// (`Crc32`/`CryptoAesR`/`CryptoShaR` are listed defensively per the M4b review;
+/// they never run through live DCE on the ctx path, and an extra "always keep"
+/// marker is correctness-safe — it can only retain, never drop, an op.)
 fn is_side_effecting(op: &IrOp) -> bool {
     matches!(
         op,
@@ -96,6 +109,7 @@ fn is_side_effecting(op: &IrOp) -> bool {
         | IrOp::StorePair { .. }
         | IrOp::AtomicRmw { .. }
         | IrOp::AtomicCas { .. }
+        | IrOp::AtomicCasPair { .. }
         | IrOp::Branch { .. }
         | IrOp::CondBranch { .. }
         | IrOp::IndirectBranch { .. }
@@ -111,6 +125,16 @@ fn is_side_effecting(op: &IrOp) -> bool {
         | IrOp::Brk { .. }
         | IrOp::Hlt { .. }
         | IrOp::EretRt
+        // DC ZVA — zeroes a 64-byte guest-memory block; no IrValueId def.
+        | IrOp::ZeroBlock { .. }
+        // Diagnostic fault-PC stamp — stores to the FAULT_OP_PC ctx slot.
+        | IrOp::StampFaultPc(_)
+        // AT S1E1 — writes PAR_EL1 via the runtime walker; no SSA def.
+        | IrOp::AtS1E1 { .. }
+        // x86 fence / serialising CPUID lowered from ARM barriers — pure side
+        // effects with no def; dropping them would reorder TSO-visible memory.
+        | IrOp::X86Mfence
+        | IrOp::X86Cpuid
         | IrOp::VecMoviImm { .. }
         | IrOp::VecDupGpr { .. }
         | IrOp::FpCvtIntScalar { .. }
@@ -120,7 +144,14 @@ fn is_side_effecting(op: &IrOp) -> bool {
         | IrOp::VecCmpZero { .. }
         | IrOp::VecShiftNarrow { .. }
         | IrOp::VecShiftLong { .. }
+        // SSRA/USRA — accumulates into the q-register file (no IrValueId def), so
+        // DCE must seed it live the same way the other ctx-template writers are.
+        | IrOp::VecShiftAcc { .. }
         | IrOp::VecExt { .. }
+        | IrOp::VecTbl1 { .. }
+        | IrOp::VecTblN { .. }
+        | IrOp::VecDupElem { .. }
+        | IrOp::VecPmull { .. }
         | IrOp::VecMulLong { .. }
         | IrOp::VecRev64 { .. }
         | IrOp::CryptoSha256 { .. }
@@ -128,6 +159,46 @@ fn is_side_effecting(op: &IrOp) -> bool {
         | IrOp::VecAddLongPair { .. }
         | IrOp::VecUnzip { .. }
         | IrOp::VecReduceAdd { .. }
+        // M4b-6 V-register-numbered ctx-template writers — write the q-register
+        // file ([R15 + vec_disp(reg)]) with no SSA def, so DCE must seed them
+        // live like the other ctx-template ops above.
+        | IrOp::VecBin { .. }
+        | IrOp::VecUn { .. }
+        | IrOp::VecShift { .. }
+        | IrOp::VecCmp { .. }
+        | IrOp::VecPair { .. }
+        | IrOp::VecReduce { .. }
+        | IrOp::VecAddLong { .. }
+        // Vector FP ctx-template writers — write the q-register file with no SSA
+        // def, so DCE must seed them live like the other ctx-template ops above.
+        | IrOp::VecFp { .. }
+        | IrOp::VecFpCmp { .. }
+        | IrOp::VecFpUn { .. }
+        // SIMD by-element / int↔FP convert / zip-trn — ctx-template writers with
+        // no SSA def, so DCE must seed them live like the other ctx-template ops.
+        | IrOp::VecByElem { .. }
+        | IrOp::VecCvtFp { .. }
+        | IrOp::VecZipTrn { .. }
+        | IrOp::VecScalarPair { .. }
+        // Scalar FP / int↔FP ctx-template writers — write the scalar V slot in
+        // the q-register file with no SSA def.
+        | IrOp::FpFromInt { .. }
+        | IrOp::FpToIntR { .. }
+        | IrOp::FpRound { .. }
+        | IrOp::FpCvt2 { .. }
+        | IrOp::FpCsel { .. }
+        | IrOp::FpMov { .. }
+        | IrOp::FpBin { .. }
+        | IrOp::FpFma { .. }
+        | IrOp::FpUn { .. }
+        | IrOp::FpCmpN { .. }
+        | IrOp::FpToGpr { .. }
+        | IrOp::FpFromGpr { .. }
+        // Crypto ctx-template writers (no SSA def) + the IrValueId-keyed crypto
+        // forms (listed defensively per the M4b review; see fn doc).
+        | IrOp::CryptoAesR { .. }
+        | IrOp::CryptoShaR { .. }
+        | IrOp::Crc32 { .. }
         | IrOp::Msr { .. }
         | IrOp::Dmb { .. }
         | IrOp::Dsb { .. }

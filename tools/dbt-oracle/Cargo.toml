@@ -1,0 +1,22 @@
+[package]
+name        = "dbt-oracle"
+version     = "0.1.0"
+edition     = "2021"
+description = "Host-side differential oracle for the AETHER ARM64->x86_64 DBT. Translates + executes a basic block through the REAL DBT and through an independent hand-written ARM64 reference interpreter, then diffs GPRs / V-regs / NZCV / memory to pin silent miscompiles."
+
+[[bin]]
+name = "dbt-oracle"
+path = "src/main.rs"
+
+[dependencies]
+# The real DBT. std feature is on by default (host-side execution + FFI).
+aether-translator = { path = "../../aether-translator" }
+
+# NOTE: intentionally ZERO external dependencies. The reference engine is a
+# hand-written ARM64 interpreter (see docs/why-not-unicorn in the crate README /
+# src/reference.rs header) so the tool builds instantly on Windows/MSVC with no
+# libclang / cmake / GPL C library, and stays fast + scriptable over a large
+# corpus of real Android blocks.
+
+[features]
+default = []

@@ -49,3 +49,21 @@ esp-staging/
 *.tar.bz2
 /gki-src.git/
 docs/
+
+# ── Local boot/debug artifacts (cleanup 2026-10-05) — never source ──
+/out-images-*/
+/hv.map
+/ks2_blocks.txt
+/C*UsersVAJRA*
+qemu/images/
+qemu/Image_simpledrm
+qemu/_*
+!qemu/_kbuild_step2.sh
+qemu/*.log
+qemu/test.dtb
+__pycache__/
+# Instruction corpora / disassembly dumps (runtime inputs, 100+ MB, regenerable
+# with tools/corpus-extract/extract.py)
+tools/corpus-extract/disasm/
+tools/corpus-extract/trace_user_raw.txt
+tools/dbt-oracle/corpus/

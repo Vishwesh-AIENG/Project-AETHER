@@ -10,8 +10,6 @@ use aether_translator::ir::value::{IrValueId, IrValueKind};
 use aether_translator::regalloc::linear_scan::{AllocResult, AssignMap, Assignment};
 use aether_translator::regalloc::x86_regs::ALLOCATABLE_GPRS;
 
-use std::collections::BTreeMap;
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Build a trivial AllocResult that assigns value 0 → GPR[0] (RAX).
@@ -23,7 +21,7 @@ fn alloc_single_gpr(vid: u32, gpr_idx: u8) -> AllocResult {
 
 fn lower(blk: &IrBlock, alloc: &AllocResult) -> Vec<u8> {
     let mut enc = X86Encoder::new();
-    let mut patches = BTreeMap::new();
+    let mut patches: Vec<(usize, BlockId)> = Vec::new();
     IntLower::lower_block(blk, alloc, &mut enc, &mut patches);
     enc.finish()
 }
@@ -425,16 +423,16 @@ fn at12_branch_patches_collected() {
 
     let alloc = AllocResult::default();
     let mut enc = X86Encoder::new();
-    let mut patches = BTreeMap::new();
+    let mut patches: Vec<(usize, BlockId)> = Vec::new();
     IntLower::lower_block(&blk, &alloc, &mut enc, &mut patches);
     let bytes = enc.finish();
 
     // JMP rel32: E9 + 4 bytes = 5 bytes
     assert_eq!(bytes.len(), 5);
     assert_eq!(bytes[0], 0xE9);
-    // Patch map should have one entry pointing to BlockId(1)
+    // Patch list should have one entry pointing to BlockId(1)
     assert_eq!(patches.len(), 1);
-    assert_eq!(*patches.values().next().unwrap(), BlockId(1));
+    assert_eq!(patches[0].1, BlockId(1));
 }
 
 #[test]

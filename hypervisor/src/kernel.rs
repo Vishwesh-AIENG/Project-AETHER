@@ -745,6 +745,40 @@ pub struct AndroidDtbConfig {
     pub pmem_base: u64,
     /// Size in bytes of the `pmem-region` block device (0 when `pmem_base`==0).
     pub pmem_size: u64,
+    /// Base IPA of a SECOND `pmem-region` block device (the `/vendor` image), or
+    /// 0 to omit. Emitted as a second `pmem@` node after the first, so the GKI
+    /// `of_pmem` driver enumerates it as /dev/pmem1; a `vendor` fstab entry
+    /// (dev=/dev/block/pmem1) mounts it in first-stage so second-stage init can
+    /// load the vendor SELinux policy.
+    pub pmem_base2: u64,
+    /// Size in bytes of the second `pmem-region` device (0 when `pmem_base2`==0).
+    pub pmem_size2: u64,
+}
+
+/// Geometry for the guest `simple-framebuffer` DT node (Gap 1 of the display path).
+/// Set from the host UEFI-GOP framebuffer before `build_android_dtb`; when present,
+/// the builder emits a top-level `framebuffer@<base>` node (compatible
+/// "simple-framebuffer") plus a `/reserved-memory` carve-out so the kernel's
+/// `simpledrm` driver binds and creates `/dev/dri/card0`. `base` is a guest IPA in
+/// host-backed RAM (the hypervisor copies it to the real GOP FB each vblank).
+#[derive(Clone, Copy)]
+pub struct DtbFramebuffer {
+    pub base:   u64,
+    pub size:   u64,
+    pub width:  u32,
+    pub height: u32,
+    pub stride: u32,  // bytes per scan line
+    pub bgr:    bool, // true → "a8r8g8b8" (BGRA8 memory), false → "a8b8g8r8"
+}
+
+static mut DTB_FB: Option<DtbFramebuffer> = None;
+
+/// Register the framebuffer geometry the next `build_android_dtb` should emit.
+pub fn set_dtb_framebuffer(fb: DtbFramebuffer) {
+    unsafe { *core::ptr::addr_of_mut!(DTB_FB) = Some(fb); }
+}
+pub fn dtb_framebuffer() -> Option<DtbFramebuffer> {
+    unsafe { *core::ptr::addr_of!(DTB_FB) }
 }
 
 impl AndroidDtbConfig {
@@ -822,11 +856,20 @@ pub fn build_android_dtb(
         let addr_str = hex_u64(&mut mem_name[prefix.len()..], cfg.memory_base);
         b.begin_node(&mem_name[..prefix.len() + addr_str])?;
         b.prop_str(b"device_type", b"memory")?;
+        // Reserve the TOP 2 MiB of the window for the hypervisor's
+        // checkpoint/restore header. The host CR3 maps the window with 2 MiB large
+        // pages, so the header page (window_base + size - 0x1000 = 0xBFFF_F000)
+        // lives in the top 2 MiB leaf (0xBFE00000–0xBFFFFFFF). Reserving that whole
+        // 2 MiB block keeps the guest off the header AND keeps the advertised size
+        // 2 MiB-ALIGNED. (A prior 0x1000 shrink left the size non-2MiB-aligned and
+        // hung the guest in wg_mod_init; 0x200000 is one full block → alignment
+        // preserved.)
+        let usable_size = cfg.memory_size.saturating_sub(0x20_0000);
         b.prop_cells(b"reg", &[
             (cfg.memory_base >> 32) as u32,
             cfg.memory_base as u32,
-            (cfg.memory_size >> 32) as u32,
-            cfg.memory_size as u32,
+            (usable_size >> 32) as u32,
+            usable_size as u32,
         ])?;
         b.end_node()?;
     }
@@ -1034,6 +1077,66 @@ pub fn build_android_dtb(
         b.end_node()?; // pmem@
     }
 
+    // Second pmem region — the `/vendor` image → /dev/pmem1. Emitted AFTER the
+    // system node so of_pmem enumerates it second (pmem0=system, pmem1=vendor).
+    if cfg.pmem_base2 != 0 && cfg.pmem_size2 != 0 {
+        let mut pmem_name = [0u8; 32];
+        let prefix = b"pmem@";
+        pmem_name[..prefix.len()].copy_from_slice(prefix);
+        let n = hex_u64(&mut pmem_name[prefix.len()..], cfg.pmem_base2);
+        b.begin_node(&pmem_name[..prefix.len() + n])?;
+        b.prop_str(b"compatible", b"pmem-region")?;
+        b.prop_cells(b"reg", &[
+            (cfg.pmem_base2 >> 32) as u32,
+            cfg.pmem_base2 as u32,
+            (cfg.pmem_size2 >> 32) as u32,
+            cfg.pmem_size2 as u32,
+        ])?;
+        b.prop_empty(b"volatile")?;
+        b.end_node()?; // pmem@ (vendor)
+    }
+
+    // ── Display: simple-framebuffer (Gap 1) ──────────────────────────────────
+    // When a framebuffer is registered (set_dtb_framebuffer, from the host GOP FB),
+    // emit a /reserved-memory carve-out + a top-level "simple-framebuffer" node so
+    // the kernel's simpledrm driver binds and creates /dev/dri/card0 — without this
+    // SurfaceFlinger's HWComposer has no display to present to.
+    if let Some(fb) = dtb_framebuffer() {
+        let reg = [
+            (fb.base >> 32) as u32, fb.base as u32,
+            (fb.size >> 32) as u32, fb.size as u32,
+        ];
+        b.begin_node(b"reserved-memory")?;
+        b.prop_cells(b"#address-cells", &[2])?;
+        b.prop_cells(b"#size-cells", &[2])?;
+        b.prop_empty(b"ranges")?;
+        {
+            let mut name = [0u8; 28];
+            let prefix = b"framebuffer@";
+            name[..prefix.len()].copy_from_slice(prefix);
+            let n = hex_u64(&mut name[prefix.len()..], fb.base);
+            b.begin_node(&name[..prefix.len() + n])?;
+            b.prop_cells(b"reg", &reg)?;
+            b.prop_empty(b"no-map")?;
+            b.end_node()?;
+        }
+        b.end_node()?; // reserved-memory
+
+        let mut name = [0u8; 28];
+        let prefix = b"framebuffer@";
+        name[..prefix.len()].copy_from_slice(prefix);
+        let n = hex_u64(&mut name[prefix.len()..], fb.base);
+        b.begin_node(&name[..prefix.len() + n])?;
+        b.prop_str(b"compatible", b"simple-framebuffer")?;
+        b.prop_cells(b"reg", &reg)?;
+        b.prop_cells(b"width", &[fb.width])?;
+        b.prop_cells(b"height", &[fb.height])?;
+        b.prop_cells(b"stride", &[fb.stride])?;
+        b.prop_str(b"format", if fb.bgr { b"a8r8g8b8" } else { b"a8b8g8r8" })?;
+        b.prop_str(b"status", b"okay")?;
+        b.end_node()?; // framebuffer@
+    }
+
     // ── /firmware/android/fstab (Phase 3 — first-stage mount table) ───────────
     //
     // Android first-stage init reads /proc/device-tree/firmware/android/fstab
@@ -1057,6 +1160,28 @@ pub fn build_android_dtb(
             b.prop_str(b"mnt_flags", b"ro,barrier=1")?;
             b.prop_str(b"fsmgr_flags", b"wait,first_stage_mount")?;
             b.end_node()?; // system
+            // Vendor partition off the second PMEM device (/dev/block/pmem1).
+            // first_stage_mount so it is present BEFORE second-stage init opens
+            // the SELinux policy (which reads /vendor/etc/selinux). Direct mount,
+            // no logical/avb/slotselect — same simplest path as /system.
+            if cfg.pmem_base2 != 0 && cfg.pmem_size2 != 0 {
+                b.begin_node(b"vendor")?;
+                b.prop_str(b"compatible", b"android,vendor")?;
+                b.prop_str(b"dev", b"/dev/block/pmem1")?;
+                b.prop_str(b"type", b"ext4")?;
+                b.prop_str(b"mnt_flags", b"ro,barrier=1")?;
+                b.prop_str(b"fsmgr_flags", b"wait,first_stage_mount")?;
+                b.end_node()?; // vendor
+            }
+            // NOTE: /data is intentionally NOT declared in the DT (first-stage)
+            // fstab. A tmpfs entry with `dev="tmpfs"` + `fsmgr_flags="wait"` makes
+            // init's first-stage BlockDevInitializer wait for a nonexistent
+            // `tmpfs` block device (~10s timeout) and then "Failed to create
+            // devices required for first stage mount" -> init exits 127 (verified
+            // regression, 2026-06-25). The DT fstab is for real block devices only
+            // (pmem0=system, pmem1=vendor). /data is mounted as tmpfs in the
+            // second-stage image-side fstab (vendor.raw:/etc/fstab.aether), which
+            // is the correct place for a non-block, non-first-stage mount.
         }
         b.end_node()?; // fstab
         b.end_node()?; // android

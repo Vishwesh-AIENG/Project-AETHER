@@ -259,6 +259,8 @@ mod tests {
             initrd_end:   0,
             pmem_base:    0,
             pmem_size:    0,
+            pmem_base2:   0,
+            pmem_size2:   0,
         };
         cfg.cpu_mpidr[0] = 0;
         cfg

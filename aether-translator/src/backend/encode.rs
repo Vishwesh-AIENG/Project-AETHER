@@ -7,6 +7,55 @@
 //! byte-exact match against LLVM-MC reference vectors in `at11_encoder`.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+
+// ── UNSAFE-op diagnostics (2026-06-30) ───────────────────────────────────────
+//
+// When the lowering can't translate an op it calls `emit_ud2`, which sets a
+// sticky sentinel; the block-safety gate (`boot_x86.rs`) then rejects the block
+// and injects an undefined-instruction exception. Previously the gate only knew
+// the BLOCK's entry PC — not WHICH instruction inside the block forced the UD2.
+//
+// These statics close that gap. The lowering keeps `CUR_LOWER_PC` updated to the
+// guest ARM PC of the instruction currently being lowered (the lifter emits a
+// `StampFaultPc(pc)` IR op before every instruction's ops; `IntLower::lower_op`
+// copies that PC here). Every `emit_ud2` path then snapshots `CUR_LOWER_PC` into
+// `UNSAFE_OP_PC` and records a reason tag in `UNSAFE_OP_REASON`. The gate reads
+// these to print the EXACT offending PC + reason, and reads the guest word back
+// via the soft-MMU fetch walker. Cheap: three relaxed atomic stores per UD2,
+// which only happens on the rare fail-loud path.
+
+/// Guest ARM PC of the instruction whose ops are currently being lowered.
+/// Updated by `IntLower::lower_op` on each `StampFaultPc(pc)`. 0 = unknown
+/// (e.g. unit tests that lower with pc==0, where no StampFaultPc is emitted).
+pub static CUR_LOWER_PC: AtomicU64 = AtomicU64::new(0);
+
+/// Guest ARM PC of the LAST op that called `emit_ud2`. Read by the block-safety
+/// gate after it detects a UD2 sentinel.
+pub static UNSAFE_OP_PC: AtomicU64 = AtomicU64::new(0);
+
+/// Reason tag for the last `emit_ud2`:
+///   0 = UNIMPL  — unimplemented / decode-gap opcode arm
+///   1 = SPILL   — a `requires_gpr`/`addr_in` spill-safety guard fired
+pub const UNSAFE_REASON_UNIMPL: u8 = 0;
+pub const UNSAFE_REASON_SPILL: u8 = 1;
+
+/// Reason tag for the last `emit_ud2` (see `UNSAFE_REASON_*`).
+pub static UNSAFE_OP_REASON: AtomicU8 = AtomicU8::new(UNSAFE_REASON_UNIMPL);
+
+/// Set by the lowering before lowering each guest instruction's ops.
+#[inline]
+pub fn set_cur_lower_pc(pc: u64) {
+    CUR_LOWER_PC.store(pc, Ordering::Relaxed);
+}
+
+/// Snapshot of `(UNSAFE_OP_PC, UNSAFE_OP_REASON)` for the gate's diagnostics.
+pub fn unsafe_op_info() -> (u64, u8) {
+    (
+        UNSAFE_OP_PC.load(Ordering::Relaxed),
+        UNSAFE_OP_REASON.load(Ordering::Relaxed),
+    )
+}
 
 /// Raw byte buffer that accumulates x86_64 machine code.
 ///
@@ -188,6 +237,32 @@ impl X86Encoder {
     }
 
     pub fn emit_ud2(&mut self) {
+        // Default reason: UNIMPL (an unimplemented / decode-gap opcode arm).
+        // Spill-safety guards call `emit_ud2_spill` instead, which records
+        // SPILL so the gate can tell a missing-opcode block from a
+        // register-pressure spill-out.
+        self.record_unsafe(UNSAFE_REASON_UNIMPL);
+        self.emit_ud2_raw();
+    }
+
+    /// `emit_ud2` variant for the `requires_gpr`/`addr_in` spill-safety guards:
+    /// records reason=SPILL so the diagnostics distinguish a register-pressure
+    /// spill-out from a genuine unimplemented opcode. Same emitted bytes.
+    pub fn emit_ud2_spill(&mut self) {
+        self.record_unsafe(UNSAFE_REASON_SPILL);
+        self.emit_ud2_raw();
+    }
+
+    /// Snapshot the lowering's current guest ARM PC + a reason tag into the
+    /// UNSAFE-op diagnostics statics (read by the block-safety gate).
+    #[inline]
+    fn record_unsafe(&self, reason: u8) {
+        let pc = CUR_LOWER_PC.load(Ordering::Relaxed);
+        UNSAFE_OP_PC.store(pc, Ordering::Relaxed);
+        UNSAFE_OP_REASON.store(reason, Ordering::Relaxed);
+    }
+
+    fn emit_ud2_raw(&mut self) {
         // Phase-E sentinel: prepend a unique 4-byte NOP (`0F 1F 40 00` =
         // NOP DWORD PTR [RAX+0]) before the UD2 byte pair. The full 6-byte
         // sequence `0F 1F 40 00 0F 0B` is then what the block-safety gate
@@ -729,7 +804,14 @@ impl X86Encoder {
         self.buf.push(0xC8 | (reg & 7));
     }
 
-    /// LZCNT r64, r/m64 (requires LZCNT feature; falls back to BSR for AT-12).
+    /// LZCNT r64, r/m64. B30: REQUIRES the host ABM/LZCNT feature
+    /// (CPUID.80000001h:ECX[5]). On a non-ABM CPU the F3 prefix is IGNORED and
+    /// this decodes as BSR (highest-set-bit index, result UNDEFINED for input 0)
+    /// — wrong semantics for a leading-zero count, so Clz/Cls would return
+    /// garbage. The only supported x86 hosts (Meteor Lake-H, Raphael) both
+    /// implement ABM, so this is safe; a non-ABM host is unsupported.
+    /// `dbt::aether_dbt_host_supports_isa()` is the runtime probe the hypervisor
+    /// can call to refuse such a host before any block is dispatched.
     pub fn emit_lzcnt_r64(&mut self, dst: u8, src: u8) {
         self.buf.push(0xF3); // mandatory F3 prefix
         self.rex_opt(true, dst, 0, src);
@@ -1078,6 +1160,15 @@ impl X86Encoder {
         self.modrm_rr(2, dst);
         self.buf.push(imm);
     }
+    /// PSRLDQ xmm, imm8 — byte-granular logical right shift of the whole 128-bit
+    /// register (0F 73 /3). Used to bring the high 64 bits into the low 64.
+    pub fn emit_psrldq_imm(&mut self, dst: u8, imm: u8) {
+        self.buf.push(0x66);
+        self.rex_opt(false, 0, 0, dst);
+        self.buf.push(0x0F); self.buf.push(0x73);
+        self.modrm_rr(3, dst);
+        self.buf.push(imm);
+    }
     /// PSRAW xmm, imm8.
     pub fn emit_psraw_imm(&mut self, dst: u8, imm: u8) {
         self.buf.push(0x66);
@@ -1177,6 +1268,8 @@ impl X86Encoder {
     pub fn emit_punpckhwd(&mut self, dst: u8, src: u8) { self.emit_sse2_op(0x66, 0x69, dst, src); }
     /// PUNPCKLDQ xmm, xmm.
     pub fn emit_punpckldq(&mut self, dst: u8, src: u8) { self.emit_sse2_op(0x66, 0x62, dst, src); }
+    /// PUNPCKHDQ xmm, xmm.
+    pub fn emit_punpckhdq(&mut self, dst: u8, src: u8) { self.emit_sse2_op(0x66, 0x6A, dst, src); }
     /// PUNPCKLQDQ xmm, xmm.
     pub fn emit_punpcklqdq(&mut self, dst: u8, src: u8) { self.emit_sse2_op(0x66, 0x6C, dst, src); }
 
@@ -1314,10 +1407,34 @@ impl X86Encoder {
         self.modrm_rr(dst, src);
     }
 
-    /// CRC32 r64, r/m32.
-    pub fn emit_crc32_r64_r32(&mut self, dst: u8, src: u8) {
+    /// CRC32 r32, r/m8 (CRC32CB data size). The 32-bit-destination form (no
+    /// REX.W): the result is the 32-bit CRC zero-extended into the full r64, and
+    /// ONLY the source's low byte participates — so it reads no garbage high bits
+    /// from a 64-bit data register. rex_opt(false,…) still emits REX.R/B for r8-r15.
+    pub fn emit_crc32_r32_r8(&mut self, dst: u8, src: u8) {
         self.buf.push(0xF2);
-        self.rex_opt(true, dst, 0, src);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F); self.buf.push(0x38); self.buf.push(0xF0);
+        self.modrm_rr(dst, src);
+    }
+
+    /// CRC32 r32, r/m16 (CRC32CH data size). 66h operand-size prefix selects the
+    /// 16-bit r/m form; NO REX.W (that would be the invalid r64,r/m16). Reads only
+    /// the source's low 16 bits.
+    pub fn emit_crc32_r32_r16(&mut self, dst: u8, src: u8) {
+        self.buf.push(0x66); // operand-size override → r/m16
+        self.buf.push(0xF2); // mandatory CRC32 prefix
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F); self.buf.push(0x38); self.buf.push(0xF1);
+        self.modrm_rr(dst, src);
+    }
+
+    /// CRC32 r32, r/m32 (CRC32CW data size). NO REX.W — the r64,r/m32 form does
+    /// not exist; with REX.W this opcode is r64,r/m64 (reads 8 bytes). Reads only
+    /// the source's low 32 bits and zero-extends the 32-bit result into r64.
+    pub fn emit_crc32_r32_r32(&mut self, dst: u8, src: u8) {
+        self.buf.push(0xF2);
+        self.rex_opt(false, dst, 0, src);
         self.buf.push(0x0F); self.buf.push(0x38); self.buf.push(0xF1);
         self.modrm_rr(dst, src);
     }
@@ -1378,6 +1495,83 @@ impl X86Encoder {
         self.modrm_rr(dst, src);
     }
 
+    // ── FMA3 scalar fused multiply-add (VEX.LIG.66.0F38.W{0,1}) ──────────────
+    //
+    // 3-byte VEX prefix: C4 | (~R ~X ~B m4..m0) | (W ~vvvv L pp). For scalar reg-
+    // reg-reg XMM ops: map = 0F38 (mmmmm=00010), L=0 (LIG/scalar), pp=01 (66).
+    // W selects the element: W=0 = single (SS), W=1 = double (SD). vvvv encodes
+    // the second source (src1); ModRM.reg = dst, ModRM.rm = third source (src2).
+    //
+    // "213" form semantics: dst = src1(vvvv) * dst + src2(rm)  [FMADD], with the
+    // sign/sub variants:
+    //   VFMADD213  0xA9:  dst =  src1*dst + src2
+    //   VFMSUB213  0xAB:  dst =  src1*dst - src2
+    //   VFNMADD213 0xAD:  dst = -src1*dst + src2
+    //   VFNMSUB213 0xAF:  dst = -src1*dst - src2
+    // The fused multiply-add rounds ONCE, matching ARM FMADD/FMSUB/FNMADD/FNMSUB.
+    fn emit_vex_fma213(&mut self, opcode: u8, w: bool, dst: u8, vvvv: u8, rm: u8) {
+        // Byte 1: C4 (3-byte VEX escape).
+        self.buf.push(0xC4);
+        // Byte 2: R X B (inverted) in [7:5], mmmmm = 00010 (0F38) in [4:0].
+        //   R = high bit of ModRM.reg (dst); X = high bit of index (none → 0);
+        //   B = high bit of ModRM.rm (rm). Stored inverted.
+        let r_inv = ((!(dst >> 3)) & 1) << 7;
+        let x_inv = 1u8 << 6; // no index reg → X = 1 (inverted 0)
+        let b_inv = ((!(rm >> 3)) & 1) << 5;
+        self.buf.push(r_inv | x_inv | b_inv | 0b00010);
+        // Byte 3: W in [7], ~vvvv in [6:3], L in [2] (0 = scalar), pp in [1:0] (01=66).
+        let vvvv_inv = ((!vvvv) & 0xF) << 3;
+        self.buf.push(((w as u8) << 7) | vvvv_inv | 0b01);
+        // Opcode + ModRM (reg=dst, rm=rm, mod=11).
+        self.buf.push(opcode);
+        self.modrm_rr(dst, rm);
+    }
+
+    /// VFMADD213SS/SD xmm_dst, xmm_vvvv, xmm_rm → dst = vvvv*dst + rm (fused).
+    pub fn emit_vfmadd213(&mut self, dbl: bool, dst: u8, vvvv: u8, rm: u8) {
+        self.emit_vex_fma213(0xA9, dbl, dst, vvvv, rm);
+    }
+    /// VFMSUB213SS/SD → dst = vvvv*dst - rm (fused).
+    pub fn emit_vfmsub213(&mut self, dbl: bool, dst: u8, vvvv: u8, rm: u8) {
+        self.emit_vex_fma213(0xAB, dbl, dst, vvvv, rm);
+    }
+    /// VFNMADD213SS/SD → dst = -(vvvv*dst) + rm (fused).
+    pub fn emit_vfnmadd213(&mut self, dbl: bool, dst: u8, vvvv: u8, rm: u8) {
+        self.emit_vex_fma213(0xAD, dbl, dst, vvvv, rm);
+    }
+    /// VFNMSUB213SS/SD → dst = -(vvvv*dst) - rm (fused).
+    pub fn emit_vfnmsub213(&mut self, dbl: bool, dst: u8, vvvv: u8, rm: u8) {
+        self.emit_vex_fma213(0xAF, dbl, dst, vvvv, rm);
+    }
+
+    // ── FMA3 packed 128-bit fused multiply-add (VEX.128.66.0F38.W{0,1}) ──────
+    //
+    // Same 3-byte VEX layout as the scalar helpers (L=0 → VEX.128, pp=01 → 66,
+    // W=0 → PS / W=1 → PD). The packed opcodes are the scalar opcode − 1 (even):
+    //   VFMADD213P{S,D}  0xA8:  dst =  src1(vvvv)*dst + src2(rm)
+    //   VFMSUB213P{S,D}  0xAA:  dst =  src1*dst - src2
+    //   VFNMADD213P{S,D} 0xAC:  dst = -src1*dst + src2
+    //   VFNMSUB213P{S,D} 0xAE:  dst = -src1*dst - src2
+    // The multiply-add rounds ONCE per lane, matching AArch64 Advanced-SIMD
+    // FMLA/FMLS which are architecturally fused.
+
+    /// VFMADD213PS/PD xmm_dst, xmm_vvvv, xmm_rm → dst = vvvv*dst + rm (fused, per lane).
+    pub fn emit_vfmadd213p(&mut self, dbl: bool, dst: u8, vvvv: u8, rm: u8) {
+        self.emit_vex_fma213(0xA8, dbl, dst, vvvv, rm);
+    }
+    /// VFMSUB213PS/PD → dst = vvvv*dst - rm (fused, per lane).
+    pub fn emit_vfmsub213p(&mut self, dbl: bool, dst: u8, vvvv: u8, rm: u8) {
+        self.emit_vex_fma213(0xAA, dbl, dst, vvvv, rm);
+    }
+    /// VFNMADD213PS/PD → dst = -(vvvv*dst) + rm (fused, per lane).
+    pub fn emit_vfnmadd213p(&mut self, dbl: bool, dst: u8, vvvv: u8, rm: u8) {
+        self.emit_vex_fma213(0xAC, dbl, dst, vvvv, rm);
+    }
+    /// VFNMSUB213PS/PD → dst = -(vvvv*dst) - rm (fused, per lane).
+    pub fn emit_vfnmsub213p(&mut self, dbl: bool, dst: u8, vvvv: u8, rm: u8) {
+        self.emit_vex_fma213(0xAE, dbl, dst, vvvv, rm);
+    }
+
     /// UCOMISS xmm, xmm.
     pub fn emit_ucomiss(&mut self, a: u8, b: u8) {
         self.rex_opt(false, a, 0, b);
@@ -1420,6 +1614,24 @@ impl X86Encoder {
     /// CMPPD xmm, xmm, imm8.
     pub fn emit_cmppd(&mut self, dst: u8, src: u8, pred: u8) {
         self.buf.push(0x66);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F); self.buf.push(0xC2);
+        self.modrm_rr(dst, src);
+        self.buf.push(pred);
+    }
+
+    /// CMPSS xmm, xmm, imm8 (F3 0F C2 /r ib) — scalar single compare, low element.
+    pub fn emit_cmpss(&mut self, dst: u8, src: u8, pred: u8) {
+        self.buf.push(0xF3);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F); self.buf.push(0xC2);
+        self.modrm_rr(dst, src);
+        self.buf.push(pred);
+    }
+
+    /// CMPSD xmm, xmm, imm8 (F2 0F C2 /r ib) — scalar double compare, low element.
+    pub fn emit_cmpsd(&mut self, dst: u8, src: u8, pred: u8) {
+        self.buf.push(0xF2);
         self.rex_opt(false, dst, 0, src);
         self.buf.push(0x0F); self.buf.push(0xC2);
         self.modrm_rr(dst, src);
@@ -1695,5 +1907,53 @@ mod tests {
             );
             assert_eq!(bytes[1], 0x0F, "REX precedes the 0F 9x SETcc opcode");
         }
+    }
+
+    /// FMA3 VEX-prefix regression: scalar 3-source fused multiply-add must encode
+    /// a valid 3-byte VEX (C4 …). VFMADD213SS xmm0, xmm1, xmm2 (SS, W=0) has the
+    /// canonical encoding C4 E2 71 A9 C2 — cross-checked against the SDM VEX
+    /// layout. A wrong prefix would SIGILL on hardware, so pin the exact bytes.
+    #[test]
+    fn fma3_vfmadd213ss_vex_encoding() {
+        let mut e = X86Encoder::new();
+        e.emit_vfmadd213(false, 0, 1, 2); // dst=xmm0, vvvv=xmm1, rm=xmm2
+        assert_eq!(e.finish(), [0xC4, 0xE2, 0x71, 0xA9, 0xC2], "VFMADD213SS x0,x1,x2");
+
+        // Double form flips the VEX.W bit (byte 3 bit7): C4 E2 F1 A9 C2.
+        let mut e = X86Encoder::new();
+        e.emit_vfmadd213(true, 0, 1, 2);
+        assert_eq!(e.finish(), [0xC4, 0xE2, 0xF1, 0xA9, 0xC2], "VFMADD213SD x0,x1,x2");
+
+        // The four sign variants differ only in the opcode byte (A9/AB/AD/AF).
+        let mut e = X86Encoder::new(); e.emit_vfmsub213(false, 0, 1, 2);
+        assert_eq!(e.finish()[3], 0xAB, "VFMSUB213SS opcode");
+        let mut e = X86Encoder::new(); e.emit_vfnmadd213(false, 0, 1, 2);
+        assert_eq!(e.finish()[3], 0xAD, "VFNMADD213SS opcode");
+        let mut e = X86Encoder::new(); e.emit_vfnmsub213(false, 0, 1, 2);
+        assert_eq!(e.finish()[3], 0xAF, "VFNMSUB213SS opcode");
+    }
+
+    /// FMA3 packed 128-bit VEX-prefix regression. VFMADD213PS xmm0,xmm1,xmm2
+    /// (PS, W=0, L=0, 66 prefix) is C4 E2 71 A8 C2 — identical to the scalar
+    /// VFMADD213SS except the opcode byte (A8 packed vs A9 scalar). Pin the bytes
+    /// so a wrong prefix/opcode (which would SIGILL) is caught here, not on HW.
+    #[test]
+    fn fma3_vfmadd213ps_vex_encoding() {
+        let mut e = X86Encoder::new();
+        e.emit_vfmadd213p(false, 0, 1, 2); // dst=xmm0, vvvv=xmm1, rm=xmm2
+        assert_eq!(e.finish(), [0xC4, 0xE2, 0x71, 0xA8, 0xC2], "VFMADD213PS x0,x1,x2");
+
+        // Double form flips VEX.W: C4 E2 F1 A8 C2.
+        let mut e = X86Encoder::new();
+        e.emit_vfmadd213p(true, 0, 1, 2);
+        assert_eq!(e.finish(), [0xC4, 0xE2, 0xF1, 0xA8, 0xC2], "VFMADD213PD x0,x1,x2");
+
+        // The sub/neg variants differ only in the opcode byte (A8/AA/AC/AE).
+        let mut e = X86Encoder::new(); e.emit_vfmsub213p(false, 0, 1, 2);
+        assert_eq!(e.finish()[3], 0xAA, "VFMSUB213PS opcode");
+        let mut e = X86Encoder::new(); e.emit_vfnmadd213p(false, 0, 1, 2);
+        assert_eq!(e.finish()[3], 0xAC, "VFNMADD213PS opcode");
+        let mut e = X86Encoder::new(); e.emit_vfnmsub213p(false, 0, 1, 2);
+        assert_eq!(e.finish()[3], 0xAE, "VFNMSUB213PS opcode");
     }
 }

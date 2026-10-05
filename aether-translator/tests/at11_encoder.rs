@@ -718,8 +718,11 @@ fn at11_opcode_coverage_100pct() {
         ("aesdec",      { let mut e = enc(); e.emit_aesdec(0,1); e.finish() }),
         ("aesimc",      { let mut e = enc(); e.emit_aesimc(0,1); e.finish() }),
         ("pclmulqdq",   { let mut e = enc(); e.emit_pclmulqdq(0,1,0); e.finish() }),
-        ("crc32_r8",    { let mut e = enc(); e.emit_crc32_r64_r8(0,1); e.finish() }),
-        ("crc32_r32",   { let mut e = enc(); e.emit_crc32_r64_r32(0,1); e.finish() }),
+        ("crc32_r64_r8",  { let mut e = enc(); e.emit_crc32_r64_r8(0,1); e.finish() }),
+        ("crc32_r64_r64", { let mut e = enc(); e.emit_crc32_r64_r64(0,1); e.finish() }),
+        ("crc32_r32_r8",  { let mut e = enc(); e.emit_crc32_r32_r8(0,1); e.finish() }),
+        ("crc32_r32_r16", { let mut e = enc(); e.emit_crc32_r32_r16(0,1); e.finish() }),
+        ("crc32_r32_r32", { let mut e = enc(); e.emit_crc32_r32_r32(0,1); e.finish() }),
         ("lea",         { let mut e = enc(); e.emit_lea_r64_mem(0,1,4); e.finish() }),
     ];
 

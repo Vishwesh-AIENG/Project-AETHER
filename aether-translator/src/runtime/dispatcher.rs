@@ -21,7 +21,6 @@
 //! Real RDTSC timing activates under `cfg(all(feature = "std",
 //! target_arch = "x86_64"))`.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::backend::code_buf::{CodeBuf, CodeBufError};
@@ -195,7 +194,7 @@ impl Dispatcher {
 
         // 6. Lower the (only) block to x86_64.
         let mut enc = X86Encoder::new();
-        let mut patches: BTreeMap<usize, BlockId> = BTreeMap::new();
+        let mut patches: alloc::vec::Vec<(usize, BlockId)> = alloc::vec::Vec::new();
         IntLower::lower_block_with_pc(&ir_fn.blocks[0], guest_pc, &alloc, &mut enc, &mut patches);
         let code = enc.finish();
 

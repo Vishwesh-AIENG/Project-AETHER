@@ -349,6 +349,12 @@ pub enum DecodedInsn {
         /// `WriteFpr` instead of `write_reg`; without this an `ldr d1,[..]` would
         /// land in integer x1 and a later `mov x1,..` would silently clobber it.
         is_fp: bool,
+        /// True = the destination is the full 64-bit Xt; false = the 32-bit Wt
+        /// (bits [63:32] zeroed). Matters for SIGNED sub-word loads: `LDRSB Xt`
+        /// (opc=0b10) sign-extends to 64, but `LDRSB Wt` (opc=0b11) sign-extends
+        /// to 32 then zeroes [63:32]. Without this the W-form wrongly kept the
+        /// sign bits in the upper 32. (Unsigned loads zero-extend either way.)
+        is_64: bool,
     },
     Str {
         rt: Reg,
@@ -460,12 +466,45 @@ pub enum DecodedInsn {
         q: bool,
         signed: bool,
     },
-    /// NEON `CMEQ Vd, Vn, #0` — per-lane compare-against-zero. `size`: 0=B,1=H,
-    /// 2=S,3=D. bionic strchr/memchr: `cmeq v2.16b, v1.16b, #0`.
-    SimdCmeqZero {
+    /// NEON integer per-lane compare-against-zero (`CMEQ`/`CMGT`/`CMGE`/`CMLT`/
+    /// `CMLE` `Vd, Vn, #0`). `op`: 0=Eq 1=Gt(signed) 2=Ge(signed) 3=Lt(signed)
+    /// 4=Le(signed). `size`: 0=B,1=H,2=S,3=D. bionic strchr/memchr:
+    /// `cmeq v2.16b, v1.16b, #0`; ART sign tests use the ordered forms.
+    SimdIntCmpZero {
         rd: VReg,
         rn: VReg,
+        op: u8,
         size: u8,
+        q: bool,
+    },
+    /// NEON vector FP 2-reg-misc unary (`FABS`/`FNEG`/`FSQRT`). `op`: 0=Abs 1=Neg
+    /// 2=Sqrt. `dbl` selects double (.2d) vs single (.4s/.2s).
+    SimdFpUn {
+        rd: VReg,
+        rn: VReg,
+        op: u8,
+        dbl: bool,
+        q: bool,
+    },
+    /// NEON vector FP per-lane compare against `#0.0` (`FCMEQ`/`FCMGT`/`FCMGE`/
+    /// `FCMLT`/`FCMLE`). `op`: 0=Eq 1=Gt 2=Ge 3=Lt 4=Le. `dbl` selects double.
+    SimdFpCmpZero {
+        rd: VReg,
+        rn: VReg,
+        op: u8,
+        dbl: bool,
+        q: bool,
+    },
+    /// NEON vector FP round-to-integral (`FRINT{N,P,M,Z,A}` `Vd.<T>,Vn.<T>`).
+    /// `round`: 0=N(nearest-even) 1=M(floor) 2=P(ceil) 3=Z(trunc) 4=A(ties-away).
+    /// `dbl` selects double (.2d) vs single (.4s/.2s). (FRINTX/FRINTI — the
+    /// inexact-raising / current-mode forms — stay coarse `AdvSimd` for now; they
+    /// do not appear on the framework render path per the oracle sweep.)
+    SimdFpRound {
+        rd: VReg,
+        rn: VReg,
+        round: u8,
+        dbl: bool,
         q: bool,
     },
     /// NEON `SHRN`/`SHRN2` — shift-right-narrow. `shift` ∈ 1..=2*esize_out*8;
@@ -489,6 +528,139 @@ pub enum DecodedInsn {
         esize_in: u8,
         high: bool,
         signed: bool,
+    },
+    /// NEON single-register `TBL` (table byte-permute, 1 table reg):
+    /// `Vd[i] = (Vm[i] < 16) ? Vn[Vm[i]] : 0`. bionic's AES key schedule uses
+    /// `tbl v.16b, {v.16b}, v.16b` to permute bytes.
+    SimdTbl1 {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        q: bool,
+    },
+    /// NEON multi-register `TBL`/`TBX` (table byte-permute over 1..4 consecutive
+    /// table regs, wrapping mod 32). `len` is the table-reg count − 1 (0..=3),
+    /// `op` selects TBL (0) vs TBX (1). For TBL, out-of-range index lanes write 0;
+    /// for TBX they retain the old `Vd` byte. `rn` is the first table reg, `rm` the
+    /// index reg. (The `len==0 && op==0` case is covered by `SimdTbl1`.)
+    SimdTblN {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        len: u8,
+        op: u8,
+        q: bool,
+    },
+    /// NEON `SHL` (vector shift-left by immediate). `size` = log2(element bytes):
+    /// 0=8-bit, 1=16-bit, 2=32-bit, 3=64-bit.
+    SimdShlImm {
+        rd: VReg,
+        rn: VReg,
+        shift: u8,
+        size: u8,
+        q: bool,
+    },
+    /// NEON `SSHR`/`USHR` (vector shift-right by immediate). `signed` selects
+    /// arithmetic (SSHR) vs logical (USHR). `size` = log2(element bytes).
+    SimdShrImm {
+        rd: VReg,
+        rn: VReg,
+        shift: u8,
+        size: u8,
+        q: bool,
+        signed: bool,
+    },
+    /// NEON `SSRA`/`USRA` (vector shift-right-and-accumulate by immediate).
+    /// `Vd[e] += (Vn[e] >> shift)`. `signed` selects arithmetic (SSRA) vs logical
+    /// (USRA). `size` = log2(element bytes); `rd` is read AND written.
+    SimdSraImm {
+        rd: VReg,
+        rn: VReg,
+        shift: u8,
+        size: u8,
+        q: bool,
+        signed: bool,
+    },
+    /// NEON `SSHL`/`USHL` — register variable per-lane shift. Each `size`-byte
+    /// lane of Vn is shifted by the SIGNED byte in the corresponding lane of Vm
+    /// (positive = left, negative = right; SSHL uses an arithmetic right shift,
+    /// USHL a logical one). `size` = log2(element bytes: 0=B,1=H,2=S,3=D).
+    SimdShlReg {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        size: u8,
+        q: bool,
+        signed: bool,
+    },
+    /// NEON `SRI`/`SLI` — shift-right-and-insert / shift-left-and-insert by
+    /// immediate. `left`=false (SRI): `Vd = (Vd & top_mask) | (Vn >>u shift)`,
+    /// preserving Vd's top `shift` bits of each element. `left`=true (SLI):
+    /// `Vd = (Vd & low_mask) | (Vn << shift)`, preserving Vd's low `shift` bits.
+    /// `size` = log2(element bytes). `rd` is read AND written.
+    SimdShiftIns {
+        rd: VReg,
+        rn: VReg,
+        shift: u8,
+        size: u8,
+        q: bool,
+        left: bool,
+    },
+    /// NEON `SQSHRN`/`UQSHRN`/`SQSHRUN`/`SQRSHRN`/`UQRSHRN`/`SQRSHRUN`/`RSHRN` —
+    /// saturating (and/or rounding) narrowing shift-right by immediate. Each
+    /// `2*esize_out`-byte source lane is shifted right by `shift` (rounding when
+    /// `round`), then saturated to the destination element range. `src_signed`
+    /// selects the source interpretation (S vs U); `dst_signed` selects the
+    /// destination saturation range (SQSHRUN/SQRSHRUN are signed-source →
+    /// unsigned-dest). `high` = the `2` (SQSHRN2 etc.) form (writes Vd[127:64]).
+    /// RSHRN/SHRN (plain narrow, no saturation) set `modular=true`: the result is
+    /// the low `esize_out*8` bits of `(element + round) >> shift` — truncated, NOT
+    /// clamped. All the saturating members (SQSHRN/UQSHRN/SQSHRUN/… and their
+    /// rounding variants) set `modular=false`. `modular` is required to tell RSHRN
+    /// apart from UQRSHRN: both carry `round=true, src_signed=false,
+    /// dst_signed=false`, so the signedness flags alone cannot distinguish the
+    /// truncating op from the saturating one.
+    SimdShrnSat {
+        rd: VReg,
+        rn: VReg,
+        shift: u8,
+        esize_out: u8,
+        high: bool,
+        round: bool,
+        src_signed: bool,
+        dst_signed: bool,
+        modular: bool,
+    },
+    /// NEON `DUP` (element) — broadcast `Vn.<Ts>[lane]` to all lanes of Vd.
+    /// `size` = log2(element bytes); `lane` = source index.
+    SimdDupElem {
+        rd: VReg,
+        rn: VReg,
+        size: u8,
+        lane: u8,
+        q: bool,
+    },
+    /// NEON `PMULL`/`PMULL2` `.1q` — 64×64→128 carryless (polynomial) multiply.
+    /// `high`=true is PMULL2 (uses each source's high 64 bits). GHASH/GCM core.
+    SimdPmull {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        high: bool,
+    },
+    /// Scalar `DUP`/`MOV` (element) — `mov dN, vM.<T>[lane]`: copy one lane into
+    /// the scalar (lane 0) of Vd, zeroing the rest. `size`=log2(element bytes).
+    SimdScalarDup {
+        rd: VReg,
+        rn: VReg,
+        size: u8,
+        lane: u8,
+    },
+    /// Scalar `SHL` — `shl dN, dM, #shift` (64-bit, D-form only); zeroes Vd[127:64].
+    SimdScalarShl {
+        rd: VReg,
+        rn: VReg,
+        shift: u8,
     },
     /// NEON `EXT` (extract) — `Vd = (CONCAT(Vm, Vn) >> imm*8)`, i.e. the 16 (`q`)
     /// or 8 bytes starting at byte `imm` of the Vn:Vm concatenation. bionic
@@ -546,6 +718,18 @@ pub enum DecodedInsn {
         writeback: bool,
         rm: u8,
     },
+    /// NEON single-lane `LD1`/`ST1` — `ld1/st1 {Vt.<T>}[lane], [Xn]`. Loads/stores
+    /// one `esize`-byte element to/from a single vector lane (other lanes kept).
+    /// `is_load` selects LD1 vs ST1; optional post-index writeback.
+    SimdLd1Lane {
+        rt: VReg,
+        rn: Reg,
+        esize: u8,
+        lane: u8,
+        is_load: bool,
+        writeback: bool,
+        rm: u8,
+    },
     /// NEON `BIC`/`ORR` (vector, immediate): RMW V`rd` with the expanded 64-bit
     /// `imm` pattern. `is_bic` clears (`&~imm`) else sets (`|imm`). bionic strchr
     /// `bic v4.8h, #0xf0`.
@@ -581,6 +765,18 @@ pub enum DecodedInsn {
         size: u8,
         q: bool,
     },
+    /// NEON across-lanes min/max reduction (SMAXV/UMAXV/SMINV/UMINV) — B20/B29.
+    /// Reduces all lanes (element bytes = `1<<size`) to a single scalar in
+    /// V`rd` lane 0 (rest zeroed). `is_min` selects MINV vs MAXV; `signed`
+    /// selects the S vs U form (U bit of the encoding).
+    SimdReduceMinMax {
+        rd: VReg,
+        rn: VReg,
+        size: u8,
+        q: bool,
+        is_min: bool,
+        signed: bool,
+    },
     /// NEON `INS` (element): V`rd`.<T>[`dst_lane`] <- V`rn`.<T>[`src_lane`].
     /// `size`: 0=B,1=H,2=S,3=D (log2 element). bionic `mov v0.d[1], v1.d[0]`.
     SimdInsElem {
@@ -589,6 +785,70 @@ pub enum DecodedInsn {
         dst_lane: u8,
         src_lane: u8,
         size: u8,
+    },
+    /// NEON multiply-accumulate BY ELEMENT — `FMUL`/`FMLA`/`FMLS` (FP) and `MUL`
+    /// (integer) `Vd, Vn, Vm.<Ts>[idx]`. `fp_op`: 0=Mul 1=Mla 2=Mls (FP only;
+    /// integer MUL ignores it). `is_fp` selects the FP path. `dbl` (FP) = .2d.
+    /// `size`: log2 element bytes (int H=1/S=2; FP S=2/D=3). `idx` = the source
+    /// lane of Vm broadcast to every lane. Graphics/matrix-math hot path.
+    SimdByElem {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        fp_op: u8,
+        is_fp: bool,
+        dbl: bool,
+        size: u8,
+        q: bool,
+        idx: u8,
+    },
+    /// NEON vector integer↔FP convert (2-reg-misc): `SCVTF`/`UCVTF` (int→FP) and
+    /// `FCVTZS`/`FCVTZU` (FP→int, round-toward-zero). `to_fp` selects int→FP;
+    /// `signed` the S vs U form; `dbl` the .2d (64-bit) vs .4s/.2s (32-bit) form.
+    SimdCvtFp {
+        rd: VReg,
+        rn: VReg,
+        to_fp: bool,
+        signed: bool,
+        dbl: bool,
+        q: bool,
+    },
+    /// NEON `ZIP1`/`ZIP2`/`TRN1`/`TRN2` permute. `kind`: 0=ZIP1 1=ZIP2 2=TRN1
+    /// 3=TRN2. `size`: log2 element bytes. Interleaves the lanes of V`rn`:V`rm`.
+    /// RGBA channel interleave + matrix transpose (graphics).
+    SimdZipTrn {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        kind: u8,
+        size: u8,
+        q: bool,
+    },
+    /// NEON integer `ABS` (`neg=false`) / `NEG` (`neg=true`) — 2-reg-misc unary.
+    /// `size`: log2 element bytes (0=B,1=H,2=S,3=D).
+    SimdAbsNeg {
+        rd: VReg,
+        rn: VReg,
+        size: u8,
+        q: bool,
+        neg: bool,
+    },
+    /// Scalar integer 3-same `ADD`/`SUB` (D-form, 64-bit): `add d0,d1,d2`. The
+    /// lane-0 version of the vector op (lowers to a D-form VecBin). `sub` selects SUB.
+    SimdScalar3Same {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        sub: bool,
+    },
+    /// Scalar pairwise reduce: `ADDP d0,v1.2d` (`is_fp=false`) or `FADDP {s,d}0,
+    /// v1.2{s,d}` (`is_fp=true`). Sums the two lanes of Vn into Vd lane 0 (rest
+    /// zeroed). `dbl` selects the 64-bit (D / .2d) vs 32-bit (S / .2s) element.
+    SimdScalarPair {
+        rd: VReg,
+        rn: VReg,
+        is_fp: bool,
+        dbl: bool,
     },
 
     // ----- AT-4: branches / system / exceptions / barriers / atomics -----
@@ -745,6 +1005,19 @@ pub enum DecodedInsn {
     },
     // LSE atomics (ARMv8.1)
     Cas {
+        size: AccessSize,
+        rs: Reg,
+        rt: Reg,
+        rn: Reg,
+        acquire: bool,
+        release: bool,
+    },
+    /// CASP/CASPA/CASPL/CASPAL — compare-and-swap PAIR. Operates on the register
+    /// pairs (Rs,Rs+1) = expected, (Rt,Rt+1) = new, at [Rn] (2×elem bytes).
+    /// Rs/Rt are even. `size` is per-element (Word=4 for the 32-bit pair,
+    /// DoubleWord=8 for the 64-bit pair). Used by the SLUB `cmpxchg_double`
+    /// fast path (`this_cpu_cmpxchg_double`).
+    Casp {
         size: AccessSize,
         rs: Reg,
         rt: Reg,

@@ -272,8 +272,15 @@ fn gic_apply_priority(array_base: u64, offset: u64, size: u8, value: u64) {
 fn emulate_gicd(access: &MmioAccess) -> MmioResult {
     let offset = access.addr - GICD_BASE;
     let in_router = offset >= gicd_offsets::IROUTER;
-    // Everything except the 64-bit IROUTER array is 32-bit-accessed.
-    if !in_router && access.size != 4 {
+    // B28: IPRIORITYR is a byte array (one priority byte per interrupt) and is
+    // legitimately accessed byte/halfword-wide by the kernel; gic_apply_priority
+    // below handles the sub-word size. The previous unconditional `size != 4`
+    // guard rejected those with BadWidth before they reached the dispatch.
+    let is_ipriority =
+        (gicd_offsets::IPRIORITYR..gicd_offsets::IPRIORITYR + 0x400).contains(&offset);
+    // Everything except the 64-bit IROUTER array and the IPRIORITYR byte array
+    // is 32-bit-accessed.
+    if !in_router && !is_ipriority && access.size != 4 {
         return MmioResult::BadWidth;
     }
 
@@ -395,6 +402,10 @@ pub static mut MMIO_GICR_W: u32 = 0;
 pub static mut MMIO_OTHER_W: u32 = 0;
 #[cfg(target_arch = "x86_64")]
 pub static mut MMIO_LAST_ADDR: u64 = 0;
+/// B28: read-side visibility — an Unhandled/BadWidth MMIO READ returns 0 to the
+/// guest (reads as "device absent"). Count + record the last so it is diagnosable.
+pub static mut MMIO_UNHANDLED_READS: u64 = 0;
+pub static mut MMIO_LAST_UNHANDLED_READ: u64 = 0;
 
 pub unsafe extern "C" fn aether_mmio_bridge(addr: u64, size: u32, is_write: u32, value: u64) -> u64 {
     #[cfg(target_arch = "x86_64")]
@@ -424,7 +435,18 @@ pub unsafe extern "C" fn aether_mmio_bridge(addr: u64, size: u32, is_write: u32,
     };
     match handle(acc) {
         MmioResult::Ok { value } => value,
-        MmioResult::Unhandled | MmioResult::BadWidth => 0,
+        MmioResult::Unhandled | MmioResult::BadWidth => {
+            // B28: record silent device-absent READs so they are diagnosable.
+            #[cfg(target_arch = "x86_64")]
+            if is_write == 0 {
+                unsafe {
+                    *core::ptr::addr_of_mut!(MMIO_UNHANDLED_READS) =
+                        (*core::ptr::addr_of!(MMIO_UNHANDLED_READS)).saturating_add(1);
+                    *core::ptr::addr_of_mut!(MMIO_LAST_UNHANDLED_READ) = addr;
+                }
+            }
+            0
+        }
     }
 }
 

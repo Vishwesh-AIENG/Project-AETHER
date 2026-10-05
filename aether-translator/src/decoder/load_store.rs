@@ -88,6 +88,30 @@ fn decode_simd_ldst_single(word: u32) -> Result<DecodedInsn, DecodeErr> {
             rm,
         });
     }
+    // Single-lane LD1/ST1 (1 register, R=0). opcode 000=B, 010=H, 100=S/D; the
+    // element index is encoded across Q:S:size per element width. bionic's SHA-1
+    // loads the initial state with `ld1 {v.s}[0], [x]`. L=1 LD1, L=0 ST1.
+    if r == 0 && matches!(opcode, 0b000 | 0b010 | 0b100) {
+        // Element-width validity (ARM ARM C4-296): H requires size[0]=0; the
+        // 32-bit (S) form is size=00, the 64-bit (D) form is size=01 with S=0;
+        // size=1x for the S/D opcode is reserved. Reject what capstone rejects.
+        let (esize, lane): (u8, u8) = match opcode {
+            0b000 => (1, ((q << 3) | (s << 2) | size) as u8), // B (index 0..15)
+            0b010 if size & 1 == 0 => (2, ((q << 2) | (s << 1) | (size >> 1)) as u8), // H
+            0b100 if size == 0b00 => (4, ((q << 1) | s) as u8), // S
+            0b100 if size == 0b01 && s == 0 => (8, q as u8),    // D
+            _ => return Err(DecodeErr::Reserved),
+        };
+        return Ok(DecodedInsn::SimdLd1Lane {
+            rt: VReg(rt),
+            rn: Reg(rn),
+            esize,
+            lane,
+            is_load: l == 1,
+            writeback: post_index == 1,
+            rm,
+        });
+    }
     Err(DecodeErr::Unimplemented)
 }
 
@@ -179,8 +203,11 @@ fn decode_unsigned_offset(word: u32) -> Result<DecodedInsn, DecodeErr> {
     let addr = AddrMode::Offset { base: rn, imm };
     Ok(match opc {
         0b00 => DecodedInsn::Str { rt, size: access, addr, is_fp: false },
-        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: false },
-        0b10 | 0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false },
+        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: false, is_64: true },
+        // opc=0b10: LDRS<sz> Xt (sign-extend to 64). opc=0b11: LDRS<sz> Wt
+        // (sign-extend to 32, zero [63:32]). Split so the W-form narrows.
+        0b10 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false, is_64: true },
+        0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false, is_64: false },
         _ => unreachable!(),
     })
 }
@@ -217,8 +244,11 @@ fn decode_immediate_pre_post_unscaled(word: u32) -> Result<DecodedInsn, DecodeEr
     };
     Ok(match opc {
         0b00 => DecodedInsn::Str { rt, size: access, addr, is_fp: false },
-        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: false },
-        0b10 | 0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false },
+        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: false, is_64: true },
+        // opc=0b10: LDRS<sz> Xt (sign-extend to 64). opc=0b11: LDRS<sz> Wt
+        // (sign-extend to 32, zero [63:32]). Split so the W-form narrows.
+        0b10 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false, is_64: true },
+        0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false, is_64: false },
         _ => unreachable!(),
     })
 }
@@ -255,8 +285,11 @@ fn decode_register_offset(word: u32) -> Result<DecodedInsn, DecodeErr> {
     let addr = AddrMode::RegOffset { base: rn, index: rm, extend, shift };
     Ok(match opc {
         0b00 => DecodedInsn::Str { rt, size: access, addr, is_fp: false },
-        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: false },
-        0b10 | 0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false },
+        0b01 => DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: false, is_64: true },
+        // opc=0b10: LDRS<sz> Xt (sign-extend to 64). opc=0b11: LDRS<sz> Wt
+        // (sign-extend to 32, zero [63:32]). Split so the W-form narrows.
+        0b10 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false, is_64: true },
+        0b11 => DecodedInsn::Ldr { rt, size: access, signed: true, addr, is_fp: false, is_64: false },
         _ => unreachable!(),
     })
 }
@@ -282,20 +315,27 @@ fn decode_literal(word: u32) -> Result<DecodedInsn, DecodeErr> {
         return Ok(DecodedInsn::Ldr {
             rt, size: access, signed: false,
             addr: AddrMode::Pcrel { offset: imm },
-            is_fp: true,
+            is_fp: true, is_64: true,
         });
+    }
+    // PRFM (literal): opc=0b11, V=0 — a PC-relative prefetch hint. Like the
+    // register/offset/unsigned PRFM forms above, a prefetch has no architectural
+    // state effect, so decode it as a no-op instead of UD2-ing the block. GCC-
+    // built kernels and bionic emit `prfm <prfop>, <label>` in hot paths.
+    if opc == 0b11 {
+        return Ok(DecodedInsn::Nop);
     }
     let imm = sext32(imm19, 19) << 2;
     let (access, signed) = match opc {
         0b00 => (AccessSize::Word, false),
         0b01 => (AccessSize::DoubleWord, false),
         0b10 => (AccessSize::Word, true), // LDRSW
-        _ => return Err(DecodeErr::Reserved), // 11 = PRFM (literal)
+        _ => unreachable!(), // opc == 0b11 handled above
     };
     Ok(DecodedInsn::Ldr {
         rt, size: access, signed,
         addr: AddrMode::Pcrel { offset: imm },
-        is_fp: false,
+        is_fp: false, is_64: true,
     })
 }
 
@@ -372,7 +412,16 @@ fn decode_pair(word: u32) -> Result<DecodedInsn, DecodeErr> {
         0b10 => (true, false),
         _ => unreachable!(),
     };
-    let scale = if sf { 3 } else { 2 };
+    // Scale imm7 by the ELEMENT size, not the destination-register width. LDP-X
+    // (opc=10) transfers 8-byte elements → scale 3; LDP-W (opc=00) and LDPSW
+    // (opc=01) both transfer 4-byte elements → scale 2. LDPSW's `sf` (64-bit
+    // sign-extended destination) must NOT bump the scale — doing so mis-scaled
+    // every non-zero LDPSW offset (e.g. getmntent_r's `ldpsw x12,x9,[x29,#-0x18]`
+    // became -0x30 instead of -0x18), corrupting the parsed field offsets. That
+    // made e->mnt_dir = buf+0 with the wrong byte NUL'd, so every mnt_dir came
+    // back an empty std::string and switch_root tried to MS_MOVE '' → EINVAL —
+    // the long-standing "switch_root getmntent empty-mnt_dir" userspace gate.
+    let scale = if opc == 0b10 { 3 } else { 2 };
     let imm = sext32(imm7, 7) << scale;
     let addr = match cls {
         0b00 => AddrMode::Offset { base: rn, imm },   // STNP/LDNP
@@ -408,6 +457,26 @@ fn decode_ll_sc_or_cas(word: u32) -> Result<DecodedInsn, DecodeErr> {
             size: access, rs, rt, rn,
             acquire: bit22 != 0, // A is bit 22 in CAS encoding
             release: bit15 != 0, // o0 is bit 15
+        });
+    }
+
+    // CASP family: bit31=0, bits[29:24]=001000, bit23=0, bit21=1, bits[14:10]=11111.
+    // The size field is bit30 ALONE (sz=0 → 32-bit pair / Word; sz=1 → 64-bit
+    // pair / DoubleWord), unlike the 2-bit size used elsewhere — so decode the
+    // element size from bit30 directly. This MUST precede the LL/SC exclusive
+    // branch below: a CASP-64 has the 2-bit `size`=0b01 which that branch's
+    // `pair && size < 0b10` guard would otherwise reject as Reserved (the bug
+    // that left the SLUB cmpxchg_double undecodable → silent freelist double-alloc).
+    if (word & 0xBFA07C00) == 0x08207C00 {
+        let casp_access = if ((word >> 30) & 1) != 0 {
+            AccessSize::DoubleWord
+        } else {
+            AccessSize::Word
+        };
+        return Ok(DecodedInsn::Casp {
+            size: casp_access, rs, rt, rn,
+            acquire: bit22 != 0, // A = bit 22
+            release: bit15 != 0, // o0 = bit 15
         });
     }
 
@@ -489,7 +558,7 @@ fn decode_fp_simd_unsigned(
     let addr = AddrMode::Offset { base: rn, imm };
     // opc bit 0 selects load (1) vs store (0).
     Ok(if opc & 1 != 0 {
-        DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: true }
+        DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: true, is_64: true }
     } else {
         DecodedInsn::Str { rt, size: access, addr, is_fp: true }
     })
@@ -511,7 +580,7 @@ fn decode_fp_simd_imm(
         _ => unreachable!(),
     };
     Ok(if opc & 1 != 0 {
-        DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: true }
+        DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: true, is_64: true }
     } else {
         DecodedInsn::Str { rt, size: access, addr, is_fp: true }
     })
@@ -532,7 +601,7 @@ fn decode_fp_simd_reg_offset(
     let shift = if s != 0 { scale_of(access) as u8 } else { 0 };
     let addr = AddrMode::RegOffset { base: rn, index: rm, extend, shift };
     Ok(if opc & 1 != 0 {
-        DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: true }
+        DecodedInsn::Ldr { rt, size: access, signed: false, addr, is_fp: true, is_64: true }
     } else {
         DecodedInsn::Str { rt, size: access, addr, is_fp: true }
     })

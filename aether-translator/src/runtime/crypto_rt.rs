@@ -144,6 +144,156 @@ pub unsafe extern "C" fn aether_crypto_sha256(ctx: *mut u8, packed: u32) {
     }
 }
 
+// ───────────────────────── SHA-1 (ARMv8 crypto extension) ─────────────────────
+#[inline(always)]
+fn sha1_choose(b: u32, c: u32, d: u32) -> u32 { (b & c) | (!b & d) }
+#[inline(always)]
+fn sha1_parity(b: u32, c: u32, d: u32) -> u32 { b ^ c ^ d }
+#[inline(always)]
+fn sha1_majority(b: u32, c: u32, d: u32) -> u32 { (b & c) | (b & d) | (c & d) }
+
+/// SHA1C/P/M shared 4-round update (ARM ARM `SHA1hash`). `x=[a,b,c,d]`, `y=e`,
+/// `w=[Wt+Kt]×4`. func: 0=choose, 1=parity, 2=majority. Returns the updated `x`
+/// (which `V[d]` receives). Per round: `e += ROL(a,5)+f(b,c,d)+W`; `b=ROL(b,30)`;
+/// then the 160-bit `(e:a:b:c:d)` rotates so `(a,b,c,d,e)=(e,a,b,c,d)`.
+fn sha1hash(mut x: [u32; 4], mut y: u32, w: &[u32; 4], func: u8) -> [u32; 4] {
+    for &wt in w.iter() {
+        let t = match func {
+            0 => sha1_choose(x[1], x[2], x[3]),
+            1 => sha1_parity(x[1], x[2], x[3]),
+            _ => sha1_majority(x[1], x[2], x[3]),
+        };
+        y = y
+            .wrapping_add(x[0].rotate_left(5))
+            .wrapping_add(t)
+            .wrapping_add(wt);
+        x[1] = x[1].rotate_left(30);
+        let nx = [y, x[0], x[1], x[2]];
+        y = x[3];
+        x = nx;
+    }
+    x
+}
+
+/// `SHA1SU0 Vd.4S, Vn.4S, Vm.4S` — `Vd = (Vn<63:0> : Vd<127:64>) EOR Vd EOR Vm`.
+pub fn sha1su0(d: &mut [u32; 4], n: &[u32; 4], m: &[u32; 4]) {
+    let t = [d[2], d[3], n[0], n[1]];
+    for e in 0..4 {
+        d[e] = t[e] ^ d[e] ^ m[e];
+    }
+}
+
+/// `SHA1SU1 Vd.4S, Vn.4S` — `T = Vd EOR LSR(Vn,32)`; `Vd = ROL(T,1)` per lane
+/// with `Vd[3] ^= ROL(T[0],2)`.
+pub fn sha1su1(d: &mut [u32; 4], n: &[u32; 4]) {
+    let t = [d[0] ^ n[1], d[1] ^ n[2], d[2] ^ n[3], d[3]];
+    let mut r = [
+        t[0].rotate_left(1),
+        t[1].rotate_left(1),
+        t[2].rotate_left(1),
+        t[3].rotate_left(1),
+    ];
+    r[3] ^= t[0].rotate_left(2);
+    *d = r;
+}
+
+pub const SHA1_C: u32 = 0;
+pub const SHA1_P: u32 = 1;
+pub const SHA1_M: u32 = 2;
+pub const SHA1_H: u32 = 3;
+pub const SHA1_SU0: u32 = 4;
+pub const SHA1_SU1: u32 = 5;
+
+/// Win64 entry for SHA-1 (mirrors `aether_crypto_sha256`). `packed =
+/// kind | (d<<8) | (n<<16) | (m<<24)`. SHA1C/P/M: `V[d]={a,b,c,d}`,
+/// `V[n]<31:0>=e`, `V[m]=W`. SHA1H: `V[d]=ROL(V[n]<31:0>,30)`.
+///
+/// # Safety
+/// `ctx` must be the guest register-file base (R15); touched vector slots in range.
+pub unsafe extern "C" fn aether_crypto_sha1(ctx: *mut u8, packed: u32) {
+    let kind = packed & 0xFF;
+    let d = ((packed >> 8) & 0xFF) as usize;
+    let n = ((packed >> 16) & 0xFF) as usize;
+    let m = ((packed >> 24) & 0xFF) as usize;
+    unsafe {
+        let mut vd = load4(ctx, d);
+        let vn = load4(ctx, n);
+        match kind {
+            SHA1_C | SHA1_P | SHA1_M => {
+                let vm = load4(ctx, m);
+                vd = sha1hash(vd, vn[0], &vm, kind as u8);
+            }
+            SHA1_H => vd = [vn[0].rotate_left(30), 0, 0, 0],
+            SHA1_SU0 => {
+                let vm = load4(ctx, m);
+                sha1su0(&mut vd, &vn, &vm);
+            }
+            SHA1_SU1 => sha1su1(&mut vd, &vn),
+            _ => {}
+        }
+        store4(ctx, d, vd);
+    }
+}
+
+// ─────────────────────── CRC32 (ISO 3309, ARMv8 CRC32B/H/W/X) ─────────────────
+//
+// The ARMv8 CRC32 (non-`C`) variant uses the ISO-3309 polynomial 0x04C11DB7.
+// x86's SSE4.2 `crc32` instruction is hard-wired to the Castagnoli polynomial
+// (0x1EDC6F41) only, so the ISO variant has NO native x86 instruction and is
+// computed here in software. ARM processes the data LSB-first (the bytes enter
+// the CRC low-byte first), which is the *reflected* form, so we use the reflected
+// polynomial 0xEDB88320 and a reflected (right-shifting) table — identical math
+// to the ubiquitous zlib/PNG CRC32, EXCEPT ARM does NOT pre/post-invert: the
+// CRC32W/X instructions are a raw running CRC over `acc` with no `~`. The kernel
+// uses these for crc32_le-style checksums where it manages any inversion itself.
+//
+// Algorithm (ARM ARM `CRC32` pseudocode, reflected realization):
+//   acc holds the 32-bit running CRC; for each data byte (low-to-high):
+//     acc = (acc >> 8) ^ TABLE[(acc ^ byte) & 0xFF]
+// `size` is the data width in bytes (1/2/4/8 for B/H/W/X).
+
+/// Reflected CRC32 table for the ISO polynomial 0xEDB88320 (= bit-reverse of
+/// 0x04C11DB7), built at compile time.
+const CRC32_ISO_TABLE: [u32; 256] = build_crc32_table(0xEDB8_8320);
+
+const fn build_crc32_table(poly: u32) -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut j = 0;
+        while j < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ poly;
+            } else {
+                crc >>= 1;
+            }
+            j += 1;
+        }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+}
+
+/// ARMv8 `CRC32B/H/W/X` (ISO-3309 poly). `crc` is the running 32-bit accumulator
+/// (the Wn source operand), `data` carries the `size`-byte data operand (Wm or Xm)
+/// in its low bytes, `size` ∈ {1,2,4,8}. Returns the updated 32-bit CRC.
+///
+/// Pure function (no ctx); the lowering passes the accumulator/data in registers
+/// and takes the result in EAX, so this is a plain Win64 leaf call.
+pub extern "C" fn aether_crc32_iso(crc: u32, data: u64, size: u8) -> u32 {
+    let mut acc = crc;
+    let n = size as usize;
+    let mut i = 0usize;
+    while i < n {
+        let byte = ((data >> (i * 8)) & 0xFF) as u8;
+        acc = (acc >> 8) ^ CRC32_ISO_TABLE[((acc ^ byte as u32) & 0xFF) as usize];
+        i += 1;
+    }
+    acc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +449,55 @@ mod tests {
         let mut st = H0;
         reference_block(&mut st, &w16);
         assert_eq!(st, expected, "reference SHA256(abc)");
+    }
+
+    /// Independent bit-serial reference for the ISO-3309 CRC32 (reflected poly
+    /// 0xEDB88320), processing `nbytes` data bytes low-to-high. No pre/post invert
+    /// (matches the raw ARM CRC32 instruction semantics).
+    fn ref_iso(mut crc: u32, data: u64, nbytes: usize) -> u32 {
+        const POLY: u32 = 0xEDB8_8320;
+        for i in 0..nbytes {
+            crc ^= ((data >> (i * 8)) & 0xFF) as u32;
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (POLY & 0u32.wrapping_sub(crc & 1));
+            }
+        }
+        crc
+    }
+
+    /// The table-driven `aether_crc32_iso` must agree with the bit-serial
+    /// reference for every width and a spread of accumulator/data values.
+    #[test]
+    fn crc32_iso_matches_bit_serial_reference() {
+        let cases: &[(u32, u64, u8)] = &[
+            (0x0000_0000, 0xAB, 1),
+            (0x0000_0001, 0xFF, 1),
+            (0xDEAD_BEEF, 0x42, 1),
+            (0x0000_0000, 0xBEEF, 2),
+            (0xFFFF_FFFF, 0x1234, 2),
+            (0x0000_0000, 0xDEAD_BEEF, 4),
+            (0xFFFF_FFFF, 0x1234_5678, 4),
+            (0x0000_0000, 0x0123_4567_89AB_CDEF, 8),
+            (0xCAFE_F00D, 0xFFFF_FFFF_FFFF_FFFF, 8),
+        ];
+        for &(acc, data, size) in cases {
+            let got = aether_crc32_iso(acc, data, size);
+            let want = ref_iso(acc, data, size as usize);
+            assert_eq!(
+                got, want,
+                "aether_crc32_iso(0x{acc:08x}, 0x{data:016x}, {size}) = 0x{got:08x}, want 0x{want:08x}"
+            );
+        }
+    }
+
+    /// CRC32 is incremental: feeding two bytes one at a time (chaining the
+    /// accumulator) equals feeding them as a single 2-byte word, low byte first.
+    #[test]
+    fn crc32_iso_is_incremental() {
+        let b0 = 0x37u8;
+        let b1 = 0xA9u8;
+        let chained = aether_crc32_iso(aether_crc32_iso(0, b0 as u64, 1), b1 as u64, 1);
+        let word = aether_crc32_iso(0, (b0 as u64) | ((b1 as u64) << 8), 2);
+        assert_eq!(chained, word, "byte-chained CRC must equal the 2-byte word CRC");
     }
 }

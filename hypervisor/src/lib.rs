@@ -14,7 +14,7 @@
 // reclaimed only at full hypervisor restart.
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(not(test))]
-mod global_alloc {
+pub mod global_alloc {
     use core::alloc::{GlobalAlloc, Layout};
     use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -67,41 +67,154 @@ mod global_alloc {
     static mut HEAP: AlignedHeap = AlignedHeap([0u8; HEAP_SIZE]);
     static HEAD: AtomicUsize = AtomicUsize::new(0);
 
-    struct BumpAllocator;
+    // ── Leak diagnostics (heap-OOM hunt) ───────────────────────────────────────
+    // The bump pointer never frees, so a per-dispatch/per-fault allocation
+    // anywhere exhausts the arena. These counters + a size histogram, logged in
+    // the [sys] heartbeat, reveal the leak rate and the dominant allocation size.
+    static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+    // Buckets: 0:<64 1:<256 2:<1Ki 3:<4Ki 4:<16Ki 5:<64Ki 6:<256Ki 7:>=256Ki
+    static ALLOC_HIST: [AtomicUsize; 8] = [
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+    ];
 
-    unsafe impl GlobalAlloc for BumpAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let align = layout.align();
-            let size = layout.size();
-            let mut head = HEAD.load(Ordering::Relaxed);
-            loop {
-                let aligned = (head + align - 1) & !(align - 1);
-                let next = match aligned.checked_add(size) {
-                    Some(n) if n <= HEAP_SIZE => n,
-                    _ => return core::ptr::null_mut(),
-                };
-                match HEAD.compare_exchange_weak(
-                    head, next, Ordering::AcqRel, Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        // SAFETY: aligned < HEAP_SIZE; pointer into the
-                        // static buffer is valid for `size` bytes.
-                        return unsafe {
-                            (core::ptr::addr_of_mut!(HEAP) as *mut u8).add(aligned)
-                        };
-                    }
-                    Err(observed) => head = observed,
-                }
+    #[inline]
+    fn size_bucket(size: usize) -> usize {
+        match size {
+            0..=63 => 0, 64..=255 => 1, 256..=1023 => 2, 1024..=4095 => 3,
+            4096..=16383 => 4, 16384..=65535 => 5, 65536..=262143 => 6, _ => 7,
+        }
+    }
+
+    /// Total bytes bumped (== total leaked, since dealloc is a no-op).
+    pub fn heap_used() -> usize { HEAD.load(Ordering::Relaxed) }
+    /// Total number of allocations served.
+    pub fn alloc_count() -> usize { ALLOC_COUNT.load(Ordering::Relaxed) }
+    /// Allocation count in size bucket `i` (0..8); see `size_bucket`.
+    pub fn alloc_hist(i: usize) -> usize {
+        if i < 8 { ALLOC_HIST[i].load(Ordering::Relaxed) } else { 0 }
+    }
+
+    // ── Size-segregated free lists (THE leak fix) ──────────────────────────────
+    // The old allocator's `dealloc` was a no-op, so every transient Vec/Box/
+    // realloc-old-buffer leaked permanently and exhausted the 1.5 GiB arena mid-
+    // boot (deterministic OOM at ~470M dispatches). Now allocations with align
+    // ≤ 16 and size ≤ 512 KiB are pooled: `dealloc` pushes the block onto its
+    // size class's free list and `alloc` reuses it, so transient churn no longer
+    // grows `HEAD`. Larger or over-aligned allocations (JIT cache, block-cache
+    // table, page tables — all long-lived) still bump and are never freed, which
+    // is correct since they live for the whole run.
+    const NUM_CLASSES: usize = 16; // class i: blocks of (16 << i) bytes → 16 B … 512 KiB
+    static FREE_LIST: [AtomicUsize; NUM_CLASSES] = [
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+        AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+    ];
+    static LOCK: AtomicUsize = AtomicUsize::new(0);
+
+    #[inline]
+    fn lock() {
+        while LOCK
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+    }
+    #[inline]
+    fn unlock() {
+        LOCK.store(0, Ordering::Release);
+    }
+
+    /// Smallest class index whose block `(16 << i)` is ≥ `need`, or None if
+    /// `need` exceeds the largest class (512 KiB).
+    #[inline]
+    fn class_for(need: usize) -> Option<usize> {
+        let mut c = 0usize;
+        let mut sz = 16usize;
+        while c < NUM_CLASSES {
+            if sz >= need {
+                return Some(c);
             }
+            sz <<= 1;
+            c += 1;
+        }
+        None
+    }
+
+    /// Bump `size` bytes at `align` off the arena. Caller holds `LOCK`.
+    #[inline]
+    unsafe fn bump(size: usize, align: usize) -> *mut u8 {
+        let head = HEAD.load(Ordering::Relaxed);
+        let aligned = (head + align - 1) & !(align - 1);
+        let next = match aligned.checked_add(size) {
+            Some(n) if n <= HEAP_SIZE => n,
+            _ => return core::ptr::null_mut(),
+        };
+        HEAD.store(next, Ordering::Relaxed);
+        // SAFETY: aligned + size ≤ HEAP_SIZE → in-bounds of the static buffer.
+        unsafe { (core::ptr::addr_of_mut!(HEAP) as *mut u8).add(aligned) }
+    }
+
+    struct ArenaAllocator;
+
+    unsafe impl GlobalAlloc for ArenaAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let size = layout.size();
+            let align = layout.align();
+            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOC_HIST[size_bucket(size)].fetch_add(1, Ordering::Relaxed);
+            lock();
+            let p = if align <= 16 {
+                match class_for(size.max(16)) {
+                    Some(c) => {
+                        let head = FREE_LIST[c].load(Ordering::Relaxed);
+                        if head != 0 {
+                            // Pop: the freed block's first word holds the next ptr.
+                            // SAFETY: `head` is a live freed block ≥ 16 B from this
+                            // arena (only such pointers are ever pushed below).
+                            let next = unsafe { *(head as *const usize) };
+                            FREE_LIST[c].store(next, Ordering::Relaxed);
+                            head as *mut u8
+                        } else {
+                            // SAFETY: lock held; class blocks are 16-aligned.
+                            unsafe { bump(16usize << c, 16) }
+                        }
+                    }
+                    // Oversized (>512 KiB), align ≤ 16: bump, no reuse.
+                    None => unsafe { bump(size, 16) },
+                }
+            } else {
+                // Over-aligned (e.g. 4 KiB page tables): bump exact, no reuse.
+                unsafe { bump(size, align) }
+            };
+            unlock();
+            p
         }
 
-        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-            // Bump arena: dealloc is a no-op. See module docs.
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            if ptr.is_null() || layout.align() > 16 {
+                return; // over-aligned blocks are not pooled (rare, long-lived)
+            }
+            if let Some(c) = class_for(layout.size().max(16)) {
+                lock();
+                let head = FREE_LIST[c].load(Ordering::Relaxed);
+                // SAFETY: `ptr` is a block ≥ 16 B handed out by `alloc`; writing
+                // an 8-byte next ptr into its first word is in-bounds.
+                unsafe {
+                    *(ptr as *mut usize) = head;
+                }
+                FREE_LIST[c].store(ptr as usize, Ordering::Relaxed);
+                unlock();
+            }
+            // Oversized (>512 KiB): not pooled — these are the long-lived JIT
+            // cache / block-cache table, never freed in practice.
         }
     }
 
     #[global_allocator]
-    static GLOBAL: BumpAllocator = BumpAllocator;
+    static GLOBAL: ArenaAllocator = ArenaAllocator;
 }
 
 // AETHER hypervisor — core library

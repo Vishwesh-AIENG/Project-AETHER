@@ -59,14 +59,33 @@ pub const SLOT_PEND_ESR: usize = 58;
 /// `SCTLR_EL1.M` — MMU enable bit.
 const SCTLR_M: u64 = 1 << 0;
 
+/// Master compile-time switch for the per-access diagnostic / capture machinery
+/// (the store-VALUE watch, PTE-slot watches, vmemmap + eBPF store/load trackers,
+/// the deferred-xlate-write read-back, and the post-store read-back verification).
+///
+/// These were debugging instruments for past blockers. Each runs on EVERY guest
+/// load / store / fetch — even when disarmed they cost a static load + compare
+/// (and the trackers a function call) per access, which on a multi-hour Android
+/// boot (billions of memory accesses) is pure overhead. Gating them behind this
+/// `const false` lets the optimizer drop the entire block (dead-code elimination)
+/// so the production hot path pays nothing. Flip to `true` (or wire a feature)
+/// to re-arm them for a diagnostic boot.
+///
+/// CORRECTNESS: every gated block is observation-only (writes to EL2-private
+/// diagnostic statics, never to guest RAM or the fault ABI), so disabling them
+/// is semantics-preserving for the guest. The one exception — the post-store
+/// read-back, which the prior code used purely to record a MISMATCH trace entry
+/// — likewise has no effect on guest-visible state, so it is gated too.
+pub const MMU_DIAG: bool = false;
+
 /// Descriptor / TTBR address field mask: output address bits [47:12].
 const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 
 /// Sentinel returned by [`aether_mmu_xlate`] on a fault. Guest RAM in the
-/// handoff window starts well above 0 (`STAGED_BOOT_IMG_PA == 0x8000_0000`), so
-/// host PA 0 is never a valid translation here and is unambiguous as "faulted".
-/// (The PA-window clamp below makes this airtight: an in-window PA is provably
-/// never 0.)
+/// handoff window starts well above 0 (`GUEST_PA_BASE == 0x1_0000_0000`, the
+/// relocated 4 GiB window), so host PA 0 is never a valid translation here and
+/// is unambiguous as "faulted". (The PA-window clamp below makes this airtight:
+/// an in-window PA is provably never 0.)
 pub const XLATE_FAULT: u64 = 0;
 
 // ── Guest physical window (No-Boundary confinement) ──────────────────────────
@@ -81,14 +100,20 @@ pub const XLATE_FAULT: u64 = 0;
 // bases AND leaf output) to the handoff window; anything outside is reflected
 // to the guest as a translation fault, never dereferenced.
 //
-// Defaults mirror `android_handoff::{STAGED_BOOT_IMG_PA, HANDOFF_REGION_SIZE}`
-// (the hypervisor cross-checks these at compile time — see android_handoff.rs).
-// Settable so the hypervisor can pin the exact mapped span and tests can scope
-// their host-allocated page tables.
-/// Default guest-PA window base (== `STAGED_BOOT_IMG_PA`).
-pub const GUEST_PA_BASE: u64 = 0x8000_0000;
-/// Default guest-PA window size (== `HANDOFF_REGION_SIZE`, 1 GiB).
-pub const GUEST_PA_SIZE: u64 = 0x4000_0000;
+// RELOCATED guest DRAM. The window was moved off the old <4 GiB region (carved
+// from a UEFI AllocatePages span that interleaved firmware holes, capping usable
+// RAM at ~562 MiB) to [4 GiB, 8 GiB) — raw `-m 16G` high-RAM, contiguous and
+// hole-free (the same class of memory the PMEM images + JIT cache occupy). The
+// hypervisor installs four 1-GiB host-CR3 identity leaves for it and copies the
+// boot.img up from the low ESP scratch (boot_x86.rs). Mirrors
+// `android_handoff::HANDOFF_REGION_SIZE` (4 GiB). Settable so the hypervisor can
+// pin the exact mapped span and tests can scope their host-allocated page tables.
+/// Default guest-PA window base (4 GiB — relocated; matches `GUEST_PA_BASE`
+/// installed in the host CR3 by `boot_x86::host_pt_map_identity_1g`).
+pub const GUEST_PA_BASE: u64 = 0x1_0000_0000;
+/// Default guest-PA window size (4 GiB == `HANDOFF_REGION_SIZE`, exactly filling
+/// [4 GiB, 8 GiB) below the translator JIT cache at 8 GiB).
+pub const GUEST_PA_SIZE: u64 = 0x1_0000_0000;
 
 static mut WIN_BASE: u64 = GUEST_PA_BASE;
 static mut WIN_SIZE: u64 = GUEST_PA_SIZE;
@@ -253,6 +278,15 @@ fn flush_scatter() {
         let n1 = *core::ptr::addr_of!(SCATTER_N1);
         let pa2 = *core::ptr::addr_of!(SCATTER_PA2);
         let n2 = *core::ptr::addr_of!(SCATTER_N2);
+        // [wstore] catch a scatter whose range overwrites the watched PTE slot
+        // (this is a non-aether_mmu_store write path that the PTE watch misses).
+        let wpa = *core::ptr::addr_of!(WATCH_PA);
+        if wpa != 0
+            && ((wpa >= pa1 && wpa < pa1 + n1) || (wpa >= pa2 && wpa < pa2 + n2))
+        {
+            *core::ptr::addr_of_mut!(WATCH_SCATTER_HITS) =
+                (*core::ptr::addr_of!(WATCH_SCATTER_HITS)).saturating_add(1);
+        }
         core::ptr::copy_nonoverlapping(src, pa1 as *mut u8, n1 as usize);
         core::ptr::copy_nonoverlapping(src.add(n1 as usize), pa2 as *mut u8, n2 as usize);
     }
@@ -286,6 +320,24 @@ pub static mut VMM_TRACE_KIND: [u8; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
 /// combined with the VA in the same entry, the source-level write site
 /// is uniquely identified.
 pub static mut LAST_GUEST_PC: u64 = 0;
+
+/// Per-INSTRUCTION PC stamp (set by the `StampFaultPc` op the lifter emits before
+/// every instruction). Unlike LAST_GUEST_PC (per-block, skipped for chained
+/// blocks), this is the EXACT instruction executing — so a memory fault records
+/// the precise faulting instruction's PC.
+pub static mut FAULT_OP_PC: u64 = 0;
+
+/// Store-VALUE watch: boot_x86 sets `SV_WATCH` to the corrupted code pointer
+/// (init's bad resume PC, 0x7ce8274c08, masked low 56 bits). When any STORE
+/// writes that value, record a ring of (FAULT_OP_PC, store-addr, value, x30) —
+/// the instruction that wrote the bad pointer + how it was formed.
+pub static mut SV_WATCH: u64 = 0;
+pub static mut SV_WATCH_HITS: u64 = 0;
+pub static mut SV_WATCH_IDX: u64 = 0;
+pub static mut SV_WATCH_PC: [u64; 8] = [0; 8];
+pub static mut SV_WATCH_ADDR: [u64; 8] = [0; 8];
+pub static mut SV_WATCH_VAL: [u64; 8] = [0; 8];
+pub static mut SV_WATCH_X30: [u64; 8] = [0; 8];
 
 pub static mut VMM_TRACE_PC: [u64; VMM_TRACE_CAP] = [0; VMM_TRACE_CAP];
 /// Monotonic counter — `(idx % CAP)` is the next slot. Lets the dumper
@@ -666,6 +718,41 @@ fn mmio_dispatch(addr: u64, size: u64, is_write: bool, value: u64) -> u64 {
     }
 }
 
+/// `TCR_EL1.TBI0` — top-byte-ignore for the TTBR0 (low-VA) regime (bit 37).
+const TCR_TBI0: u64 = 1 << 37;
+/// `TCR_EL1.TBI1` — top-byte-ignore for the TTBR1 (high-VA) regime (bit 38).
+const TCR_TBI1: u64 = 1 << 38;
+
+/// Normalise a guest VA to its architectural translation form under Top-Byte-
+/// Ignore (TBI). ARM64 TBI (`TCR_EL1.TBI0`/`TBI1`) makes the CPU IGNORE bits
+/// [63:56] of a VA for translation, so a tagged pointer (e.g. Scudo's `0xb4..`
+/// heap tags) and its untagged form MUST resolve to the SAME page. Android runs
+/// with TBI0=1 (userspace MTE/Scudo tagging); the kernel commonly sets TBI1 too.
+///
+/// On real hardware the hardware table-walker strips the tag transparently and
+/// FAR_EL1 reports the *tagged* address back. Our software walker and software
+/// TLB key off the raw VA, so without this a tagged access and its untagged twin
+/// land in different TLB slots and may diverge on permission/translation — the
+/// intermittent tagged-pointer `SEGV_ACCERR` signature. We therefore strip the
+/// tag here for translation AND for the TLB key. (FAR for injection is masked at
+/// the same point in `aether_mmu_xlate` so the kernel's own un-tag matches.)
+///
+/// Bit 55 — the TTBR0/TTBR1 selector — is PRESERVED (only [63:56] are cleared),
+/// so regime selection downstream is unaffected. When the relevant TBI bit is 0
+/// the VA is returned unchanged (architectural top-byte is significant then).
+#[inline]
+fn tbi_mask_va(sysregs: &[u64], va: u64) -> u64 {
+    let tcr = sysregs[SYSREG_SLOT0 + SLOT_TCR];
+    let va_high = (va >> 55) & 1 == 1;
+    let tbi = if va_high { tcr & TCR_TBI1 != 0 } else { tcr & TCR_TBI0 != 0 };
+    if tbi {
+        // Clear bits [63:56]; keep bit 55 (regime selector) and [54:0] intact.
+        va & 0x00FF_FFFF_FFFF_FFFF
+    } else {
+        va
+    }
+}
+
 /// Derive the stage-1 start level from `TCR_EL1` for the selected regime.
 ///
 /// Returns `None` for a non-4 KiB granule (unsupported in 2a — reject loudly).
@@ -790,12 +877,33 @@ fn pa_hit_check(va: u64, pa: u64) {
 
 #[allow(unsafe_code)]
 pub fn walk(sysregs: &[u64], va: u64, is_write: bool) -> Result<(u64, bool), (FaultKind, u8)> {
+    // TBI: strip the ignored top byte so a tagged VA resolves like its untagged
+    // form. Bit 55 (regime selector) survives the mask.
+    let va = tbi_mask_va(sysregs, va);
     let va_high = (va >> 55) & 1 == 1;
     let ttbr = if va_high {
         sysregs[SYSREG_SLOT0 + SLOT_TTBR1]
     } else {
         sysregs[SYSREG_SLOT0 + SLOT_TTBR0]
     };
+    walk_from_ttbr(sysregs, va, is_write, ttbr)
+}
+
+/// Page-table walk with an explicit translation base. `walk` resolves the base
+/// from `va`'s high bit; this variant lets the KPTI kernel-pgd fallback retry a
+/// high-VA walk against `swapper_pg_dir` when `TTBR1_EL1` still holds the
+/// trampoline pgd (`tramp_pg_dir`). `tcr` / start-level are still read from
+/// `sysregs` — only the table root is overridden.
+#[allow(unsafe_code)]
+pub fn walk_from_ttbr(
+    sysregs: &[u64],
+    va: u64,
+    is_write: bool,
+    ttbr: u64,
+) -> Result<(u64, bool), (FaultKind, u8)> {
+    // TBI: strip the ignored top byte (idempotent if `walk` already did).
+    let va = tbi_mask_va(sysregs, va);
+    let va_high = (va >> 55) & 1 == 1;
     let tcr = sysregs[SYSREG_SLOT0 + SLOT_TCR];
     // Start level + granule from TCR_EL1 (must-fix #1: real GKI is 39-bit VA /
     // 3-level / start L1, not the old hardcoded 48-bit / 4-level / start L0).
@@ -1018,8 +1126,13 @@ fn finish_leaf(
     if desc & (1 << 10) == 0 {
         return Err((FaultKind::AccessFlag, level));
     }
-    // AP[2] (bit 7): 0 = read/write, 1 = read-only.
-    let writable = desc & (1 << 7) == 0;
+    // AP[2] (bit 7): 0 = read/write, 1 = read-only. B34: with hardware dirty-bit
+    // management (HAFDBS, TCR_EL1.HD=1) a leaf with DBM=1 (bit 51) and AP[2]=1 is
+    // a CLEAN-but-WRITABLE page — the first write must set dirty in hardware, not
+    // fault. Treat DBM=1 as writable so the first write to such a page doesn't
+    // spuriously Permission-fault. (When the kernel leaves TCR.HD=0, DBM is RES0,
+    // so this is a no-op.)
+    let writable = desc & (1 << 7) == 0 || desc & (1u64 << 51) != 0;
     if is_write && !writable {
         return Err((FaultKind::Permission, level));
     }
@@ -1057,6 +1170,14 @@ const TLB_EMPTY: u64 = u64::MAX;
 static mut TLB_TAG: [u64; TLB_ENTRIES] = [TLB_EMPTY; TLB_ENTRIES];
 static mut TLB_PA: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
 static mut TLB_W: [bool; TLB_ENTRIES] = [false; TLB_ENTRIES];
+/// Per-entry address-space tag for TTBR0 (low-VA) cached translations: the full
+/// `TTBR0_EL1` value (page-table base + ASID) live at fill time. A low-VA lookup
+/// hits only when this matches the CURRENT `TTBR0_EL1`, so a FORKED child (which
+/// the kernel installs by writing a different `TTBR0_EL1` baddr) can never hit a
+/// stale entry left by the parent — even if the flush-on-TTBR0-write contract
+/// were ever missed. (High-VA / TTBR1 entries are never cached, so no tag there.)
+/// This is the signal-11 "software-TLB staleness on forked TTBR0 pages" guard.
+static mut TLB_ASID: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
 
 /// Invalidate the entire software TLB. Called on MSR to TTBR0/1_EL1, TCR_EL1,
 /// MAIR_EL1 and on broad TLBI (VMALLE1/ALLE1).
@@ -1164,6 +1285,11 @@ fn spurious_zero_pa() -> u64 {
 /// that, the fetch path ([`aether_mmu_fetch_pa`]).
 #[allow(unsafe_code)]
 fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u8)> {
+    // TBI: key the software TLB on the architectural (untagged) VA so a tagged
+    // access (Scudo `0xb4..`) and its untagged twin share one entry, and the
+    // KPTI fast-path's TTBR1==tramp test sees the canonical address. The inner
+    // walk masks again (idempotent); doing it here makes the TLB key correct.
+    let va = tbi_mask_va(sysregs, va);
     let page = va >> 12;
     let idx = (page as usize) & (TLB_ENTRIES - 1);
     // Phase-E correctness: TLB cache DISABLED for kernel high-VA (TTBR1)
@@ -1182,18 +1308,54 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
     // dominate the early dispatch hot path benefit from the cache and the
     // kernel never rewrites them.
     let va_high = (va >> 63) & 1 == 1;
+    // Address-space tag for the low-VA (TTBR0) cache: the live TTBR0_EL1. A
+    // forked child runs with a DIFFERENT TTBR0 base, so tagging each cached
+    // low-VA entry with it prevents a child from hitting the parent's stale
+    // translation (the signal-11 forked-process staleness guard). Read once.
+    let ttbr0 = sysregs[SYSREG_SLOT0 + SLOT_TTBR0];
     if !va_high {
         // SAFETY: EL2-private, single-vCPU.
         unsafe {
             if *core::ptr::addr_of!(TLB_TAG[idx]) == page
+                && *core::ptr::addr_of!(TLB_ASID[idx]) == ttbr0
                 && (!is_w || *core::ptr::addr_of!(TLB_W[idx]))
             {
                 return Ok(*core::ptr::addr_of!(TLB_PA[idx]) | (va & 0xFFF));
             }
         }
     }
-    match walk(sysregs, va, is_w) {
+    // KPTI fast-path. Post-mount the kernel runs at EL1 with the trampoline pgd
+    // (tramp_pg_dir) because the exit trampoline (tramp_unmap_kernel) sets it
+    // before ERET and the entry switch is skipped — so EVERY kernel high-VA
+    // access would walk-fail on tramp then re-walk swapper in the Err fallback
+    // (2 walks, ~72M times). When the live TTBR1 is EXACTLY the proven trampoline
+    // base (snapshot - 0x2000), walk swapper directly: vmalloc / vmap stacks /
+    // linear map / kimg live only there. Restricted to the exact proven tramp so
+    // early-boot transient pgds (idmap / create_kpti_ng_temp_pgd) are untouched.
+    let primary = if va_high {
+        let cur = sysregs[SYSREG_SLOT0 + SLOT_TTBR1] & ADDR_MASK;
+        // SAFETY: EL2-private, single-vCPU.
+        let snap = unsafe { *core::ptr::addr_of!(KERNEL_PGD_SNAPSHOT) };
+        if snap != 0 && cur == snap.wrapping_sub(0x2000) {
+            // SAFETY: EL2-private, single-vCPU.
+            unsafe {
+                *core::ptr::addr_of_mut!(MMU_KPTI_FALLBACK_HITS) =
+                    (*core::ptr::addr_of!(MMU_KPTI_FALLBACK_HITS)).saturating_add(1);
+            }
+            walk_from_ttbr(sysregs, va, is_w, snap)
+        } else {
+            walk(sysregs, va, is_w)
+        }
+    } else {
+        walk(sysregs, va, is_w)
+    };
+    match primary {
         Ok((pa, writable)) => {
+            // NOTE: deliberately do NOT snapshot TTBR1 on a plain successful
+            // high-VA walk — early boot resolves vmalloc VAs through transient
+            // pgds (idmap / create_kpti_ng_temp_pgd) too, and snapshotting those
+            // would poison KERNEL_PGD_SNAPSHOT. The snapshot is set ONLY from the
+            // Err-branch differential resolve below, which PROVES tramp↔swapper.
             // Only cache low (TTBR0) VAs — see top-of-fn rationale.
             if !va_high {
                 // SAFETY: EL2-private, single-vCPU.
@@ -1201,6 +1363,7 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
                     *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
                     *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
                     *core::ptr::addr_of_mut!(TLB_W[idx]) = writable;
+                    *core::ptr::addr_of_mut!(TLB_ASID[idx]) = ttbr0;
                 }
             }
             Ok(pa)
@@ -1237,12 +1400,54 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
                             *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
                             *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
                             *core::ptr::addr_of_mut!(TLB_W[idx]) = true;
+                            *core::ptr::addr_of_mut!(TLB_ASID[idx]) = ttbr0;
                         }
                         *core::ptr::addr_of_mut!(MMU_KIMG_FALLBACK_HITS) =
                             (*core::ptr::addr_of!(MMU_KIMG_FALLBACK_HITS))
                                 .saturating_add(1);
                     }
                     return Ok(pa);
+                }
+            }
+            // KPTI kernel-pgd fallback (ONLY on a walk miss — never pre-empts a
+            // successful live-TTBR1 walk, so early-boot transient pgds — idmap /
+            // create_kpti_ng_temp_pgd — keep their correct, possibly-faulting
+            // results). The guest is running kernel code but TTBR1_EL1 still holds
+            // the KPTI trampoline pgd (tramp_pg_dir, which maps no vmalloc / no
+            // vmap kernel stack) because the DBT skips the entry trampoline that
+            // would run tramp_map_kernel. swapper_pg_dir = tramp_pg_dir + 0x2000
+            // (arm64 linker: tramp,reserved,swapper are consecutive PAGE_SIZE
+            // pgds; confirmed live 0x614ff000 = 0x614fd000 + 0x2000). Retry the
+            // high-VA walk against the swapper snapshot from a prior known-good
+            // vmalloc resolve; if none yet, bootstrap with the +0x2000 offset.
+            // Only RETURNS on a genuine in-window resolve, so a real fault (TTBR1
+            // already == swapper, or a genuinely unmapped page) still propagates.
+            if va_high {
+                let cur = sysregs[SYSREG_SLOT0 + SLOT_TTBR1] & ADDR_MASK;
+                // SAFETY: EL2-private, single-vCPU.
+                let snap = unsafe { *core::ptr::addr_of!(KERNEL_PGD_SNAPSHOT) };
+                let kpgd = if snap != 0 && snap != cur {
+                    snap
+                } else if snap == 0 {
+                    cur.wrapping_add(0x2000)
+                } else {
+                    0 // snap == cur → current already swapper → genuine fault
+                };
+                if kpgd != 0 && kpgd != cur && in_window(kpgd) {
+                    if let Ok((pa, _)) = walk_from_ttbr(sysregs, va, is_w, kpgd) {
+                        if in_window(pa) {
+                            // SAFETY: EL2-private, single-vCPU.
+                            unsafe {
+                                *core::ptr::addr_of_mut!(KERNEL_PGD_SNAPSHOT) = kpgd;
+                                *core::ptr::addr_of_mut!(MMU_FB_CUR) = cur;
+                                *core::ptr::addr_of_mut!(MMU_FB_KPGD) = kpgd;
+                                *core::ptr::addr_of_mut!(MMU_KPTI_FALLBACK_HITS) =
+                                    (*core::ptr::addr_of!(MMU_KPTI_FALLBACK_HITS))
+                                        .saturating_add(1);
+                            }
+                            return Ok(pa);
+                        }
+                    }
                 }
             }
             // Phase-E: spurious-fake-zero fallback REMOVED in favour of
@@ -1280,6 +1485,156 @@ pub static mut KIMG_VA_BASE: u64 = 0;
 pub static mut KIMG_PA_BASE: u64 = 0;
 pub static mut KIMG_SPAN_SIZE: u64 = 0;
 pub static mut MMU_KIMG_FALLBACK_HITS: u64 = 0;
+
+/// KPTI kernel-pgd (`swapper_pg_dir`) recovered from a successful vmalloc walk.
+/// Used to retry high-VA walks that fault because `TTBR1_EL1` still holds the
+/// trampoline pgd (`tramp_pg_dir`). 0 = not yet observed (bootstrap with +0x2000).
+pub static mut KERNEL_PGD_SNAPSHOT: u64 = 0;
+/// Count of faults rescued by the KPTI kernel-pgd fallback (telemetry).
+pub static mut MMU_KPTI_FALLBACK_HITS: u64 = 0;
+/// First EL1-source user-VA fault with a user SP_EL0 — the exact faulting
+/// (block PC, VA, SP_EL0, ESR) that triggers the enter_from_kernel_mode loop.
+pub static mut OFLTW_LATCH: u64 = 0;
+pub static mut OFLTW_PC: u64 = 0;
+pub static mut OFLTW_FAR: u64 = 0;
+pub static mut OFLTW_SP0: u64 = 0;
+pub static mut OFLTW_ESR: u64 = 0;
+pub static mut OFLTW_SP1: u64 = 0;
+pub static mut OFLTW_SPACT: u64 = 0;
+
+// EL0-source user-VA fault capture (LAST one wins). The init crash is an EL0
+// (curEL=0) SIGSEGV — the OFLTW latch above only catches EL1-source faults, so
+// this records the faulting EL0 PC + low GPRs of the most recent userspace fault.
+// At the PSCI reset (init death), these hold init's fatal dereference: the bad
+// pointer register + the block that computed it, for disassembly.
+pub static mut EL0FLT_PC: u64 = 0;
+pub static mut EL0FLT_FAR: u64 = 0;
+pub static mut EL0FLT_ESR: u64 = 0;
+pub static mut EL0FLT_X30: u64 = 0;
+pub static mut EL0FLT_HITS: u64 = 0;
+pub static mut EL0FLT_X: [u64; 31] = [0; 31];
+/// One-shot latch target: boot_x86 sets this to the deterministic init crash
+/// FAR (0x7ce8274c08). When a curEL=0 fault hits EXACTLY this address, capture
+/// the full GPR file (x0-x30) once — the bad-pointer register + how it was
+/// computed, for the upstream-corruption hunt. 0 = disabled (last-wins only).
+pub static mut EL0FLT_WATCH: u64 = 0;
+pub static mut EL0FLT_W_LATCH: u64 = 0;
+pub static mut EL0FLT_W_PC: u64 = 0;
+/// The actually-executing block entry PC (LAST_GUEST_PC, stamped per-block) at
+/// fault time — reliable unlike ctx[32] (the lazily-updated guest-visible PC).
+pub static mut EL0FLT_W_LGPC: u64 = 0;
+/// FAULT_OP_PC at fault time — the EXACT faulting instruction PC.
+pub static mut EL0FLT_W_OPPC: u64 = 0;
+pub static mut EL0FLT_W_INSN: u64 = 0;
+/// ELR_EL1 / SPSR_EL1 / real ESR at the captured fault, + whether the fault was
+/// taken inside the SVC diagnostic-probe window (B19). A probe fault is cleared
+/// by the PEND-snapshot restore and is NOT init's real death — so the watch
+/// latch ignores probe faults (only real EL0 deaths are captured).
+pub static mut EL0FLT_W_ELR: u64 = 0;
+pub static mut EL0FLT_W_SPSR: u64 = 0;
+pub static mut EL0FLT_W_ESR2: u64 = 0;
+/// Set to 1 by exceptions.rs across the SVC diagnostic-probe window.
+pub static mut IN_DIAG_PROBE: u32 = 0;
+/// Host call stack at the watched fault — the return-address chain identifies
+/// WHO called aether_mmu_xlate(0x7ce8274c08): a JIT lifted-code address (JIT
+/// cache range) means a guest memop; hypervisor .text addresses mean a runtime
+/// helper / the dispatch loop. The definitive "who".
+pub static mut EL0FLT_W_RSP: u64 = 0;
+pub static mut EL0FLT_W_STK: [u64; 48] = [0; 48];
+/// 32 ARM64 opcode words read forward from the block-start PC, so the faulting
+/// load (block PC is stamped per-block, not per-insn) can be disassembled.
+pub static mut EL0FLT_W_BLK: [u64; 32] = [0; 32];
+pub static mut EL0FLT_W_X: [u64; 31] = [0; 31];
+
+// ── ASLR-proof keystore2 SIGSEGV detector ─────────────────────────────────
+// A benign demand-page fault resolves once (the kernel maps the page, never
+// re-faults). A real userspace SIGSEGV is a DETERMINISTIC fault the kernel
+// CANNOT resolve — keystore2 crashes, the init/zygote path restarts it, and it
+// re-faults at the IDENTICAL (PC, FAR). So instead of latching on a hardcoded
+// FAR (which ASLR varies every boot), we track a tiny FIFO of the last
+// `EL0FLT_FIFO_N` distinct `(el0 faulting PC, FAR)` pairs each with a repeat
+// counter, and latch into EL0FLT_W_* when any pair re-faults
+// `EL0FLT_REFAULT_THRESHOLD` times. No heap (no_std): fixed `static mut` arrays.
+pub const EL0FLT_FIFO_N: usize = 8;
+/// Re-fault count (same PC+FAR) that flips the latch. >=2 distinguishes a
+/// deterministic SIGSEGV (re-faults at the identical PC+FAR every crash/restart)
+/// from a one-shot demand page (count 1). Lowered 4→2 so keystore2 is captured at
+/// its 2nd crash (~t3100) — the machine-shutdown interruptions kill the boot before
+/// a 4th re-fault (~t4900) is reached.
+pub const EL0FLT_REFAULT_THRESHOLD: u32 = 2;
+/// Known benign first-fault FAR — a kernel `clear_user`/demand-page that always
+/// resolves. Excluded explicitly so it can never win the re-fault race.
+pub const EL0FLT_BENIGN_FAR: u64 = 0x0050_2558;
+/// Faulting block PC for each tracked pair (0 = empty slot).
+pub static mut EL0FLT_FIFO_PC: [u64; EL0FLT_FIFO_N] = [0; EL0FLT_FIFO_N];
+/// FAR for each tracked pair.
+pub static mut EL0FLT_FIFO_FAR: [u64; EL0FLT_FIFO_N] = [0; EL0FLT_FIFO_N];
+/// Repeat counter for each pair (how many times this exact PC+FAR re-faulted).
+pub static mut EL0FLT_FIFO_CNT: [u32; EL0FLT_FIFO_N] = [0; EL0FLT_FIFO_N];
+/// Next slot to overwrite when the FIFO is full (round-robin eviction).
+pub static mut EL0FLT_FIFO_HEAD: usize = 0;
+
+/// Record a `cur_el==0` user fault `(pc, far)` in the re-fault FIFO and return
+/// `true` once the matching pair reaches [`EL0FLT_REFAULT_THRESHOLD`] re-faults
+/// — the signature of a deterministic userspace SIGSEGV (e.g. keystore2). The
+/// known-benign demand-page FAR is ignored so it can't race ahead.
+#[allow(unsafe_code)]
+fn el0flt_fifo_bump(pc: u64, far: u64) -> bool {
+    if far == EL0FLT_BENIGN_FAR {
+        return false;
+    }
+    // SAFETY: EL2-private, single-vCPU; fixed-size arrays indexed in range.
+    unsafe {
+        let pcs = core::ptr::addr_of_mut!(EL0FLT_FIFO_PC);
+        let fars = core::ptr::addr_of_mut!(EL0FLT_FIFO_FAR);
+        let cnts = core::ptr::addr_of_mut!(EL0FLT_FIFO_CNT);
+        // Existing pair → bump its counter.
+        let mut i = 0usize;
+        while i < EL0FLT_FIFO_N {
+            if (*pcs)[i] == pc && (*fars)[i] == far && ((*pcs)[i] != 0 || (*fars)[i] != 0) {
+                let c = (*cnts)[i].saturating_add(1);
+                (*cnts)[i] = c;
+                return c >= EL0FLT_REFAULT_THRESHOLD;
+            }
+            i += 1;
+        }
+        // New pair: prefer an empty slot, else evict round-robin (FIFO head).
+        let mut slot = EL0FLT_FIFO_N;
+        let mut j = 0usize;
+        while j < EL0FLT_FIFO_N {
+            if (*pcs)[j] == 0 && (*fars)[j] == 0 {
+                slot = j;
+                break;
+            }
+            j += 1;
+        }
+        if slot == EL0FLT_FIFO_N {
+            let head = *core::ptr::addr_of!(EL0FLT_FIFO_HEAD) % EL0FLT_FIFO_N;
+            slot = head;
+            *core::ptr::addr_of_mut!(EL0FLT_FIFO_HEAD) = (head + 1) % EL0FLT_FIFO_N;
+        }
+        (*pcs)[slot] = pc;
+        (*fars)[slot] = far;
+        (*cnts)[slot] = 1;
+        // Threshold of 1 would be pathological; first sighting never latches.
+        1 >= EL0FLT_REFAULT_THRESHOLD
+    }
+}
+
+/// Last (failing live TTBR1 base, winning swapper base) seen by the fallback —
+/// reveals which pgd the kernel actually runs with when the fallback engages.
+pub static mut MMU_FB_CUR: u64 = 0;
+pub static mut MMU_FB_KPGD: u64 = 0;
+
+/// Current `swapper_pg_dir` snapshot (page-frame base, 0 if not yet observed).
+/// Read by the exception layer to emulate the KPTI entry/exit trampoline's
+/// `TTBR1_EL1` switch (`tramp_map_kernel` / `tramp_unmap_kernel`), which the DBT
+/// skips. See [`KERNEL_PGD_SNAPSHOT`].
+#[allow(unsafe_code)]
+pub fn kernel_pgd_snapshot() -> u64 {
+    // SAFETY: EL2-private, single-vCPU.
+    unsafe { *core::ptr::addr_of!(KERNEL_PGD_SNAPSHOT) }
+}
 
 /// Configure the kernel-image fallback range. `va_base..va_base+span` will be
 /// mapped to `pa_base..pa_base+span` when the regular page-table walk fails
@@ -1469,6 +1824,118 @@ fn record_pending_fault(ctx: *mut u64, far: u64, kind: FaultKind, level: u8, is_
         *ctx.add(SYSREG_SLOT0 + SLOT_PEND_PENDING) = 1;
         *ctx.add(SYSREG_SLOT0 + SLOT_PEND_FAR) = far;
         *ctx.add(SYSREG_SLOT0 + SLOT_PEND_ESR) = esr;
+        // Capture the FIRST EL1-source (curEL=1) user-VA fault taken while SP_EL0
+        // holds a user address — the exact (block PC, faulting VA) that triggers
+        // the enter_from_kernel_mode nested-abort loop. PC_SLOT = 0x100/8 = 32.
+        let cur_el = (*ctx.add(SYSREG_SLOT0 + 42) >> 2) & 0b11;
+        let sp0 = *ctx.add(SYSREG_SLOT0 + 16);
+        let far_user = far >= 0x1000 && (far >> 55) & 1 == 0;
+        // FIRST EL1-source user-VA fault (the precursor) regardless of sp0 — but
+        // skip enter_from_kernel_mode itself (0x..ee9e00..) so we catch the
+        // ORIGINAL faulting block, not the loop. Capture full SP-banking state.
+        let pc_now = *ctx.add(32);
+        let in_efkm = pc_now >= 0xffff_ffc0_08ee_9e00 && pc_now < 0xffff_ffc0_08ee_9f00;
+        if cur_el == 1 && far_user && !in_efkm
+            && *core::ptr::addr_of!(OFLTW_LATCH) == 0
+        {
+            *core::ptr::addr_of_mut!(OFLTW_LATCH) = 1;
+            *core::ptr::addr_of_mut!(OFLTW_PC) = pc_now;
+            *core::ptr::addr_of_mut!(OFLTW_FAR) = far;
+            *core::ptr::addr_of_mut!(OFLTW_SP0) = sp0;
+            *core::ptr::addr_of_mut!(OFLTW_ESR) = esr;
+            *core::ptr::addr_of_mut!(OFLTW_SP1) = *ctx.add(SYSREG_SLOT0 + 17);
+            *core::ptr::addr_of_mut!(OFLTW_SPACT) = *ctx.add(31);
+        }
+        // EL0-source user fault capture (LAST wins). init's fatal SEGV is the
+        // last EL0 user fault before the kernel kills it, so this records the
+        // crashing instruction PC + low GPRs (the bad-pointer register).
+        if cur_el == 0 && far_user {
+            *core::ptr::addr_of_mut!(EL0FLT_PC) = pc_now;
+            *core::ptr::addr_of_mut!(EL0FLT_FAR) = far;
+            *core::ptr::addr_of_mut!(EL0FLT_ESR) = esr;
+            *core::ptr::addr_of_mut!(EL0FLT_X30) = *ctx.add(30);
+            let mut gi = 0usize;
+            while gi < 31 {
+                (*core::ptr::addr_of_mut!(EL0FLT_X))[gi] = *ctx.add(gi);
+                gi += 1;
+            }
+            *core::ptr::addr_of_mut!(EL0FLT_HITS) =
+                (*core::ptr::addr_of!(EL0FLT_HITS)).saturating_add(1);
+            // Decide whether to latch the watch snapshot. Two triggers:
+            //
+            //   1. Explicit FAR watch (EL0FLT_WATCH != 0) — legacy one-shot on a
+            //      known deterministic crash FAR. Kept for targeted hunts.
+            //
+            //   2. ASLR-proof re-fault detector — the keystore2 SIGSEGV varies
+            //      its FAR every boot (ASLR), so we can't hardcode it. Instead we
+            //      detect the BEHAVIOR: a real SIGSEGV is a deterministic fault
+            //      the kernel can't fix, so keystore2 crashes -> restarts ->
+            //      re-faults at the IDENTICAL (PC, FAR). `el0flt_fifo_bump`
+            //      returns true once a pair re-faults EL0FLT_REFAULT_THRESHOLD
+            //      times. The benign clear_user demand-page FAR is excluded
+            //      inside the FIFO so it can't win the race.
+            let w = *core::ptr::addr_of!(EL0FLT_WATCH);
+            let watch_hit = w != 0 && far == w;
+            // Bump the FIFO on EVERY el0 fault so re-faults accumulate; only the
+            // threshold crossing (and not an already-latched state) fires.
+            let refault_hit = el0flt_fifo_bump(pc_now, far);
+            if (watch_hit || refault_hit)
+                && *core::ptr::addr_of!(EL0FLT_W_LATCH) == 0
+                && *core::ptr::addr_of!(IN_DIAG_PROBE) == 0
+            {
+                *core::ptr::addr_of_mut!(EL0FLT_W_LATCH) = 1;
+                *core::ptr::addr_of_mut!(EL0FLT_W_PC) = pc_now;
+                // Host call stack: capture RSP + 48 stack words. The return
+                // addresses identify the caller chain (JIT cache range = a guest
+                // memop; hypervisor .text = a runtime helper / dispatch loop).
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let rsp: u64;
+                    core::arch::asm!("mov {}, rsp", out(reg) rsp,
+                        options(nomem, nostack, preserves_flags));
+                    *core::ptr::addr_of_mut!(EL0FLT_W_RSP) = rsp;
+                    let mut si = 0usize;
+                    while si < 48 {
+                        (*core::ptr::addr_of_mut!(EL0FLT_W_STK))[si] =
+                            core::ptr::read_volatile((rsp + (si as u64) * 8) as *const u64);
+                        si += 1;
+                    }
+                }
+                // ELR_EL1 = sr(13), SPSR_EL1 = sr(14) (sr(i)=SYSREG_SLOT0+i).
+                *core::ptr::addr_of_mut!(EL0FLT_W_ELR) = *ctx.add(SYSREG_SLOT0 + 13);
+                *core::ptr::addr_of_mut!(EL0FLT_W_SPSR) = *ctx.add(SYSREG_SLOT0 + 14);
+                *core::ptr::addr_of_mut!(EL0FLT_W_ESR2) = esr;
+                let mut gj = 0usize;
+                while gj < 31 {
+                    (*core::ptr::addr_of_mut!(EL0FLT_W_X))[gj] = *ctx.add(gj);
+                    gj += 1;
+                }
+                // Read 32 ARM64 opcode words centred on the EXACT faulting
+                // instruction (FAULT_OP_PC, stamped per-instruction). Start 4
+                // words before so the faulting insn (at +0x10) has context.
+                let lgpc = *core::ptr::addr_of!(LAST_GUEST_PC);
+                *core::ptr::addr_of_mut!(EL0FLT_W_LGPC) = lgpc;
+                // FAULT_OP_PC = exact last guest instruction (per-insn stamp).
+                let oppc = *core::ptr::addr_of!(FAULT_OP_PC);
+                *core::ptr::addr_of_mut!(EL0FLT_W_OPPC) = oppc;
+                // Disasm window centred on the last guest instruction (4 before).
+                let blk_base = if oppc >= 16 { oppc - 16 } else { lgpc };
+                let sr = core::slice::from_raw_parts(ctx as *const u64, CTX_U64S);
+                let mut bi = 0usize;
+                while bi < 32 {
+                    let va = blk_base.wrapping_add((bi as u64) * 4);
+                    if let Ok((ipa, _)) = walk(sr, va, false) {
+                        if in_window(ipa) {
+                            (*core::ptr::addr_of_mut!(EL0FLT_W_BLK))[bi] =
+                                core::ptr::read_volatile(ipa as *const u32) as u64;
+                        }
+                    }
+                    bi += 1;
+                }
+                *core::ptr::addr_of_mut!(EL0FLT_W_INSN) =
+                    (*core::ptr::addr_of!(EL0FLT_W_BLK))[0];
+            }
+        }
     }
     // SAFETY: EL2-private single-vCPU; diagnostic counters via addr_of.
     unsafe {
@@ -1501,17 +1968,30 @@ pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64,
     let sysregs = unsafe { core::slice::from_raw_parts(ctx, CTX_U64S) };
     let is_w = is_write != 0;
     let mmu_on = sysregs[SYSREG_SLOT0 + SLOT_SCTLR] & SCTLR_M != 0;
+    // TBI normalization (highest-priority signal-11 fix): strip the ignored top
+    // byte BEFORE anything keys off `va` — the TLB (via xlate_page), the walk,
+    // the MMIO/window checks, the cross-page span math, and crucially the FAR
+    // recorded for injection (record_pending_fault). The kernel's do_page_fault
+    // untags FAR_EL1 itself, so injecting the masked VA makes our FAR match what
+    // the kernel computes; injecting the raw tagged VA (e.g. Scudo `0xb4..`)
+    // would have the kernel demand-page a DIFFERENT address than the one that
+    // faulted — the intermittent tagged-pointer SEGV_ACCERR. Only masks when the
+    // regime's TBI bit is set; bit 55 (TTBR0/TTBR1 selector) is preserved.
+    let va = tbi_mask_va(sysregs, va);
     // Materialise any deferred cross-page STORE scatter before this access reads
     // or writes guest RAM (it may target the very bytes just stored).
     flush_scatter();
-    // Phase-G: log xlate-for-write calls that fall in the eBPF buffer range.
-    // STP / wide-Q stores go through here and write to host RAM directly,
-    // bypassing aether_mmu_store — so the simple store-tracker would miss
-    // them. Value is unknown at xlate time (the caller emits raw mov-to-pa
-    // after we return), but the (pc, va, size) tuple is enough to identify
-    // which guest PC wrote which slot.
-    if is_w {
-        ebpf_store_record(va, 0xFFFF_FFFF_FFFF_FFFFu64, (size.max(1) as u8) | 0x80);
+    if MMU_DIAG {
+        watch_capture_pending();
+        // Phase-G: log xlate-for-write calls that fall in the eBPF buffer range.
+        // STP / wide-Q stores go through here and write to host RAM directly,
+        // bypassing aether_mmu_store — so the simple store-tracker would miss
+        // them. Value is unknown at xlate time (the caller emits raw mov-to-pa
+        // after we return), but the (pc, va, size) tuple is enough to identify
+        // which guest PC wrote which slot.
+        if is_w {
+            ebpf_store_record(va, 0xFFFF_FFFF_FFFF_FFFFu64, (size.max(1) as u8) | 0x80);
+        }
     }
 
     // Resolve the guest PA of the first byte: flat when the MMU is off, else a
@@ -1524,6 +2004,57 @@ pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64,
             Err((kind, level)) => return record_pending_fault(ctx, va, kind, level, is_w),
         }
     };
+    // [wstore] the xlate-for-write path (vector/pair stores; the caller writes
+    // the bytes after we return) — catch hits to the watched PTE slot.
+    if MMU_DIAG && is_w {
+        // SAFETY: EL2-private single-vCPU diagnostic counters.
+        unsafe {
+            // [vwatch] VA-watch on the xlate-for-write store path (value is written
+            // by the caller; capture the corruptor's PC + x30 + hit count).
+            let wva = *core::ptr::addr_of!(WATCH_VA);
+            if wva != 0 && (va & !7) == wva {
+                *core::ptr::addr_of_mut!(WATCH_VA_PC) = *core::ptr::addr_of!(LAST_GUEST_PC);
+                *core::ptr::addr_of_mut!(WATCH_VA_X30) = sysregs[30];
+                *core::ptr::addr_of_mut!(WATCH_VA_HITS) =
+                    (*core::ptr::addr_of!(WATCH_VA_HITS)).saturating_add(1);
+                let ri = (*core::ptr::addr_of!(WATCH_VA_RING_IDX) % 8) as usize;
+                (*core::ptr::addr_of_mut!(WATCH_VA_RING_PC))[ri] =
+                    *core::ptr::addr_of!(LAST_GUEST_PC);
+                // value is written by the caller after we return — mark 0xX so we
+                // know it was the xlate-write path.
+                (*core::ptr::addr_of_mut!(WATCH_VA_RING_VAL))[ri] = 0xFFFF_FFFF_FFFF_FFFF;
+                *core::ptr::addr_of_mut!(WATCH_VA_RING_IDX) =
+                    (*core::ptr::addr_of!(WATCH_VA_RING_IDX)).wrapping_add(1);
+            }
+            let wpa = *core::ptr::addr_of!(WATCH_PA);
+            if wpa != 0 && (pa & !7) == wpa {
+                *core::ptr::addr_of_mut!(WATCH_XLATE_W_HITS) =
+                    (*core::ptr::addr_of!(WATCH_XLATE_W_HITS)).saturating_add(1);
+                // Stash for deferred read-back (caller writes the value next).
+                *core::ptr::addr_of_mut!(WATCH_XLW_PENDING) = pa & !7;
+                *core::ptr::addr_of_mut!(WATCH_XLW_PC) =
+                    *core::ptr::addr_of!(LAST_GUEST_PC);
+                // x30 = ctx GPR slot 30 (GPR_OFFSET=0): the caller's return addr.
+                *core::ptr::addr_of_mut!(WATCH_XLW_X30) = sysregs[30];
+                // x1 = the PTE pointer move_page_tables is clearing. Constant
+                // across dumps => the move loop isn't advancing (DBT loop bug);
+                // varying => move_page_tables re-entered. x29 = frame ptr (its
+                // saved LR at [x29+8] is the real caller).
+                *core::ptr::addr_of_mut!(WATCH_XLW_X1) = sysregs[1];
+                *core::ptr::addr_of_mut!(WATCH_XLW_X29) = sysregs[29];
+                // Resolve [x29+8] = move_page_tables' saved LR = its caller.
+                if let Ok(capa) = xlate_page(sysregs, sysregs[29].wrapping_add(8), false) {
+                    *core::ptr::addr_of_mut!(WATCH_XLW_CALLER) =
+                        core::ptr::read_volatile(capa as *const u64);
+                }
+                *core::ptr::addr_of_mut!(WATCH_R4) = sysregs[4];
+                *core::ptr::addr_of_mut!(WATCH_R27) = sysregs[27];
+                *core::ptr::addr_of_mut!(WATCH_R28) = sysregs[28];
+                *core::ptr::addr_of_mut!(WATCH_R24) = sysregs[24];
+                *core::ptr::addr_of_mut!(WATCH_NZCV) = sysregs[33];
+            }
+        }
+    }
 
     // ── MMIO device window (M4b-5) ───────────────────────────────────────────
     // An access whose PA lands in the emulated-device allow-list is routed to
@@ -1585,7 +2116,15 @@ pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64,
     if (va >> 12) != (last >> 12) {
         let pa_last = match xlate_page(sysregs, last, is_w) {
             Ok(pa) => pa,
-            Err((kind, level)) => return record_pending_fault(ctx, va, kind, level, is_w),
+            // CRITICAL: report the faulting address in the SECOND page (`last`),
+            // NOT the access start (`va`). When a cross-page LDP/LDR-Q straddles a
+            // page boundary and the second page is unmapped, reporting `va` makes
+            // the kernel demand-page the FIRST page (already present) and never the
+            // second → do_page_fault is a no-op and the guest re-faults forever on
+            // the same straddling access (seen as an 11.5k× loop on far=…fff8 with
+            // the second page perpetually absent). `last` is inside the unmapped
+            // page so the kernel faults in the right one and the access completes.
+            Err((kind, level)) => return record_pending_fault(ctx, last, kind, level, is_w),
         };
         if is_mmio(pa_last) {
             // A split RAM/MMIO span can't be served by one host access, and a
@@ -1642,7 +2181,7 @@ pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64,
     // compare the LOAD PA against the matching STORE PA for the same VA.
     // Stores carry the value field; loads carry 0 (the value isn't known
     // here, the caller does the actual read via the returned pa pointer).
-    if !is_w {
+    if MMU_DIAG && !is_w {
         vmm_trace_record(va, pa, 0, size.max(1) as u8, 0);
         // Phase-G x30-hunt: capture the physical value this load is about to
         // read (incl. LDP pair loads, which route through here) for the armed
@@ -1667,17 +2206,152 @@ pub unsafe extern "C" fn aether_mmu_xlate(ctx: *mut u64, va: u64, is_write: u64,
 ///
 /// # Safety
 /// Same contract as [`aether_mmu_xlate`].
+/// [wstore] PTE-write watch. boot_x86.rs sets `WATCH_PA` to the L3 descriptor PA
+/// of the looping anon-write fault; `aether_mmu_store` records the last value +
+/// hit count written to that 8-byte slot. Answers "does the kernel ever install
+/// a valid leaf PTE there?" — 0 hits => do_anonymous_page bailed before set_pte;
+/// hits with a valid PTE while the walker still reads 0 => host coherence.
+pub static mut WATCH_PA: u64 = 0;
+pub static mut WATCH_VAL: u64 = 0;
+pub static mut WATCH_HITS: u64 = 0;
+/// [vwatch] VA-based store watchpoint for the fork-path SLUB-freelist corruptor.
+/// boot_x86 sets `WATCH_VA` to the corrupted vm_area_struct freepointer VA
+/// (object_VA + 0x60, from the slub_debug=F report); `aether_mmu_store` records
+/// the guest PC + value + x30 of EVERY store that hits it, so the FIRST hit whose
+/// value is a garbage (obfuscated) freelist pointer names the corrupting block.
+pub static mut WATCH_VA: u64 = 0;
+/// [vma] last vm_area_struct returned by kmem_cache_alloc in vm_area_dup (set by
+/// the boot_x86 PC hook at vm_area_dup+0x2c). At the fork-corruption fault this
+/// holds the CORRUPTED object — its freepointer (+0x60) was overwritten — so
+/// Boot 2 sets WATCH_VA = LAST_VMA_ALLOC + 0x60.
+pub static mut LAST_VMA_ALLOC: u64 = 0;
+/// [garb] one-shot latch: when the walker is asked to translate a middle-range
+/// garbage VA (the SLUB-freelist corruption deref), capture LAST_VMA_ALLOC (= the
+/// corrupted object A, since the faulting alloc never updated it) + the garbage
+/// VA. Boot 2 then sets WATCH_VA = GARB_LASTVMA + 0x60.
+pub static mut GARB_LATCH: u64 = 0;
+pub static mut GARB_LASTVMA: u64 = 0;
+pub static mut GARB_VA: u64 = 0;
+/// [inpage] last kmem_cache_alloc candidate object (x0 at kmem_cache_alloc+0xd4)
+/// in the vma slab page 0xffffff801e002000. The faulting alloc's candidate is the
+/// garbage pointer (NOT in-page → not recorded), so at the fault this holds the
+/// PREVIOUS in-page allocation = the corrupted object whose +0x60 freepointer
+/// deobfuscated to garbage. Boot N+1 sets WATCH_VA = LAST_INPAGE_ALLOC + 0x60.
+pub static mut LAST_INPAGE_ALLOC: u64 = 0;
+/// [casp] one-shot: the LIVE (post-alternative-patch) instruction words at
+/// kmem_cache_alloc's cmpxchg_double site (0x831a724/728/72c). Tells us whether
+/// the casp survived (LSE) or was patched to LL/SC. Bit32 set = captured.
+pub static mut CASP_INSN0: u64 = 0; // [0x831a724]
+pub static mut CASP_INSN1: u64 = 0; // [0x831a728] (the casp slot)
+pub static mut CASP_INSN2: u64 = 0; // [0x831a72c]
+/// [casp-diag] translate-time + runtime flags for the AtomicCasPair lowering.
+/// CASP_LOWER_OK: incremented each time the non-spill lowering ran (translate).
+/// CASP_LOWER_SPILL: incremented when the spill→UD2 branch ran (translate).
+/// CASP_HIT: set to 1 by the JIT'd casp code when it actually EXECUTES (runtime).
+pub static CASP_LOWER_OK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static CASP_LOWER_SPILL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static CASP_HIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static mut WATCH_VA_PC: u64 = 0;
+pub static mut WATCH_VA_VAL: u64 = 0;
+pub static mut WATCH_VA_HITS: u64 = 0;
+pub static mut WATCH_VA_X30: u64 = 0;
+/// [vwatch] ring of the last 8 stores to WATCH_VA: (guest PC, stored value).
+/// The corruptor is the store with a garbage value whose PC is NOT
+/// set_freepointer / vm_area_dup — visible in the recent-store sequence.
+pub static mut WATCH_VA_RING_PC: [u64; 8] = [0; 8];
+pub static mut WATCH_VA_RING_VAL: [u64; 8] = [0; 8];
+pub static mut WATCH_VA_RING_IDX: u64 = 0;
+/// [wstore] non-aether_mmu_store writes that hit the watched PTE slot: the
+/// cross-page scatter, and the xlate-for-write path (vector/pair/caller-direct
+/// stores). A hit on either while the PTE keeps reading 0 identifies which path
+/// clobbers the kernel's just-written leaf PTE.
+pub static mut WATCH_SCATTER_HITS: u64 = 0;
+pub static mut WATCH_XLATE_W_HITS: u64 = 0;
+/// [wstore] deferred capture of the xlate-for-write store's value: that path
+/// returns `pa` and the CALLER writes the bytes after, so we can't see the value
+/// in `aether_mmu_xlate`. Instead stash the pa here and read it back on the next
+/// MMU entry (before any new write) — `WATCH_XLW_VAL` then holds what the xlate
+/// store actually left at the watched PTE slot.
+pub static mut WATCH_XLW_PENDING: u64 = 0;
+pub static mut WATCH_XLW_VAL: u64 = 0;
+/// [wstore] guest block PC of the PTE-writing store (aether_mmu_store) and of
+/// the clobbering xlate-for-write store. Same PC => one instruction lowered down
+/// BOTH paths (double-store bug); different PCs => two distinct kernel stores.
+pub static mut WATCH_STORE_PC: u64 = 0;
+pub static mut WATCH_XLW_PC: u64 = 0;
+/// [wstore] x30 (link reg) at the clobbering xlate-write store = the return
+/// address of whoever CALLED the function containing it. If it points into
+/// move_vma (real mremap) init genuinely mremaps; if into do_page_fault /
+/// handle_mm_fault, a DBT branch mistranslation jumps into the PTE-clear loop.
+pub static mut WATCH_XLW_X30: u64 = 0;
+pub static mut WATCH_XLW_X1: u64 = 0;
+pub static mut WATCH_XLW_X29: u64 = 0;
+/// [wstore] move_page_tables' caller: the saved LR at [x29+8] (its prologue
+/// stored {x29,x30}). Symbolize to learn who drives the repeated PTE-clear —
+/// move_vma (real mremap) vs an unexpected path.
+pub static mut WATCH_XLW_CALLER: u64 = 0;
+/// [wstore] move_page_tables loop bounds at the stuck store: inner (x4=cur,
+/// x27=end), outer (x28=cur, x24=end), + NZCV (ctx byte 0x108 = u64 idx 33).
+/// Sane values that should make the branch exit => NZCV/branch bug; a non-
+/// advancing bound => an upstream register-value bug.
+pub static mut WATCH_R4: u64 = 0;
+pub static mut WATCH_R27: u64 = 0;
+pub static mut WATCH_R28: u64 = 0;
+pub static mut WATCH_R24: u64 = 0;
+pub static mut WATCH_NZCV: u64 = 0;
+
+/// Read back a stashed xlate-for-write target before the next access overwrites
+/// it. Called at the top of `aether_mmu_store` / `aether_mmu_xlate`.
+#[inline(always)]
+#[allow(unsafe_code)]
+fn watch_capture_pending() {
+    // SAFETY: EL2-private single-vCPU diagnostic; the stashed pa was in-window.
+    unsafe {
+        let p = *core::ptr::addr_of!(WATCH_XLW_PENDING);
+        if p != 0 {
+            *core::ptr::addr_of_mut!(WATCH_XLW_VAL) =
+                core::ptr::read_volatile(p as *const u64);
+            *core::ptr::addr_of_mut!(WATCH_XLW_PENDING) = 0;
+        }
+    }
+}
+
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, value: u64) -> u64 {
     // SAFETY: caller's contract — ctx is the register-file base.
     let sysregs = unsafe { core::slice::from_raw_parts(ctx, CTX_U64S) };
     let mmu_on = sysregs[SYSREG_SLOT0 + SLOT_SCTLR] & SCTLR_M != 0;
+    // TBI normalization (see aether_mmu_xlate): strip the ignored top byte so a
+    // tagged STORE (Scudo writes through `0xb4..` pointers) keys the TLB, walks,
+    // checks windows/spans, and — on fault — records FAR identically to its
+    // untagged twin. Masking before the watch/span/fault logic keeps them aligned.
+    let va = tbi_mask_va(sysregs, va);
 
     // (SLAB cpu-partial self-cycle catcher removed — the CAS-width fix resolved
     // the put_cpu_partial deadlock; boot now proceeds into Android userspace.)
 
+    // [svwatch] store-VALUE watch — catch where the corrupted code pointer is
+    // written (low 56 bits, so a tagged/sign-variant still matches).
+    // SAFETY: EL2-private statics, single-vCPU.
+    if MMU_DIAG { unsafe {
+        let sw = *core::ptr::addr_of!(SV_WATCH);
+        if sw != 0 && (value & 0x00FF_FFFF_FFFF_FFFF) == sw {
+            let i = (*core::ptr::addr_of!(SV_WATCH_IDX) % 8) as usize;
+            (*core::ptr::addr_of_mut!(SV_WATCH_PC))[i] = *core::ptr::addr_of!(FAULT_OP_PC);
+            (*core::ptr::addr_of_mut!(SV_WATCH_ADDR))[i] = va;
+            (*core::ptr::addr_of_mut!(SV_WATCH_VAL))[i] = value;
+            (*core::ptr::addr_of_mut!(SV_WATCH_X30))[i] = *ctx.add(30);
+            *core::ptr::addr_of_mut!(SV_WATCH_IDX) =
+                (*core::ptr::addr_of!(SV_WATCH_IDX)).wrapping_add(1);
+            *core::ptr::addr_of_mut!(SV_WATCH_HITS) =
+                (*core::ptr::addr_of!(SV_WATCH_HITS)).saturating_add(1);
+        }
+    }}
     // Materialise any deferred cross-page STORE scatter before this store runs.
     flush_scatter();
+    if MMU_DIAG {
+        watch_capture_pending();
+    }
 
     let pa = if !mmu_on {
         va
@@ -1687,6 +2361,35 @@ pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, val
             Err((kind, level)) => return record_pending_fault(ctx, va, kind, level, true),
         }
     };
+    // [wstore] watch: record writes to the watched PTE slot (set from the [uflt]
+    // loop dump). The kernel's WRITE_ONCE(*ptep, pte) is a single 8-byte STR.
+    if MMU_DIAG { unsafe {
+        let wpa = *core::ptr::addr_of!(WATCH_PA);
+        if wpa != 0 && (pa & !7) == wpa {
+            *core::ptr::addr_of_mut!(WATCH_VAL) = value;
+            *core::ptr::addr_of_mut!(WATCH_HITS) =
+                (*core::ptr::addr_of!(WATCH_HITS)).saturating_add(1);
+            *core::ptr::addr_of_mut!(WATCH_STORE_PC) =
+                *core::ptr::addr_of!(LAST_GUEST_PC);
+        }
+        // [vwatch] VA-based watchpoint: the corruptor stores garbage to the vma
+        // freepointer (object_VA+0x60) while it's free; nothing else writes there
+        // before the fatal alloc-read, so the LAST store captured here is it.
+        let wva = *core::ptr::addr_of!(WATCH_VA);
+        if wva != 0 && (va & !7) == wva {
+            *core::ptr::addr_of_mut!(WATCH_VA_VAL) = value;
+            *core::ptr::addr_of_mut!(WATCH_VA_PC) = *core::ptr::addr_of!(LAST_GUEST_PC);
+            *core::ptr::addr_of_mut!(WATCH_VA_X30) = sysregs[30];
+            *core::ptr::addr_of_mut!(WATCH_VA_HITS) =
+                (*core::ptr::addr_of!(WATCH_VA_HITS)).saturating_add(1);
+            let ri = (*core::ptr::addr_of!(WATCH_VA_RING_IDX) % 8) as usize;
+            (*core::ptr::addr_of_mut!(WATCH_VA_RING_PC))[ri] =
+                *core::ptr::addr_of!(LAST_GUEST_PC);
+            (*core::ptr::addr_of_mut!(WATCH_VA_RING_VAL))[ri] = value;
+            *core::ptr::addr_of_mut!(WATCH_VA_RING_IDX) =
+                (*core::ptr::addr_of!(WATCH_VA_RING_IDX)).wrapping_add(1);
+        }
+    }}
 
     if is_mmio(pa) {
         let _ = mmio_dispatch(pa, size.max(1), true, value);
@@ -1701,7 +2404,11 @@ pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, val
         if (va >> 12) != (last >> 12) {
             let pa_last = match xlate_page(sysregs, last, true) {
                 Ok(pa) => pa,
-                Err((kind, level)) => return record_pending_fault(ctx, va, kind, level, true),
+                // Report the SECOND page's fault at `last`, not the access start
+                // `va` — see the matching note in the load path. A cross-page STORE
+                // whose second page is unmapped otherwise loops forever (kernel
+                // faults in the already-present first page).
+                Err((kind, level)) => return record_pending_fault(ctx, last, kind, level, true),
             };
             if is_mmio(pa_last) {
                 return record_pending_fault(ctx, va, FaultKind::Translation, 3, true);
@@ -1712,8 +2419,10 @@ pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, val
                 // value here — split it across the two pages byte-wise (LE).
                 let n1 = 0x1000 - (va & 0xFFF);
                 let pa2_base = pa_last & !0xFFFu64;
-                vmm_trace_record(va, pa, value, sz as u8, 1);
-                ebpf_store_record(va, value, sz as u8);
+                if MMU_DIAG {
+                    vmm_trace_record(va, pa, value, sz as u8, 1);
+                    ebpf_store_record(va, value, sz as u8);
+                }
                 // SAFETY: both PAs were confined to the guest window by the
                 // walk; `sz <= 8` so the shift never exceeds 56.
                 unsafe {
@@ -1743,8 +2452,10 @@ pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, val
     // Phase-E: vmemmap store tracer — record (va, pa, value, size) so the
     // hypervisor can verify the kernel's store actually landed where the
     // load expects to read it from.
-    vmm_trace_record(va, pa, value, sz as u8, 1);
-    ebpf_store_record(va, value, sz as u8);
+    if MMU_DIAG {
+        vmm_trace_record(va, pa, value, sz as u8, 1);
+        ebpf_store_record(va, value, sz as u8);
+    }
     // SAFETY: `pa` is an in-window guest PA == identity host RAM (the walk /
     // flat path established it is not MMIO and, when walked, is in-window).
     unsafe {
@@ -1757,21 +2468,25 @@ pub unsafe extern "C" fn aether_mmu_store(ctx: *mut u64, va: u64, size: u64, val
         // Phase-E: immediate read-back verification. If the host store
         // didn't persist (cache type / unmapped / dropped write), record
         // a SECOND ring entry with kind=2 (MISMATCH) and the actual
-        // value read. The dumper distinguishes kinds.
-        let readback: u64 = match sz {
-            1 => core::ptr::read_volatile(pa as *const u8) as u64,
-            2 => core::ptr::read_volatile(pa as *const u16) as u64,
-            4 => core::ptr::read_volatile(pa as *const u32) as u64,
-            _ => core::ptr::read_volatile(pa as *const u64),
-        };
-        let expect_mask: u64 = match sz {
-            1 => 0xFF,
-            2 => 0xFFFF,
-            4 => 0xFFFFFFFF,
-            _ => !0u64,
-        };
-        if (readback & expect_mask) != (value & expect_mask) {
-            vmm_trace_record(va, pa, readback, sz as u8, 2);
+        // value read. The dumper distinguishes kinds. Purely diagnostic
+        // (records a trace entry; no guest-visible effect), so gated off
+        // on the production hot path — it doubled every store with a read.
+        if MMU_DIAG {
+            let readback: u64 = match sz {
+                1 => core::ptr::read_volatile(pa as *const u8) as u64,
+                2 => core::ptr::read_volatile(pa as *const u16) as u64,
+                4 => core::ptr::read_volatile(pa as *const u32) as u64,
+                _ => core::ptr::read_volatile(pa as *const u64),
+            };
+            let expect_mask: u64 = match sz {
+                1 => 0xFF,
+                2 => 0xFFFF,
+                4 => 0xFFFFFFFF,
+                _ => !0u64,
+            };
+            if (readback & expect_mask) != (value & expect_mask) {
+                vmm_trace_record(va, pa, readback, sz as u8, 2);
+            }
         }
     }
     MMIO_STORE_OK
@@ -1955,6 +2670,116 @@ mod tests {
         // offset preserved within the page
         let (got2, _) = walk(&ctx, va | 0xABC, false).expect("4K walk off");
         assert_eq!(got2, pa | 0xABC, "page offset preserved");
+    }
+
+    /// TBI (Top-Byte-Ignore) normalization: with `TCR_EL1.TBI0 = 1` a TAGGED
+    /// low VA (top byte != 0 — e.g. Scudo's `0xb4..` heap tag) must resolve to
+    /// the SAME PA as its untagged form. This is the highest-priority signal-11
+    /// fix: a tagged access and its untagged twin previously got different TLB
+    /// entries / divergent FAR, producing the intermittent tagged-pointer
+    /// SEGV_ACCERR. The walk must strip bits [63:56] for translation.
+    #[test]
+    fn walk_tbi_tagged_va_resolves_like_untagged() {
+        let _g = setup();
+        // A TTBR0 (low) VA — bit 55 clear so the TTBR0 regime + TBI0 apply.
+        let va = 0x0000_5678_9ABC_D000;
+        let pa = 0x8054_2000;
+        let (_ttbr, mut ctx) = map_4k(va, pa, false);
+        // Enable TBI0 (TCR_EL1 bit 37). Without this the top byte is significant
+        // and the tagged VA would (correctly) NOT match — so the bit gates the mask.
+        ctx[SYSREG_SLOT0 + SLOT_TCR] |= TCR_TBI0;
+
+        // Baseline: untagged resolves.
+        let (untagged, _) = walk(&ctx, va, false).expect("untagged walk");
+        assert_eq!(untagged, pa, "untagged VA resolves to PA");
+
+        // Tag the top byte (0xb4 — the exact Scudo tag from the apexd crash) and
+        // add an in-page offset; the tagged access must resolve to the same page.
+        let tagged = (0xB4u64 << 56) | va | 0x123;
+        let (got, w) = walk(&ctx, tagged, false).expect("tagged walk resolves");
+        assert_eq!(got, pa | 0x123, "tagged VA resolves to same PA (TBI strips tag)");
+        assert!(w, "writability preserved across tag strip");
+
+        // And it goes through the full xlate path identically (TLB key untagged).
+        let mut c = ctx.clone();
+        let host = unsafe {
+            aether_mmu_xlate(c.as_mut_ptr(), tagged, 0, 8)
+        };
+        assert_ne!(host, XLATE_FAULT, "tagged xlate must not fault");
+        assert_eq!(host, pa | 0x123, "tagged xlate resolves to untagged PA");
+
+        // The mask is GATED on the TBI bit. With TBI0 set, the helper strips the
+        // top byte; with it clear, the VA is returned verbatim. (The software
+        // walker only indexes bits [47:0], so the gate is observable via the
+        // helper, which is what keys the TLB and the injected FAR.)
+        assert_eq!(
+            tbi_mask_va(&ctx, tagged),
+            va | 0x123,
+            "TBI0 set: top byte stripped, bit 55 + low bits preserved"
+        );
+        let mut ctx_off = ctx.clone();
+        ctx_off[SYSREG_SLOT0 + SLOT_TCR] &= !TCR_TBI0;
+        assert_eq!(
+            tbi_mask_va(&ctx_off, tagged),
+            tagged,
+            "TBI0 clear: VA returned unchanged (mask gated)"
+        );
+        // A high (TTBR1) VA uses TBI1, not TBI0: with only TBI0 set, a tagged
+        // kernel VA is NOT stripped; bit 55 (regime selector) is never cleared.
+        let kva_tagged = (0xAAu64 << 56) | 0x0080_0000_0000_1000;
+        assert_eq!(
+            tbi_mask_va(&ctx, kva_tagged),
+            kva_tagged,
+            "TBI0 set but high VA uses TBI1 (off) → unchanged"
+        );
+    }
+
+    /// TBI staleness guard: a tagged STORE and an untagged LOAD of the same
+    /// architectural page must hit ONE TLB entry (the entry is keyed on the
+    /// untagged page). Exercises the `xlate_page` TLB key under TBI.
+    #[test]
+    fn xlate_tbi_tagged_and_untagged_share_tlb_entry() {
+        let _g = setup();
+        let va = 0x0000_0001_2233_4000;
+        let pa = 0x8061_0000;
+        let (_ttbr, mut ctx) = map_4k(va, pa, false);
+        ctx[SYSREG_SLOT0 + SLOT_TCR] |= TCR_TBI0;
+
+        // Untagged xlate first (fills the TLB on the untagged page).
+        let h0 = unsafe { aether_mmu_xlate(ctx.as_mut_ptr(), va, 0, 8) };
+        assert_eq!(h0, pa, "untagged fills TLB");
+        // Differently-tagged access to the same page resolves identically (hit).
+        let tagged = (0x7Fu64 << 56) | va;
+        let h1 = unsafe { aether_mmu_xlate(ctx.as_mut_ptr(), tagged, 0, 8) };
+        assert_eq!(h1, pa, "tagged hits the same untagged TLB entry");
+    }
+
+    /// Forked-process TTBR0 staleness guard: a low-VA entry cached under one
+    /// TTBR0 (the parent) must NOT be served to a different TTBR0 (a forked
+    /// child) at the same page#, even without an intervening flush. The TLB
+    /// carries the live TTBR0 as an address-space tag.
+    #[test]
+    fn xlate_ttbr0_asid_tag_isolates_forked_child() {
+        let _g = setup();
+        let va = 0x0000_0000_4455_6000;
+        let pa_parent = 0x8070_0000;
+        let pa_child = 0x8071_0000;
+        // Parent address space.
+        let (parent_ttbr, mut parent_ctx) = map_4k(va, pa_parent, false);
+        let hp = unsafe { aether_mmu_xlate(parent_ctx.as_mut_ptr(), va, 0, 8) };
+        assert_eq!(hp, pa_parent, "parent resolves + caches");
+
+        // Child: SAME va, DIFFERENT TTBR0 base → different PA. Build a separate
+        // table chain mapping the same VA to the child's page, then point a fresh
+        // ctx at it WITHOUT flushing the software TLB.
+        let (child_ttbr, child_ctx_full) = map_4k(va, pa_child, false);
+        assert_ne!(parent_ttbr, child_ttbr, "distinct address spaces");
+        let mut child_ctx = child_ctx_full;
+        let hc = unsafe { aether_mmu_xlate(child_ctx.as_mut_ptr(), va, 0, 8) };
+        assert_eq!(
+            hc, pa_child,
+            "child must walk fresh (ASID tag rejects the parent's stale entry)"
+        );
     }
 
     #[test]

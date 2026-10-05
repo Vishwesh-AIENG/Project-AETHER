@@ -531,10 +531,17 @@ impl SimdLower {
                     _ => 0,
                 };
                 if rd_gpr != ra_gpr { enc.emit_mov_rr64(rd_gpr, ra_gpr); }
+                // NOTE: this lower_simd path is DEAD — the live CRC32 lowering is
+                // in lower_int::lower_op (spill-safe, with the ISO-poly fallback).
+                // `size` is the sz ENCODING (0=B/1=H/2=W/3=X), not a byte count.
+                // Use the size-correct 32-bit-destination emitters (the r64,r/m32
+                // form does not exist; REX.W on F1 reads 8 bytes) so the dead code
+                // at least encodes valid instructions.
                 match size {
-                    1 => enc.emit_crc32_r64_r8(rd_gpr, rb_gpr),
-                    4 => enc.emit_crc32_r64_r32(rd_gpr, rb_gpr),
-                    8 => enc.emit_crc32_r64_r64(rd_gpr, rb_gpr),
+                    0 => enc.emit_crc32_r32_r8(rd_gpr, rb_gpr),
+                    1 => enc.emit_crc32_r32_r16(rd_gpr, rb_gpr),
+                    2 => enc.emit_crc32_r32_r32(rd_gpr, rb_gpr),
+                    3 => enc.emit_crc32_r64_r64(rd_gpr, rb_gpr),
                     _ => enc.emit_nop(),
                 }
             }

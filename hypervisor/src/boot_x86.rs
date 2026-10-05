@@ -49,6 +49,12 @@ pub fn set_framebuffer(fb: FramebufferInfo) {
     unsafe { FB_INFO = Some(fb); }
 }
 
+/// The captured host UEFI-GOP framebuffer (the real QEMU/hardware display), or
+/// None if no GOP was present at boot. Used to wire the guest simple-framebuffer.
+pub fn host_framebuffer() -> Option<FramebufferInfo> {
+    unsafe { *core::ptr::addr_of!(FB_INFO) }
+}
+
 /// Fill the entire visible framebuffer with a solid colour.  Safe to call
 /// after ExitBootServices because the GOP framebuffer PA is identity-mapped
 /// by UEFI and stays mapped until we replace CR3 (which we do not).
@@ -673,6 +679,21 @@ static mut GUEST_PT:      Page4K      = Page4K([0u8; 4096]);
 // Host stack used as VMCS_HOST_RSP. 4 KiB; grows downward.
 static mut HOST_STACK:    Page4K      = Page4K([0u8; 4096]);
 
+// Checkpoint header page mapping. The top 2 MiB of the guest window
+// (0xBFE00000–0xBFFFFFFF, host-CR3 PD index 511 of PDPT index 2) is never
+// touched by the guest, so OVMF/the kernel never creates a PD entry for it — and
+// `host_pt_ensure_page_present_rw` cannot make the checkpoint header page
+// (0xBFFF_F000) present. The window is 2 MiB-large-page mapped (sibling PD
+// entries are PS=1), so the fix installs a 2 MiB PS=1 *identity* leaf directly
+// into PD[511] (PA == VA's 2 MiB base == 0xBFE00000) — no PT page and no
+// PA-of-a-static assumption needed. `CKPT_PT_INSTALLED` is just a one-shot latch
+// for the install diagnostic; later checkpoints find the PDE present and re-OR W.
+static mut CKPT_PT_INSTALLED: bool   = false;
+// One-shot latch for the page-table WALK measurement dump (host_pt_ensure_page_
+// present_rw). Fires once on the first call so the boot log reveals the ACTUAL
+// dispatch-context CR3 structure for the header page vs a known-good guest page.
+static mut CKPT_WALK_DUMPED:  bool   = false;
+
 // Guest RAM — 4 KiB, 4 KiB-aligned.  Offset 0 holds the guest payload (a
 // single HLT byte 0xF4).  Using 4 KiB EPT/NPT pages avoids the LLVM
 // codegen issue triggered by 2 MiB-aligned statics in the PE32+ section
@@ -1133,15 +1154,49 @@ pub unsafe fn boot_x86_hypervisor(
         const GUEST_RAM_ALLOC_SIZE: u64 = 512 * 1024 * 1024;
         const STAGE_PAGES: usize = (GUEST_RAM_ALLOC_SIZE / 4096) as usize;
         const MAX_PA_4GIB: u64 = 0xFFFF_FFFF;
-        // SAFETY: image_handle + system_table came from efi_main and are
-        // still valid before ExitBootServices.
-        let (alloc_pa, read) = unsafe {
-            try_read_boot_img_alloc(
-                image_handle as *mut _,
-                system_table as *const EfiSystemTable,
-                STAGE_PAGES,
-                MAX_PA_4GIB,
-            )
+
+        // ── CHECKPOINT RESTORE GUARD (peek before staging) ───────────────────
+        // On a restore boot the host has already reloaded checkpoint.raw into the
+        // guest DRAM (QEMU `-device loader`, before this .efi runs), so the
+        // reserved header page at checkpoint_header_pa() (0xBFFF_F000, the fixed
+        // contract PA) holds our magic. That page is below 4 GiB and OVMF
+        // identity-maps the low 4 GiB pre-EBS, so a raw read_volatile works here.
+        // If the magic is present we MUST NOT ESP-read boot.img into the window:
+        // that would overwrite the restored mid-boot kernel/init/data. Skip the
+        // staging entirely and let the RESTORE branch in
+        // run_android_dispatch_loop_inner do the regfile restore. On a fresh boot
+        // (no/old header) we stage boot.img exactly as before.
+        let restore_pending = if CHECKPOINT_ENABLED {
+            // SAFETY: low-4-GiB identity map is live pre-EBS; header PA is a fixed
+            // 4 KiB-aligned guest-DRAM page populated by the host loader.
+            let m = unsafe {
+                core::ptr::read_volatile(checkpoint_header_pa() as *const u64)
+            };
+            m == CHECKPOINT_MAGIC
+        } else {
+            false
+        };
+
+        let (alloc_pa, read) = if restore_pending {
+            // Restore: do NOT touch the window. The host-reloaded DRAM (with the
+            // kernel/init/data and guest page tables) stays intact. Report the
+            // fixed contract base as the window base; `read = 0` marks "not
+            // freshly staged" — the handoff path below already tolerates a
+            // pre-staged window (region_pa fallback), and the restore branch
+            // skips the regfile re-seed regardless.
+            unsafe { dual_puts(b"\n[ckpt] RESTORE: boot.img staging SKIPPED\n"); }
+            (aether_translator::runtime::mmu::GUEST_PA_BASE, 0usize)
+        } else {
+            // SAFETY: image_handle + system_table came from efi_main and are
+            // still valid before ExitBootServices.
+            unsafe {
+                try_read_boot_img_alloc(
+                    image_handle as *mut _,
+                    system_table as *const EfiSystemTable,
+                    STAGE_PAGES,
+                    MAX_PA_4GIB,
+                )
+            }
         };
         // Pre-EBS audible signal — distinct from any post-EBS bisect pitch.
         //
@@ -1218,6 +1273,51 @@ pub unsafe fn boot_x86_hypervisor(
         // stores corrupt hypervisor .text).
         host_pt_make_handoff_rw();
 
+        // ── Relocated guest-DRAM window: host-CR3 identity map + stage copy ──
+        // Guest DRAM now lives at [4 GiB, 8 GiB) (GUEST_PA_BASE/SIZE in
+        // aether_translator::runtime::mmu) — real, hole-free `-m 16G` high-RAM
+        // (de-risk probe confirmed all 3 round-trips OK) below the JIT cache at
+        // 8 GiB. This band is ABOVE OVMF's low-4-GiB identity map, so — unlike
+        // the old <4 GiB window — it is NOT auto-mapped (host_pt_make_handoff_rw
+        // only sweeps the low 4 GiB). Install it explicitly with 1-GiB RW|PS=1
+        // leaves (PML4[0] PDPT slots 4..8, free), identical to the JIT/PMEM maps.
+        //
+        // CRITICAL ORDERING (your risk #2): OVMF only identity-maps the low
+        // 4 GiB pre-EBS, so the ESP shim read boot.img into a LOW (<4 GiB)
+        // scratch buffer (STAGED_ALLOC_PA, allocated pre-EBS). Now that the
+        // window is host-CR3-reachable, COPY the staged boot.img span UP into
+        // GUEST_PA_BASE so prepare_android_handoff_at finds the "ANDROID!" magic
+        // there. After this copy the entire handoff (boot.img scan, DTB build,
+        // kernel decompress, ramdisk pointers, region_pa) operates on the 4 GiB
+        // window — every PA the kernel sees and the dispatch loop reads is
+        // in-window. Map (here) -> copy (here) -> handoff scan (below).
+        {
+            use aether_translator::runtime::mmu::{GUEST_PA_BASE, GUEST_PA_SIZE};
+            host_pt_map_identity_1g(GUEST_PA_BASE, GUEST_PA_SIZE >> 30);
+            let scratch = STAGED_ALLOC_PA;
+            if scratch != 0 && STAGED_ESP_READ_BYTES > 0 {
+                // Copy the full boot.img staging window (the bytes the ESP shim
+                // deposited at the low scratch). The handoff places the DTB and
+                // decompressed kernel ABOVE this in the same window, so only the
+                // boot.img prefix needs to come from the scratch.
+                let n = crate::android_handoff::STAGED_BOOT_IMG_SIZE as usize;
+                core::ptr::copy_nonoverlapping(
+                    scratch as *const u8,
+                    GUEST_PA_BASE as *mut u8,
+                    n,
+                );
+                let p = GUEST_PA_BASE as *const u64;
+                let w0 = core::ptr::read_volatile(p);
+                dual_puts(b"[stage] reloc copied to 0x");
+                dual_puthex64(GUEST_PA_BASE);
+                dual_puts(b" first16=0x");
+                dual_puthex64(w0);
+                dual_puts(b" (want 0x21444E494F52444E ANDROID!)\n");
+            } else {
+                dual_puts(b"[stage] reloc copy SKIPPED (no boot.img staged)\n");
+            }
+        }
+
         // Surface the pre-EBS boot.img read result. Kinds:
         //   0=ok, 1=LoadedImage missing, 2=no FS on device, 3=OpenVolume failed,
         //   4=Open file failed (path wrong / file missing on FAT32),
@@ -1277,23 +1377,14 @@ pub unsafe fn boot_x86_hypervisor(
     // succeeded, prefer that PA — it's guaranteed conventional RAM by
     // firmware contract. Otherwise fall back to the legacy fixed PA so
     // synthetic/test images that pre-stage at 0x8000_0000 still work.
+    // RELOCATED WINDOW: the handoff scans + builds entirely inside the 4 GiB
+    // window at GUEST_PA_BASE. The boot.img was copied there above (from the low
+    // <4 GiB ESP scratch). stage_size = full window so the boot.img scan can see
+    // the whole staged span; region_size below = full window (no probe — raw
+    // hole-free high-RAM, like PMEM).
     let (stage_pa, stage_size) = {
-        let alloc_pa = unsafe { STAGED_ALLOC_PA };
-        if alloc_pa != 0 {
-            // UEFI gave us at least STAGED_BOOT_IMG_SIZE bytes; the
-            // KERNEL_WORKING_RAM extension lives in the contiguous
-            // span past the DTB. probe_handoff_writable_extent
-            // walks the FULL HANDOFF_REGION_SIZE below to find the
-            // genuinely-backed prefix; even though UEFI only allocated
-            // STAGED_BOOT_IMG_SIZE pages explicitly, the adjacent
-            // pages are often still conventional RAM (UEFI just
-            // hadn't tagged them as ours), and the probe accepts
-            // anything that round-trips a magic write/read.
-            (alloc_pa, crate::android_handoff::HANDOFF_REGION_SIZE)
-        } else {
-            (crate::android_handoff::STAGED_BOOT_IMG_PA,
-             crate::android_handoff::HANDOFF_REGION_SIZE)
-        }
+        use aether_translator::runtime::mmu::{GUEST_PA_BASE, GUEST_PA_SIZE};
+        (GUEST_PA_BASE, GUEST_PA_SIZE)
     };
     // Dump first 16 bytes at the chosen PA so the post-mortem photo shows
     // whether the firmware actually deposited "ANDROID!" magic there.
@@ -1312,71 +1403,68 @@ pub unsafe fn boot_x86_hypervisor(
         dual_puthex64(w1);
         dual_puts(b" (want 0x21444E494F52444E ...)\n");
     }
-    // For the DTB: keep using GUEST_DTB_PA which lives in our own BSS-
-    // adjacent identity range. (The UEFI alloc only covered the boot.img
-    // window; GUEST_DTB_PA = STAGED_BOOT_IMG_PA + STAGED_BOOT_IMG_SIZE,
-    // which is unrelated when we allocated dynamically.) Allocate the
-    // DTB explicitly: hand it the page immediately after the boot.img
-    // window in our alloc, OR fall back to the constant.
+    // RELOCATED WINDOW: DTB sits right after the boot.img window inside the
+    // 4 GiB guest DRAM at GUEST_PA_BASE; region_size = the FULL window (4 GiB).
     let (dtb_pa, region_size) = {
-        let alloc_pa = unsafe { STAGED_ALLOC_PA };
-        if alloc_pa != 0 {
-            // Place DTB right after the boot.img window. UEFI alloc gave
-            // us STAGE_PAGES + 512 pages = 66 MiB, minus 2 MiB lost to
-            // alignment — leaves ≥ 64 MiB. The DTB is small (8 KiB) so
-            // 64 MiB + slack fits both comfortably as a single region.
-            // The region the NPT will map is the boot.img window only;
-            // DTB lives just above it.
-            let dtb = alloc_pa + crate::android_handoff::STAGED_BOOT_IMG_SIZE;
-            let total = crate::android_handoff::STAGED_BOOT_IMG_SIZE
-                      + crate::android_handoff::GUEST_DTB_SIZE
-                      + crate::android_handoff::KERNEL_WORKING_RAM_SIZE;
-            (dtb, total)
-        } else {
-            (crate::android_handoff::GUEST_DTB_PA,
-             crate::android_handoff::HANDOFF_REGION_SIZE)
-        }
+        use aether_translator::runtime::mmu::{GUEST_PA_BASE, GUEST_PA_SIZE};
+        (GUEST_PA_BASE + crate::android_handoff::STAGED_BOOT_IMG_SIZE,
+         GUEST_PA_SIZE)
     };
 
-    // Phase-E: PROBE the handoff window for actual writable extent. UEFI
-    // leaves non-RAM holes (runtime services, ACPI reclaim, reserved
-    // boot-services regions) inside the contiguous PA range AllocatePages
-    // returned. Writes to a hole silently return 0 on read-back; the
-    // kernel's early_pgtable_alloc grabs from the TOP of advertised
-    // memory, so without probing it lands in a hole and the next BUG_ON
-    // fires (`create_kpti_ng_temp_pgd+0x860` was the original symptom).
-    // Walk every 4 KiB page (write magic / read-back / restore) and
-    // truncate `region_size` to the first hole. Telemetry on the first
-    // hole is emitted by the probe.
-    let probed_writable = unsafe { probe_handoff_writable_extent(stage_pa, region_size) };
-    // Back off a safety margin from the probed top. The write/read-back probe
-    // passes some pages near the top of advertised RAM that are NOT reliable
-    // guest RAM at dispatch time — the q35 2 GiB PCI-hole boundary and OVMF's
-    // reserved top-of-low-RAM echo writes (so the probe's MAGIC reads back) yet
-    // a later kernel read of the same PA host-#PFs (not-present). The kernel
-    // places its `struct page` array (mem_map) and early page tables at the TOP
-    // of advertised RAM, so it lands exactly in this over-reported zone:
-    // observed as a caught #PF cr2=0x7fffffa8 (≈130 MiB in) reading mem_section
-    // for a top PFN, while the probe claimed 146 MiB writable. Trimming 32 MiB
-    // keeps mem_map within the genuinely-mapped region. (Diagnosed via the
-    // now-working host IDT: rip in code_buf/.data, guest x8/x20 sane.)
-    const TOP_SAFETY_MARGIN: u64 = 32 * 1024 * 1024;
-    let trimmed = probed_writable.saturating_sub(TOP_SAFETY_MARGIN);
-    let safe_region_size = trimmed & !0x1F_FFFFu64; // 2-MiB-align down
-    if safe_region_size < region_size {
+    // PROBE SKIPPED for the relocated window. The old <4 GiB window was carved
+    // from a UEFI AllocatePages span that BORROWED untagged adjacent pages
+    // interleaved with UEFI Runtime Services / ACPI-reclaim / OVMF-reserved /
+    // q35 PCI-hole regions — so `probe_handoff_writable_extent` had to find the
+    // first hole and truncated 1 GiB → ~562 MiB (the cause of "Memory: 573440K").
+    // The relocated window at [4 GiB, 8 GiB) is RAW `-m 16G` high-RAM (same kind
+    // of memory the PMEM images + JIT cache live in — those are NEVER probed):
+    // contiguous, hole-free, no firmware carve-outs. The de-risk sanity probe
+    // confirmed all round-trips OK. So advertise the full window directly; the
+    // truncation message is gone. (RESTORE still uses the checkpoint header's
+    // saved size if a checkpoint is present.)
+    let restore_probe_skip = unsafe { checkpoint_header_present() };
+    let region_size = if restore_probe_skip {
+        let h_region = unsafe {
+            let src = checkpoint_header_pa() as *const CheckpointHeader;
+            core::ptr::read_volatile(ptr::addr_of!((*src).region_size))
+        };
         unsafe {
-            dual_puts(b"[x86] handoff: truncating advertised RAM from 0x");
-            dual_puthex64(region_size);
-            dual_puts(b" to 0x");
-            dual_puthex64(safe_region_size);
-            dual_puts(b" (probe=0x");
-            dual_puthex64(probed_writable);
-            dual_puts(b" - 32M top margin; PCI-hole/OVMF-reserved)\n");
+            dual_puts(b"[ckpt] RESTORE: handoff probe SKIPPED, region_size=0x");
+            dual_puthex64(h_region);
+            dual_puts(b"\n");
         }
-    }
-    let region_size = safe_region_size;
+        h_region
+    } else {
+        unsafe {
+            dual_puts(b"[x86] handoff: relocated window, probe SKIPPED, region=0x");
+            dual_puthex64(region_size);
+            dual_puts(b" (raw high-RAM, hole-free)\n");
+        }
+        region_size
+    };
 
-    let handoff: Option<AndroidHandoff> = unsafe {
+    // ── CHECKPOINT RESTORE: synthesize the handoff instead of scanning ──────
+    // On a restore boot the running kernel has overwritten the "ANDROID!" magic
+    // at stage_pa, so prepare_android_handoff_at() would fail (-> foundation-gate
+    // HLT). Detect the checkpoint header (same fixed PA as the staging guard) and
+    // build a minimal synthetic handoff from the scalars it saved (region + kimg
+    // base). This re-arms DISPATCH_WINDOW_* / EPT-NPT extra_region / dbt_regs
+    // WITHOUT touching the restored kernel/init/data in the window. The DTB is NOT
+    // rebuilt or recopied; the kernel already parsed it at t0.
+    let restore_handoff = unsafe { checkpoint_header_present() };
+    let handoff: Option<AndroidHandoff> = if restore_handoff {
+        let h = unsafe { checkpoint_synth_handoff() };
+        unsafe {
+            dual_puts(b"[ckpt] RESTORE: synthetic handoff region_pa=");
+            dual_puthex64(h.region_pa);
+            dual_puts(b" region_size=");
+            dual_puthex64(h.region_size);
+            dual_puts(b" kimg_pa=");
+            dual_puthex64(h.layout.kernel_pa);
+            dual_puts(b" (boot.img scan + DTB build + hotpatch SKIPPED)\n");
+        }
+        Some(h)
+    } else { unsafe {
         match prepare_android_handoff_at(
             stage_pa,
             stage_size,
@@ -1546,7 +1634,7 @@ pub unsafe fn boot_x86_hypervisor(
                 None
             }
         }
-    };
+    }};
     // bisect(3) removed — dual_puts above already prints the boot.img /
     // handoff status; an audible tone here added nothing.
 
@@ -2891,6 +2979,357 @@ unsafe fn npf_ctx_ptr() -> *mut u64 {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Checkpoint / Restore — save an in-progress ARM64-Android boot to the host
+// pmemsave dump and resume after a crash/shutdown instead of restarting from t0.
+//
+// WHY this works (see also the dispatch loop + restore branch below):
+//   * ALL live guest state is in two places — the 1 GiB writable Android DRAM at
+//     host PA [GUEST_PA_BASE, GUEST_PA_BASE+GUEST_PA_SIZE) and the live ARM64
+//     register file `NPF_GUEST_CTX` (this is the file the dispatch loop carries
+//     forward across blocks — NOT the M2_REGFILE proof scratch). The x86 vCPU
+//     state is throwaway: on restore the .efi re-boots fresh and re-enters the
+//     DBT dispatch loop with the restored ARM64 context.
+//   * system.raw / vendor.raw are read-only PMEM (re-staged by QEMU) and the JIT
+//     cache regenerates deterministically, so neither is saved — only the 1 GiB
+//     DRAM (host pmemsave, done externally) + the small header written here.
+//
+// The header is written into a FIXED page INSIDE the 1 GiB DRAM window so that
+// the host-side `pmemsave` of that window captures it. It must round-trip with
+// the DRAM, so it cannot live in .efi BSS (outside the dumped range).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Master compile-time toggle. `false` removes the checkpoint write AND the
+/// restore branch (both gate on this) for a trivially-disablable build.
+const CHECKPOINT_ENABLED: bool = false; // disabled during guest-DRAM relocation bring-up (header PA auto-follows the new 4 GiB window; re-enable + re-validate checkpoint.raw region after relocation lands)
+
+/// Magic stamped at the top of the checkpoint header. Distinctive,
+/// non-canonical, unlikely to occur in guest data.
+const CHECKPOINT_MAGIC: u64 = 0x0AE7_C4EC_F00D_5A7E;
+
+/// Header format version. Bump on any layout change so a stale dump from an
+/// older .efi is rejected (magic could still match) — see `restore` check.
+const CHECKPOINT_VERSION: u64 = 1;
+
+/// Checkpoint cadence: fire every this-many dispatch iterations. ~1e9 iters is a
+/// few minutes of boot under WHPX — long enough that the 30 s pmemsave pause is a
+/// negligible fraction, frequent enough to bound lost progress on a crash.
+const CHECKPOINT_EVERY: u64 = 50_000_000; // TEST: fast first checkpoint (~t130); raise to 1e9 for grind
+
+/// Host wall-clock pause after writing the header, in RDTSC ticks. The host must
+/// `pmemsave` the full 1 GiB while the .efi is NOT mutating DRAM. Conservative:
+/// assume ~3 GHz TSC, target ~30 s of real time, then over-wait (120e9 ticks ≈
+/// 40 s @ 3 GHz / 24 s @ 5 GHz) — over-waiting is harmless, under-waiting risks a
+/// torn dump. Reads of NPF_GUEST_CTX during the wait are fine; we never write
+/// guest DRAM in the wait.
+const CHECKPOINT_TSC_WAIT: u64 = 120_000_000_000;
+
+/// Header physical address: the LAST 4 KiB of the LIVE guest DRAM window.
+///
+/// We derive this from `dispatch_window()` (the REAL runtime handoff span —
+/// `h.region_pa`/`h.region_size`) rather than hardcoding 0x8000_0000, so the
+/// header always lands inside the window the guest actually runs from and the
+/// host knows the exact PA to dump (it is emitted in the serial markers). For the
+/// task's stated contract — GUEST_PA_BASE=0x8000_0000, GUEST_PA_SIZE=1 GiB — this
+/// evaluates to 0x8000_0000 + 0x4000_0000 - 0x1000 = 0xBFFF_F000, the page the
+/// host pmemsaves as the tail of the 1 GiB dump.
+///
+/// It is host-readable/-writable as a raw pointer: the window is identity-mapped
+/// into host CR3 (the same WIN identity map the dispatch loop relies on), and on
+/// the legacy 0x8000_0000 path it is additionally below 4 GiB (OVMF low-4-GiB
+/// identity map), so the restore READ works even before the WIN map is re-pinned.
+///
+/// SAFETY NOTE (flagged in the report): the DTB advertises the full window as
+/// guest-usable RAM (android_handoff::HANDOFF_REGION_SIZE / memory_size), so in
+/// principle the guest CAN allocate this top page. In practice, during the
+/// early-boot window this checkpoint targets (kernel + init bring-up), the very
+/// top of the region is not touched. If a future change makes the guest use the
+/// tail, shrink the advertised memory_size by one page so this page becomes
+/// reserved-but-still-in-window. This is the single thing to verify before
+/// trusting a restore.
+///
+/// ANCHORED TO THE FIXED CONTRACT PA, not the runtime window. All three sites —
+/// the checkpoint WRITE (dispatch loop), the staging-skip PEEK (outer boot, runs
+/// pre-EBS before DISPATCH_WINDOW_* is armed), and the RESTORE READ (inner loop,
+/// after the window is armed) — must reference the SAME physical page. The
+/// runtime UEFI-alloc window base can differ from GUEST_PA_BASE, and
+/// `dispatch_window()` is unset at the pre-EBS peek (would fall back anyway), so
+/// pinning to the fixed `GUEST_PA_BASE + GUEST_PA_SIZE - 0x1000` (= 0xBFFF_F000)
+/// keeps the three coherent and matches the page the host pmemsaves + reloads
+/// (checkpoint.raw via `-device loader`). The boot contract requires the live
+/// guest window to start at GUEST_PA_BASE; `checkpoint_window_matches_contract()`
+/// logs a warning if a future change breaks that assumption.
+const fn checkpoint_header_pa() -> u64 {
+    aether_translator::runtime::mmu::GUEST_PA_BASE
+        + aether_translator::runtime::mmu::GUEST_PA_SIZE
+        - 0x1000
+}
+
+/// On-disk (in-DRAM) checkpoint header. `repr(C)` for a stable layout the
+/// host-side loader can also parse if needed. Sized well under 4 KiB
+/// (16 + 229*8 = 1848 bytes), so it fits in the one reserved page.
+#[repr(C)]
+struct CheckpointHeader {
+    magic: u64,
+    version: u64,
+    saved_pc: u64,
+    /// Reserved/diagnostic slot (was WIN2_BASE). The PMEM window (WIN2) is
+    /// DETERMINISTICALLY rebuilt on every fresh boot from the fixed
+    /// `android_handoff::PMEM_SYSTEM_PA` constant inside
+    /// run_android_dispatch_loop_inner — it is NOT runtime-discovered — so it
+    /// neither needs saving nor restoring. The translator exposes no WIN2 getter
+    /// and the constraints forbid modifying that crate, so this stays 0; kept in
+    /// the layout as a documented reserved field for forward-compat.
+    win2_base: u64,
+    /// Live guest-RAM window base (`DISPATCH_WINDOW_BASE` == handoff region_pa).
+    /// Saved so restore can re-arm DISPATCH_WINDOW_* + the EPT/NPT `extra_region`
+    /// WITHOUT re-running prepare_android_handoff_at (which scans for "ANDROID!"
+    /// magic the running kernel has long since overwritten).
+    region_pa: u64,
+    /// Live guest-RAM window size (`DISPATCH_WINDOW_SIZE` == handoff region_size,
+    /// the probe-trimmed value).
+    region_size: u64,
+    /// Kernel-image base PA (the kimg VA->PA fallback `kimg_pa_base`, == the
+    /// original kernel entry / `regs.pc`). Restore feeds this back so the kimg
+    /// fallback maps the same span (the regfile PC itself is restored separately).
+    kimg_pa_base: u64,
+    /// Full copy of the live ARM64 register file (NPF_GUEST_CTX): GPRs x0..x30,
+    /// SP, PC, and the entire sysreg + spill region (CTX_U64S == 229 slots). The
+    /// WHOLE array is copied so no sysreg/spill slot is lost across restore.
+    regfile: [u64; aether_translator::runtime::context::CTX_U64S],
+}
+
+/// Write the checkpoint header into the reserved DRAM page, emit the serial
+/// marker, then busy-wait `CHECKPOINT_TSC_WAIT` host TSC ticks so the external
+/// pmemsave can capture a quiescent 1 GiB DRAM. Returns immediately if
+/// `CHECKPOINT_ENABLED == false`.
+///
+/// # Safety
+/// Single-core EL2 dispatch; `CHECKPOINT_HEADER_PA` is identity-mapped and inside
+/// the guest DRAM window. Caller must invoke this only at a clean BETWEEN-block
+/// boundary (top of the dispatch loop) where NPF_GUEST_CTX is coherent.
+unsafe fn checkpoint_write_and_pause(iter: u64, kimg_pa_base: u64) {
+    if !CHECKPOINT_ENABLED {
+        return;
+    }
+    // SAFETY: single-core EL2; header PA identity-mapped + in DRAM window.
+    unsafe {
+        let saved_pc = (*ptr::addr_of!(NPF_GUEST_CTX))[NPF_PC_SLOT];
+        // The live guest-RAM window (== the EPT/NPT mapped handoff region). Saved
+        // so restore re-arms it without re-scanning boot.img.
+        let (region_pa, region_size) = dispatch_window();
+
+        // Build the header on the (large, BSS-resident) dispatch stack, then copy
+        // the whole struct into the reserved DRAM page with one volatile write so
+        // the store is not elided and lands atomically from the .efi's view.
+        let mut hdr = CheckpointHeader {
+            magic: CHECKPOINT_MAGIC,
+            version: CHECKPOINT_VERSION,
+            saved_pc,
+            // WIN2 is rebuilt deterministically on fresh boot (PMEM_SYSTEM_PA
+            // constant), so nothing to save; reserved field stays 0.
+            win2_base: 0,
+            region_pa,
+            region_size,
+            kimg_pa_base,
+            regfile: [0u64; aether_translator::runtime::context::CTX_U64S],
+        };
+        let src = ptr::addr_of!(NPF_GUEST_CTX) as *const u64;
+        let mut i = 0usize;
+        while i < aether_translator::runtime::context::CTX_U64S {
+            hdr.regfile[i] = *src.add(i);
+            i += 1;
+        }
+
+        let hdr_pa = checkpoint_header_pa();
+
+        // ── Make the header page writable from the dispatch-loop context ─────
+        // At runtime the active page tables are the hypervisor's host CR3, where
+        // the top window page (0xBFFF_F000) is frequently NOT mapped present
+        // (nothing in the guest ever touched it). A raw write would #PF and the
+        // host #PF handler would loop forever — a silent hang BEFORE any marker.
+        // Force the page present + writable, mirroring the guest-DRAM access path
+        // the lifted stores use (identity host pointer into the WIN window).
+        let mapped = host_pt_ensure_page_present_rw(hdr_pa);
+
+        // ── Sanity round-trip BEFORE the real write ─────────────────────────
+        // Probe a scratch u64 at the very end of the page (offset 0xFF8, well past
+        // the ~1848-byte header). If it doesn't round-trip, the page is not
+        // reliably writable here — emit a visible marker and SKIP the checkpoint
+        // so it degrades to a no-op instead of hanging.
+        let scratch = (hdr_pa + 0xFF8) as *mut u64;
+        let probe: u64 = 0xC0DE_FACE_1234_5678;
+        let round_trips = if mapped {
+            core::ptr::write_volatile(scratch, probe);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            core::ptr::read_volatile(scratch) == probe
+        } else {
+            false
+        };
+        if !round_trips {
+            dual_puts(b"\n[ckpt] HEADER PA NOT WRITABLE 0x");
+            dual_puthex64(hdr_pa);
+            dual_puts(b" -- checkpoint SKIPPED (no-op)\n");
+            return;
+        }
+
+        let dst = hdr_pa as *mut CheckpointHeader;
+        core::ptr::write_volatile(dst, hdr);
+
+        // Serializing/ordering store fence so the header is globally visible
+        // before we emit the READY marker the host watches for.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+
+        dual_puts(b"\n[ckpt] CHECKPOINT_READY iter=");
+        dual_puthex64(iter);
+        dual_puts(b" pc=");
+        dual_puthex64(saved_pc);
+        dual_puts(b" hdr_pa=");
+        dual_puthex64(hdr_pa);
+        dual_puts(b"\n");
+
+        // Host wall-clock pause (RDTSC, NOT the guest CNTVCT). Do NOT mutate guest
+        // DRAM during this window — the external pmemsave runs here.
+        let start = host_tsc();
+        loop {
+            let now = host_tsc();
+            // Wrap-safe elapsed check.
+            if now.wrapping_sub(start) >= CHECKPOINT_TSC_WAIT {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        dual_puts(b"[ckpt] resume after pmemsave window\n");
+    }
+}
+
+/// Restore branch: if the reserved DRAM page holds a valid checkpoint header,
+/// copy the saved register file back into `NPF_GUEST_CTX`, restore the defensive
+/// globals, emit the marker, and return `true` (caller SKIPs the boot.img /
+/// kernel-load + fresh PC seed and resumes the dispatch loop mid-boot). Returns
+/// `false` for a fresh boot (magic/version mismatch or checkpoint disabled).
+///
+/// # Safety
+/// Must be called only AFTER the EPT/host-CR3 identity map covers the guest DRAM
+/// window (so `CHECKPOINT_HEADER_PA` is readable) and BEFORE the kernel is loaded.
+unsafe fn checkpoint_try_restore() -> bool {
+    if !CHECKPOINT_ENABLED {
+        return false;
+    }
+    // SAFETY: header PA identity-mapped + in DRAM window once EPT is up.
+    unsafe {
+        // Same dispatch-loop context as checkpoint_write_and_pause: force the
+        // header page present + writable before touching it so the read can't #PF.
+        if !host_pt_ensure_page_present_rw(checkpoint_header_pa()) {
+            dual_puts(b"\n[ckpt] header page not mappable -- fresh boot\n");
+            return false;
+        }
+        let src = checkpoint_header_pa() as *const CheckpointHeader;
+        let magic = core::ptr::read_volatile(ptr::addr_of!((*src).magic));
+        if magic != CHECKPOINT_MAGIC {
+            return false; // fresh boot
+        }
+        let version = core::ptr::read_volatile(ptr::addr_of!((*src).version));
+        if version != CHECKPOINT_VERSION {
+            dual_puts(b"\n[ckpt] header version mismatch -- ignoring, fresh boot\n");
+            return false;
+        }
+        let saved_pc = core::ptr::read_volatile(ptr::addr_of!((*src).saved_pc));
+
+        // Copy the saved register file back into the LIVE context the dispatch
+        // loop reads (NPF_GUEST_CTX). Whole array — GPRs/SP/PC/sysregs/spill.
+        let dst = ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64;
+        let reg0 = ptr::addr_of!((*src).regfile) as *const u64;
+        let mut i = 0usize;
+        while i < aether_translator::runtime::context::CTX_U64S {
+            *dst.add(i) = core::ptr::read_volatile(reg0.add(i));
+            i += 1;
+        }
+        // Mark the live context seeded so npf_ctx_ptr() does NOT re-seed (which
+        // would clobber the restored RO ID sysregs with defaults).
+        *ptr::addr_of_mut!(NPF_CTX_SEEDED) = true;
+
+        // No globals to restore: WIN2 (PMEM window), the WIN guest-PA window, the
+        // kimg fallback, the JIT cache, and the MMIO handler are all rebuilt
+        // deterministically by run_android_dispatch_loop_inner on every boot
+        // (they are derived from fixed constants, not runtime-discovered). The
+        // ONLY non-DRAM, non-reconstructed state is the ARM64 register file, which
+        // we just restored above.
+
+        dual_puts(b"\n[ckpt] RESTORE detected pc=");
+        dual_puthex64(saved_pc);
+        dual_puts(b"\n");
+        true
+    }
+}
+
+/// True iff the reserved header page holds a valid (magic + version) checkpoint.
+/// Cheap peek used by the OUTER boot path to gate boot.img staging + handoff.
+///
+/// # Safety
+/// Header PA must be readable (low-4-GiB identity map live, page host-populated).
+unsafe fn checkpoint_header_present() -> bool {
+    if !CHECKPOINT_ENABLED {
+        return false;
+    }
+    // SAFETY: low-4-GiB identity map is live pre-EBS; header PA is a fixed,
+    // 4 KiB-aligned guest-DRAM page the host loader populated.
+    unsafe {
+        let src = checkpoint_header_pa() as *const CheckpointHeader;
+        let magic = core::ptr::read_volatile(ptr::addr_of!((*src).magic));
+        if magic != CHECKPOINT_MAGIC {
+            return false;
+        }
+        let version = core::ptr::read_volatile(ptr::addr_of!((*src).version));
+        version == CHECKPOINT_VERSION
+    }
+}
+
+/// Synthesize the `AndroidHandoff` for a RESTORE boot from the scalars saved in
+/// the checkpoint header — WITHOUT calling prepare_android_handoff_at (which
+/// scans for "ANDROID!" magic the running kernel has overwritten, builds/copies a
+/// fresh DTB into the live window, and re-decompresses the kernel — all of which
+/// would clobber the restored mid-boot state). The downstream arm path only reads
+/// `region_pa`/`region_size` (DISPATCH_WINDOW_* + EPT/NPT extra_region),
+/// `layout.kernel_pa` (kimg fallback base + hotpatch target), and `dbt_regs`
+/// (overridden by the regfile restore in run_android_dispatch_loop_inner), so a
+/// minimal synthetic handoff suffices.
+///
+/// # Safety
+/// Caller must have confirmed `checkpoint_header_present()`; header PA readable.
+unsafe fn checkpoint_synth_handoff() -> AndroidHandoff {
+    // SAFETY: validated by checkpoint_header_present(); fixed readable page.
+    unsafe {
+        let src = checkpoint_header_pa() as *const CheckpointHeader;
+        let region_pa    = core::ptr::read_volatile(ptr::addr_of!((*src).region_pa));
+        let region_size  = core::ptr::read_volatile(ptr::addr_of!((*src).region_size));
+        let kimg_pa_base = core::ptr::read_volatile(ptr::addr_of!((*src).kimg_pa_base));
+        let saved_pc     = core::ptr::read_volatile(ptr::addr_of!((*src).saved_pc));
+        AndroidHandoff {
+            layout: crate::android_boot::AndroidBootLayout {
+                header_pa:      region_pa,
+                kernel_pa:      kimg_pa_base,
+                kernel_size:    0,
+                ramdisk_pa:     0,
+                ramdisk_size:   0,
+                header_version: 0,
+            },
+            dtb_pa:   0,
+            dtb_len:  0,
+            // dbt_regs is overridden by the regfile restore; pc carries the kimg
+            // base so the kimg fallback (kimg_pa_base = regs.pc) re-arms correctly.
+            dbt_regs: crate::android_handoff::DbtInitialRegs::for_kernel_entry(
+                kimg_pa_base, 0,
+            ),
+            kernel_pc:   saved_pc,
+            region_pa,
+            region_size,
+            kernel_decompressed: false,
+        }
+    }
+}
+
 /// True iff the live guest has its MMU enabled (`SCTLR_EL1.M == 1`). When false
 /// (early boot) instruction fetch is flat (PC == guest PA); when true the PC is
 /// virtual and must be walked.
@@ -2937,6 +3376,42 @@ pub(crate) unsafe fn npf_fetch_guest_pa(pc: u64) -> Option<u64> {
             return None;
         }
         Some(pa)
+    }
+}
+
+/// PEND-transparent diagnostic read: snapshot the 3 pending-fault slots, run a
+/// read-xlate, then restore them, so a diagnostic xlate of an unmapped/garbage
+/// VA can never leak a spurious pending Data Abort into the guest (which the
+/// dispatcher would otherwise inject -> spurious SIGSEGV). Returns the host PA,
+/// or 0 (XLATE_FAULT) on a walk fault.
+///
+/// # Safety
+/// Must run in SVM host mode with the live guest page tables resident in the
+/// (identity-mapped) guest window the walker is pinned to.
+#[allow(unsafe_code)]
+unsafe fn diag_xlate(va: u64, size: u64) -> u64 {
+    use aether_translator::runtime::context::SYSREG_SLOT0;
+    // PEND slot indices relative to SYSREG_SLOT0 (see mmu.rs: SLOT_PEND_PENDING=56,
+    // SLOT_PEND_FAR=57, SLOT_PEND_ESR=58).
+    const P0: usize = 56;
+    const P1: usize = 57;
+    const P2: usize = 58;
+    // SAFETY: single-core EL2 dispatch; NPF_GUEST_CTX is the live guest reg-file.
+    unsafe {
+        let ctx = ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64;
+        let s0 = *ctx.add(SYSREG_SLOT0 + P0);
+        let s1 = *ctx.add(SYSREG_SLOT0 + P1);
+        let s2 = *ctx.add(SYSREG_SLOT0 + P2);
+        // Mark this as a diagnostic xlate so the EL0FLT_W / fault-capture latches
+        // ignore it — a diagnostic dumping a garbage value (e.g. 0x7ce8274c08)
+        // must not masquerade as init's real fault.
+        *ptr::addr_of_mut!(aether_translator::runtime::mmu::IN_DIAG_PROBE) = 1;
+        let pa = aether_translator::runtime::mmu::aether_mmu_xlate(ctx, va, 0, size);
+        *ptr::addr_of_mut!(aether_translator::runtime::mmu::IN_DIAG_PROBE) = 0;
+        *ctx.add(SYSREG_SLOT0 + P0) = s0;
+        *ctx.add(SYSREG_SLOT0 + P1) = s1;
+        *ctx.add(SYSREG_SLOT0 + P2) = s2;
+        pa
     }
 }
 
@@ -3056,6 +3531,125 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
         // bad_el0_sync and never run do_page_fault (so the page is never mapped).
         let cur_el_at_fault = (ctx_slice[SYSREG_SLOT0 + 42] >> 2) & 0b11; // SR_CURRENTEL
 
+        // ── el0_undef CAPTURE (2026-06-30, control-flow/SPSR corruptor hunt) ──
+        // The intermittent "init killed by SIGILL → el0_undef (ESR_EL1 EC=0x00)"
+        // is NOT a decoded-undefined (the UD2 injector at :7103 has ZERO hits) and
+        // the existing [uflt]/[exc] logs only fire on EL0 *data aborts* (EC 0x24/
+        // 0x25). The ONLY remaining way the guest kernel sees ESR_EL1.EC==0 from a
+        // lower EL is THIS path injecting a pending abort whose recorded ESR has
+        // EC==0 (a zero/garbage PEND_ESR while PEND_PENDING is set) — that lands at
+        // the kernel's el0_sync, reads EC=0, routes el0_undef, and SIGILLs init.
+        // We ALSO catch the IL=1 (illegal-execution-state) flavour: EC=0 covers
+        // BOTH "unknown instruction" AND PSTATE.IL==1.
+        //
+        // Fire UNCONDITIONALLY (not via dbt_event_log_ok) on this rare event so a
+        // single boot pins: the EL0 resume PC (ELR = NPF_PC_SLOT, the faulting/
+        // return PC), the SPSR-to-be-saved + its IL bit (SPSR bit 20), the pending
+        // ESR/FAR, and the prior-block PC ring (the blocks that led here — find the
+        // miscompiled block that corrupted control flow / the SPSR slot).
+        {
+            let pend_ec = (pend_esr >> 26) & 0x3F;
+            // PEND sub-slots relative to SYSREG_SLOT0: PENDING=56, FAR=57, ESR=58.
+            let pend_pending = ctx_slice[SYSREG_SLOT0 + 56];
+            // SPSR that inject() will save: NZCV[31:28] | DAIF[9:6] | mode[4:0].
+            // We surface the LIVE NZCV + DAIF + the SPSR_EL1 slot the guest last
+            // wrote (sub-slot 14) so a guest-written IL=1 SPSR is visible too.
+            let live_nzcv = ctx_slice[0x108 / 8] & 0xF000_0000;
+            let live_daif = ctx_slice[SYSREG_SLOT0 + 22] & (0b1111 << 6);
+            let guest_spsr = ctx_slice[SYSREG_SLOT0 + 14];
+            let il_in_guest_spsr = (guest_spsr >> 20) & 1;
+            if pend_pending != 0 && pend_ec == 0 {
+                let elr = ctx_slice[NPF_PC_SLOT];
+                dual_puts(b"[el0undef] EC=0 SYNC INJECTED el=");
+                dual_puthex64(cur_el_at_fault);
+                dual_puts(b" elr/pc=");
+                dual_puthex64(elr);
+                dual_puts(b" pend_esr=");
+                dual_puthex64(pend_esr);
+                dual_puts(b" IL(esr25)=");
+                dual_puthex64((pend_esr >> 25) & 1);
+                dual_puts(b" far=");
+                dual_puthex64(pend_far);
+                dual_puts(b"\n[el0undef] saved_spsr nzcv=");
+                dual_puthex64(live_nzcv);
+                dual_puts(b" daif=");
+                dual_puthex64(live_daif);
+                dual_puts(b" guest_spsr_el1=");
+                dual_puthex64(guest_spsr);
+                dual_puts(b" guest_spsr.IL(b20)=");
+                dual_puthex64(il_in_guest_spsr);
+                dual_puts(b"\n");
+                // Prior-block PC ring: the chain of translated blocks that ran into
+                // this fault. The block BEFORE the bad PC is the suspect corruptor.
+                let gi = *ptr::addr_of!(DBG_GUEST_PC_IDX);
+                let mut k = 0usize;
+                while k < 16 {
+                    dual_puts(b"[el0undef] pcring=");
+                    dual_puthex64(*ptr::addr_of!(DBG_GUEST_PC_RING[(gi + k) % 16]));
+                    dual_puts(b"\n");
+                    k += 1;
+                }
+            }
+        }
+
+        // Capture the ORIGINAL spurious-fault-during-ret_to_user: the FIRST
+        // EL1-source fault taken while SP_EL0 holds a USER address (the
+        // ret_to_user window after `msr sp_el0, user_sp`). enter_from_kernel_mode
+        // then loops re-faulting on current=SP_EL0, overwriting ELR — so latch
+        // this one's faulting PC/FAR/ESR (the real bug) before the loop hides it.
+        {
+            let sp0 = ctx_slice[SYSREG_SLOT0 + 16];
+            let pc_now = ctx_slice[NPF_PC_SLOT];
+            let is_user_sp0 = sp0 >= 0x1000 && sp0 < 0x0001_0000_0000_0000;
+            // not already in enter_from_kernel_mode (0x..ee9e50 range)
+            let in_efkm = pc_now >= 0xffff_ffc0_08ee_9e00 && pc_now < 0xffff_ffc0_08ee_9f00;
+            static mut OFLT_LATCHED: bool = false;
+            if cur_el_at_fault == 1 && is_user_sp0 && !in_efkm
+                && !*ptr::addr_of!(OFLT_LATCHED)
+            {
+                *ptr::addr_of_mut!(OFLT_LATCHED) = true;
+                dual_puts(b"[oflt] ORIGINAL ret_to_user fault: pc=");
+                dual_puthex64(pc_now);
+                dual_puts(b" far=");
+                dual_puthex64(pend_far);
+                dual_puts(b" esr=");
+                dual_puthex64(pend_esr);
+                dual_puts(b" sp_el0=");
+                dual_puthex64(sp0);
+                dual_puts(b" ttbr0=");
+                dual_puthex64(ctx_slice[SYSREG_SLOT0 + 1]);
+                dual_puts(b" ttbr1=");
+                dual_puthex64(ctx_slice[SYSREG_SLOT0 + 2]);
+                dual_puts(b"\n");
+                // Full GPR file — x28 (tsk/current) should be a kernel ptr but
+                // holds init's saved value; which reg DOES hold current points at
+                // the clobber. SP_EL1 (slot 17) = the kernel stack.
+                let mut r = 0usize;
+                while r < 31 {
+                    dual_puts(b"[oflt] x");
+                    dual_puthex64(r as u64);
+                    dual_puts(b"=");
+                    dual_puthex64(ctx_slice[r]);
+                    dual_puts(b"\n");
+                    r += 1;
+                }
+                dual_puts(b"[oflt] sp_el1=");
+                dual_puthex64(ctx_slice[SYSREG_SLOT0 + 17]);
+                dual_puts(b" elr=");
+                dual_puthex64(ctx_slice[SYSREG_SLOT0 + 13]);
+                dual_puts(b"\n");
+                // Recent guest-PC ring — the blocks leading into the bad x28.
+                let gi = *ptr::addr_of!(DBG_GUEST_PC_IDX);
+                let mut k = 0usize;
+                while k < 16 {
+                    dual_puts(b"[oflt] pcring=");
+                    dual_puthex64(*ptr::addr_of!(DBG_GUEST_PC_RING[(gi + k) % 16]));
+                    dual_puts(b"\n");
+                    k += 1;
+                }
+            }
+        }
+
         // (Phase-D linear-map fault handling has moved into the walker's
         // kernel-image fallback path — see aether_mmu_set_kimg_fallback.)
 
@@ -3080,6 +3674,34 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
             if pend_far >= 0x1000 && (pend_far >> 55) & 1 == 0 {
                 static mut UF_DUMPS: u32 = 0;
                 let dumps = *ptr::addr_of!(UF_DUMPS);
+                // ALSO catch a REPEATING user-VA fault (the loop) regardless of
+                // ASLR: when the same far faults >10× in a row, dump its walk up
+                // to 8× — this nails the EL1-uaccess fault loop in mount() whose
+                // far is randomized each boot. desc bit0 clear at faultL => PTE
+                // genuinely absent (kernel never maps / -EFAULT path); a flip to
+                // valid while we keep faulting => walker/TLB coherence.
+                static mut UF_LAST: u64 = 0;
+                static mut UF_REPEAT: u32 = 0;
+                static mut UF_LOOP_DUMPS: u32 = 0;
+                // Track by PAGE (not exact byte) so the el1_abort kernel-uaccess
+                // CoW loop — which alternates faulting bytes/perms on the SAME
+                // page (e.g. 0x..e8 translation then 0x..e9 permission) and so
+                // never repeats an exact far — registers as a loop. Normal demand
+                // paging touches a page ~2× then advances, staying well under 60.
+                let pend_page = pend_far & !0xFFFu64;
+                if pend_page == *ptr::addr_of!(UF_LAST) {
+                    *ptr::addr_of_mut!(UF_REPEAT) =
+                        (*ptr::addr_of!(UF_REPEAT)).saturating_add(1);
+                } else {
+                    *ptr::addr_of_mut!(UF_LAST) = pend_page;
+                    *ptr::addr_of_mut!(UF_REPEAT) = 0;
+                }
+                let loop_dump = *ptr::addr_of!(UF_REPEAT) > 60
+                    && *ptr::addr_of!(UF_LOOP_DUMPS) < 40;
+                if loop_dump {
+                    *ptr::addr_of_mut!(UF_LOOP_DUMPS) =
+                        (*ptr::addr_of!(UF_LOOP_DUMPS)).saturating_add(1);
+                }
                 // Dump the first 40 user-VA aborts. 0x514d5c dominates the fault
                 // stream (~68/80), so 40 dumps capture MANY of its faults — the
                 // L3 desc across them answers "does the kernel ever map it?":
@@ -3087,8 +3709,10 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
                 // flip to valid while we keep faulting => walker coherence.
                 // injESR + cur_el + elr confirm delivery: cur_el=0 and
                 // injESR=...x92.. (EC=0x24 lower-EL) mean delivery is correct.
-                if dumps < 40 {
-                    *ptr::addr_of_mut!(UF_DUMPS) = dumps + 1;
+                if dumps < 40 || loop_dump {
+                    if dumps < 40 {
+                        *ptr::addr_of_mut!(UF_DUMPS) = dumps + 1;
+                    }
                     let is_w = (pend_esr >> 6) & 1 == 1;
                     let wd = aether_translator::runtime::mmu::walk_debug(
                         ctx_slice, pend_far, is_w,
@@ -3128,6 +3752,62 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
                         dual_puts(b"\n");
                         lv += 1;
                     }
+                    // [wstore] PTE-write watch: on a LOOPING fault, report how many
+                    // stores have hit the L3 PTE slot since the last dump, and arm
+                    // the watch for the next window. hits==0 across dumps => the
+                    // kernel never writes the PTE (do_anonymous_page bailed early);
+                    // hits>0 with a valid leaf value while we keep faulting =>
+                    // host-mapping coherence.
+                    if loop_dump {
+                        let l3pa = wd.levels[3].0;
+                        dual_puts(b"[wstore] L3pa=");
+                        dual_puthex64(l3pa);
+                        dual_puts(b" hits=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::mmu::WATCH_HITS));
+                        dual_puts(b" lastval=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::mmu::WATCH_VAL));
+                        dual_puts(b" scat=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::mmu::WATCH_SCATTER_HITS));
+                        dual_puts(b" xlw=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::mmu::WATCH_XLATE_W_HITS));
+                        dual_puts(b" xlwval=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::mmu::WATCH_XLW_VAL));
+                        dual_puts(b" curmem=");
+                        dual_puthex64(core::ptr::read_volatile(l3pa as *const u64));
+                        dual_puts(b" stPC=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::mmu::WATCH_STORE_PC));
+                        dual_puts(b" xlwPC=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::mmu::WATCH_XLW_PC));
+                        dual_puts(b" xlwX30=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::mmu::WATCH_XLW_X30));
+                        dual_puts(b" x1=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::mmu::WATCH_XLW_X1));
+                        dual_puts(b" caller=");
+                        dual_puthex64(*ptr::addr_of!(
+                            aether_translator::runtime::mmu::WATCH_XLW_CALLER));
+                        dual_puts(b"\n[wstore]  x4=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::WATCH_R4));
+                        dual_puts(b" x27=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::WATCH_R27));
+                        dual_puts(b" x28=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::WATCH_R28));
+                        dual_puts(b" x24=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::WATCH_R24));
+                        dual_puts(b" nzcv=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::WATCH_NZCV));
+                        dual_puts(b"\n");
+                        *ptr::addr_of_mut!(
+                            aether_translator::runtime::mmu::WATCH_PA) = l3pa;
+                    }
                     // mmap probe: the last anonymous mmap's request + the kernel's
                     // actual return (x0 captured at the ERET back to EL0), printed
                     // next to `far`. If ret == far & ~0xfff the kernel handed /init
@@ -3144,6 +3824,84 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
                         dual_puts(b" -> ret=");
                         dual_puthex64(*ptr::addr_of!(exceptions::MMAP_RET));
                         dual_puts(b"\n");
+                    }
+                    // On the FIRST loop dump, dump the SP_EL0/TTBR0 change ring —
+                    // reveals the block that set SP_EL0=user / TTBR0=idmap that
+                    // makes enter_from_kernel_mode's current-deref loop.
+                    if loop_dump {
+                        static mut SREG_DUMPED: bool = false;
+                        if !*ptr::addr_of!(SREG_DUMPED) {
+                            *ptr::addr_of_mut!(SREG_DUMPED) = true;
+                            let idx = *ptr::addr_of!(SREG_RING_IDX);
+                            let mut k = 0usize;
+                            while k < SREG_RING_LEN {
+                                let e = (*ptr::addr_of!(SREG_RING))
+                                    [(idx + k) % SREG_RING_LEN];
+                                dual_puts(b"[sreg] pc=");
+                                dual_puthex64(e[0]);
+                                dual_puts(b" sp_el0=");
+                                dual_puthex64(e[1]);
+                                dual_puts(b" ttbr0=");
+                                dual_puthex64(e[2]);
+                                dual_puts(b"\n");
+                                k += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            // KERNEL-VA fault classifier (bit55=1, TTBR1): the el1h_64_sync
+            // nested-abort loop. The kernel's own SP (a vmap stack) or a
+            // page-table page faults at EL1. Dump the TTBR1 walk + the backing
+            // PA so we can tell a DROPPED-WRITE borrowed-RAM page (descpa/out_pa
+            // in the borrowed top span, desc reads 0) from a walker/KPTI issue.
+            if pend_far >= 0xffff_0000_0000_0000 {
+                static mut KF_LAST: u64 = 0;
+                static mut KF_DUMPS: u32 = 0;
+                let repeat_new = pend_far != *ptr::addr_of!(KF_LAST);
+                if repeat_new { *ptr::addr_of_mut!(KF_LAST) = pend_far; }
+                if *ptr::addr_of!(KF_DUMPS) < 12 {
+                    *ptr::addr_of_mut!(KF_DUMPS) =
+                        (*ptr::addr_of!(KF_DUMPS)).saturating_add(1);
+                    let is_w = (pend_esr >> 6) & 1 == 1;
+                    let wd = aether_translator::runtime::mmu::walk_debug(
+                        ctx_slice, pend_far, is_w,
+                    );
+                    dual_puts(b"[kflt] far=");
+                    dual_puthex64(pend_far);
+                    dual_puts(b" esr=");
+                    dual_puthex64(pend_esr);
+                    dual_puts(b" ttbr1=");
+                    dual_puthex64(wd.ttbr);
+                    dual_puts(b" startL=");
+                    dual_puthex64(wd.start_level as u64);
+                    dual_puts(b" faultL=");
+                    dual_puthex64(wd.fault_level as u64);
+                    dual_puts(b" pa=");
+                    dual_puthex64(wd.out_pa);
+                    dual_puts(b" winrej=");
+                    dual_puthex64(wd.window_reject as u64);
+                    dual_puts(b" sp_el1=");
+                    dual_puthex64(ctx_slice[31]);
+                    dual_puts(b"\n");
+                    let mut lv = 0usize;
+                    while lv < 4 {
+                        let (dpa, d) = wd.levels[lv];
+                        if dpa != 0 || d != 0 {
+                            dual_puts(b"[kflt]  L");
+                            dual_puthex64(lv as u64);
+                            dual_puts(b" descpa=");
+                            dual_puthex64(dpa);
+                            dual_puts(b" desc=");
+                            dual_puthex64(d);
+                            // Read-back the descriptor page to expose dropped
+                            // writes: if `desc`==0 but a fresh round-trip of a
+                            // nearby slot fails, the page silently drops writes.
+                            dual_puts(b" rb=");
+                            dual_puthex64(core::ptr::read_volatile(dpa as *const u64));
+                            dual_puts(b"\n");
+                        }
+                        lv += 1;
                     }
                 }
             }
@@ -3213,6 +3971,286 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
             other => {
                 dual_puts(b"[psci] platform action -> halt: 0x");
                 dual_puthex64(other as u64);
+                dual_puts(b"\n");
+                // EL0-source fault capture — the crashing instruction PC + GPRs
+                // of the LAST userspace fault (= init's fatal SEGV before reset).
+                if *ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_HITS) != 0 {
+                    dual_puts(b"[el0flt] pc=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_PC));
+                    dual_puts(b" far=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_FAR));
+                    dual_puts(b" esr=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_ESR));
+                    dual_puts(b" x30=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_X30));
+                    dual_puts(b"\n");
+                    let xs = &*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_X);
+                    let mut gi = 0usize;
+                    while gi < 31 {
+                        dual_puts(b"[el0flt] x");
+                        dual_puthex64(gi as u64);
+                        dual_puts(b"=");
+                        dual_puthex64(xs[gi]);
+                        dual_puts(b"\n");
+                        gi += 1;
+                    }
+                }
+                // One-shot capture at the EXACT crash FAR (init's fatal deref).
+                if *ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_LATCH) != 0 {
+                    dual_puts(b"[el0flt-W] pc=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_PC));
+                    dual_puts(b" lgpc=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_LGPC));
+                    dual_puts(b" oppc=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_OPPC));
+                    dual_puts(b" insn=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_INSN));
+                    dual_puts(b"\n[el0flt-W] elr=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_ELR));
+                    dual_puts(b" spsr=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_SPSR));
+                    dual_puts(b" esr=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_ESR2));
+                    dual_puts(b"\n");
+                    // Host call stack at the fault — return addresses identify the
+                    // caller (JIT cache range vs hypervisor .text).
+                    dual_puts(b"[el0flt-hstk] rsp=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_RSP));
+                    dual_puts(b"\n");
+                    let hs = &*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_STK);
+                    let mut hi = 0usize;
+                    while hi < 48 {
+                        dual_puts(b"[el0flt-hstk] +");
+                        dual_puthex64((hi as u64) * 8);
+                        dual_puts(b"=");
+                        dual_puthex64(hs[hi]);
+                        dual_puts(b"\n");
+                        hi += 1;
+                    }
+                    // 32-word block disassembly window from lgpc (faulting block).
+                    let blk = &*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_BLK);
+                    let mut bk = 0usize;
+                    while bk < 32 {
+                        dual_puts(b"[el0flt-blk] +");
+                        dual_puthex64((bk as u64) * 4);
+                        dual_puts(b"=");
+                        dual_puthex64(blk[bk]);
+                        dual_puts(b"\n");
+                        bk += 1;
+                    }
+                    // [svwatch] ring: where the corrupted code pointer was written.
+                    if *ptr::addr_of!(aether_translator::runtime::mmu::SV_WATCH_HITS) != 0 {
+                        dual_puts(b"[svwatch] hits=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::SV_WATCH_HITS));
+                        dual_puts(b"\n");
+                        let wpc = &*ptr::addr_of!(aether_translator::runtime::mmu::SV_WATCH_PC);
+                        let wad = &*ptr::addr_of!(aether_translator::runtime::mmu::SV_WATCH_ADDR);
+                        let wvl = &*ptr::addr_of!(aether_translator::runtime::mmu::SV_WATCH_VAL);
+                        let wx3 = &*ptr::addr_of!(aether_translator::runtime::mmu::SV_WATCH_X30);
+                        let mut s = 0usize;
+                        while s < 8 {
+                            if wpc[s] != 0 || wad[s] != 0 {
+                                dual_puts(b"[svwatch] pc=");
+                                dual_puthex64(wpc[s]);
+                                dual_puts(b" addr=");
+                                dual_puthex64(wad[s]);
+                                dual_puts(b" val=");
+                                dual_puthex64(wvl[s]);
+                                dual_puts(b" x30=");
+                                dual_puthex64(wx3[s]);
+                                dual_puts(b"\n");
+                            }
+                            s += 1;
+                        }
+                    }
+                    // [eretw] kernel state at the ERET to the corrupted resume PC.
+                    if *ptr::addr_of!(aether_translator::runtime::exceptions::ERETW_LATCH) != 0 {
+                        dual_puts(b"[eretw] op_pc=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::exceptions::ERETW_OP_PC));
+                        dual_puts(b" elr=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::exceptions::ERETW_ELR));
+                        dual_puts(b" spsr=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::exceptions::ERETW_SPSR));
+                        dual_puts(b" sp_el0=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::exceptions::ERETW_SP_EL0));
+                        dual_puts(b" sp_el1=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::exceptions::ERETW_SP_EL1));
+                        dual_puts(b"\n");
+                        let ex = &*ptr::addr_of!(aether_translator::runtime::exceptions::ERETW_X);
+                        let mut e = 0usize;
+                        while e < 31 {
+                            dual_puts(b"[eretw] x");
+                            dual_puthex64(e as u64);
+                            dual_puts(b"=");
+                            dual_puthex64(ex[e]);
+                            dual_puts(b"\n");
+                            e += 1;
+                        }
+                    }
+                    // [eretil] an ERET restored a SPSR with PSTATE.IL=1 or an
+                    // illegal mode → the guest will take el0_undef/el1_undef on
+                    // the next instruction. This is the SPSR-corruption flavour
+                    // of the intermittent init SIGILL; the latched ELR is the EL0
+                    // PC about to fault, op_pc the block that did the bad ERET.
+                    if *ptr::addr_of!(aether_translator::runtime::exceptions::ERETIL_LATCH) != 0 {
+                        dual_puts(b"[eretil] BAD-SPSR ERET spsr=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::exceptions::ERETIL_SPSR));
+                        dual_puts(b" IL(b20)=");
+                        dual_puthex64((*ptr::addr_of!(aether_translator::runtime::exceptions::ERETIL_SPSR) >> 20) & 1);
+                        dual_puts(b" elr=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::exceptions::ERETIL_ELR));
+                        dual_puts(b" tgt_el=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::exceptions::ERETIL_TGT_EL));
+                        dual_puts(b" op_pc=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::exceptions::ERETIL_OP_PC));
+                        dual_puts(b"\n");
+                    }
+                    let wx = &*ptr::addr_of!(aether_translator::runtime::mmu::EL0FLT_W_X);
+                    let mut wj = 0usize;
+                    while wj < 31 {
+                        dual_puts(b"[el0flt-W] x");
+                        dual_puthex64(wj as u64);
+                        dual_puts(b"=");
+                        dual_puthex64(wx[wj]);
+                        dual_puts(b"\n");
+                        wj += 1;
+                    }
+                }
+                // When the PSCI action is init's exit_group→panic→SYSTEM_OFF
+                // ("Attempted to kill init"), dump the recent syscall ring: it is
+                // the only window into WHY second-stage init aborted, because init
+                // logs to logd (never the serial console). The last row is the
+                // exit_group; the rows before it are init's final operations (the
+                // failing openat / mount / etc.). Ring = [nr,x0,x1,x2,x30].
+                let ring = &*ptr::addr_of!(exceptions::SYSCALL_RING);
+                let idx = *ptr::addr_of!(exceptions::SYSCALL_RING_IDX);
+                let mut k = 0usize;
+                while k < 24 {
+                    let row = ring[(idx + 32 - 24 + k) % 32];
+                    dual_puts(b"[psci-exit] svc nr=");
+                    dual_puthex64(row[0]);
+                    dual_puts(b" x0=");
+                    dual_puthex64(row[1]);
+                    dual_puts(b" x1=");
+                    dual_puthex64(row[2]);
+                    dual_puts(b" x2=");
+                    dual_puthex64(row[3]);
+                    dual_puts(b" x30=");
+                    dual_puthex64(row[4]);
+                    dual_puts(b"\n");
+                    k += 1;
+                }
+                // init's address space is already torn down here (exit_mm before
+                // the panic), so we CANNOT walk its userspace VAs now. Instead read
+                // the strings captured AT SVC TIME (exceptions.rs) — the last
+                // connect() socket path and the last writev()-to-stderr message,
+                // which together name WHY init exit(1)'d.
+                let _ = ctx;
+                let cl = *ptr::addr_of!(exceptions::LAST_CONNECT_LEN);
+                if cl > 0 {
+                    dual_puts(b"[psci-exit] last connect='");
+                    let p = ptr::addr_of!(exceptions::LAST_CONNECT_PATH) as *const u8;
+                    dual_puts(core::slice::from_raw_parts(p, cl.min(128)));
+                    dual_puts(b"'\n");
+                }
+                let sl = *ptr::addr_of!(exceptions::LAST_STDERR_LEN);
+                if sl > 0 {
+                    dual_puts(b"[psci-exit] last stderr='");
+                    let p = ptr::addr_of!(exceptions::LAST_STDERR_MSG) as *const u8;
+                    dual_puts(core::slice::from_raw_parts(p, sl.min(256)));
+                    dual_puts(b"'\n");
+                }
+                // Dump the write ring in chronological order — init's crash text.
+                {
+                    let idx = *ptr::addr_of!(exceptions::WRITE_RING_IDX);
+                    let mut j = 0usize;
+                    while j < exceptions::WRITE_RING_N {
+                        let ri = (idx + j) % exceptions::WRITE_RING_N;
+                        let rl = (*ptr::addr_of!(exceptions::WRITE_RING_LEN))[ri] as usize;
+                        if rl > 0 {
+                            dual_puts(b"[psci-exit] w(fd=");
+                            dual_puthex64((*ptr::addr_of!(exceptions::WRITE_RING_FD))[ri] as u64);
+                            dual_puts(b")='");
+                            let p = ptr::addr_of!(exceptions::WRITE_RING[ri]) as *const u8;
+                            dual_puts(core::slice::from_raw_parts(p, rl.min(120)));
+                            dual_puts(b"'\n");
+                        }
+                        j += 1;
+                    }
+                }
+                {
+                    let idx = *ptr::addr_of!(exceptions::MOUNT_RING_IDX);
+                    let mut j = 0usize;
+                    while j < exceptions::MOUNT_RING_N {
+                        let ri = (idx + j) % exceptions::MOUNT_RING_N;
+                        let fl = (*ptr::addr_of!(exceptions::MOUNT_RING_FLAGS))[ri];
+                        let sp = ptr::addr_of!(exceptions::MOUNT_RING_SRC[ri]) as *const u8;
+                        let tp = ptr::addr_of!(exceptions::MOUNT_RING_TGT[ri]) as *const u8;
+                        let slen = {
+                            let mut n = 0usize;
+                            while n < 64 && *sp.add(n) != 0 { n += 1; }
+                            n
+                        };
+                        let tlen = {
+                            let mut n = 0usize;
+                            while n < 64 && *tp.add(n) != 0 { n += 1; }
+                            n
+                        };
+                        if slen > 0 || tlen > 0 || fl != 0 {
+                            dual_puts(b"[psci-exit] mount src='");
+                            dual_puts(core::slice::from_raw_parts(sp, slen));
+                            dual_puts(b"' tgt='");
+                            dual_puts(core::slice::from_raw_parts(tp, tlen));
+                            dual_puts(b"' flags=");
+                            dual_puthex64(fl);
+                            dual_puts(b"\n");
+                        }
+                        j += 1;
+                    }
+                }
+                {
+                    let pl = *ptr::addr_of!(exceptions::PROC_MOUNTS_LEN);
+                    if pl > 0 {
+                        dual_puts(b"[psci-exit] /proc/mounts(first ");
+                        dual_puthex64(pl as u64);
+                        dual_puts(b")=<<<\n");
+                        let p = ptr::addr_of!(exceptions::PROC_MOUNTS_BUF) as *const u8;
+                        dual_puts(core::slice::from_raw_parts(p, pl.min(396)));
+                        dual_puts(b"\n>>>\n");
+                    }
+                }
+                {
+                    let mut q = 0usize;
+                    while q < 12 {
+                        let ol = (*ptr::addr_of!(exceptions::OPEN_RING_LEN))[q];
+                        if ol > 0 {
+                            dual_puts(b"[psci-exit] open[");
+                            dual_puthex64(q as u64);
+                            dual_puts(b"]='");
+                            let p = ptr::addr_of!(exceptions::OPEN_RING_PATH) as *const u8;
+                            dual_puts(core::slice::from_raw_parts(
+                                p.add(q * 96), ol.min(96)));
+                            dual_puts(b"' ret=");
+                            dual_puthex64((*ptr::addr_of!(exceptions::OPEN_RING_RET))[q]);
+                            dual_puts(b"\n");
+                        }
+                        q += 1;
+                    }
+                }
+                dual_puts(b"[psci-exit] mknod_count=");
+                dual_puthex64(*ptr::addr_of!(exceptions::MKNOD_COUNT));
+                dual_puts(b" devnull_created=");
+                dual_puthex64(if *ptr::addr_of!(exceptions::DEVNULL_MKNOD_SEEN) { 1 } else { 0 });
+                dual_puts(b" mount_count=");
+                dual_puthex64(*ptr::addr_of!(exceptions::MOUNT_COUNT));
+                let dl = *ptr::addr_of!(exceptions::DEV_MOUNT_FSTYPE_LEN);
+                if dl > 0 {
+                    dual_puts(b" /dev=");
+                    let p = ptr::addr_of!(exceptions::DEV_MOUNT_FSTYPE) as *const u8;
+                    dual_puts(core::slice::from_raw_parts(p, dl.min(32)));
+                } else {
+                    dual_puts(b" /dev=<never-mounted>");
+                }
                 dual_puts(b"\n");
                 return None;
             }
@@ -3442,6 +4480,189 @@ unsafe fn host_pt_make_handoff_rw() {
     }
 }
 
+/// Ensure a SINGLE 4 KiB page at host PA `pa` is PRESENT + WRITABLE in the active
+/// host CR3, installing an identity leaf if it is currently not-present.
+///
+/// `host_pt_make_handoff_rw` only ORs W onto ALREADY-PRESENT leaves; the very top
+/// page of the guest window (the checkpoint header at 0xBFFF_F000) is frequently
+/// NOT mapped by OVMF (nothing ever touched it), so a raw `write_volatile` there
+/// from inside the dispatch loop #PFs and the host #PF handler loops forever
+/// (observed as a silent hang before any CHECKPOINT_READY marker). This forces it
+/// present so the header write lands. Returns `true` on success.
+///
+/// Mirrors the CR0.WP-clear + PML4→PDPT→PD→PT walk in `host_pt_make_handoff_rw`.
+/// If an ancestor is a large page (PS=1) the page is already mapped — we OR-in W
+/// on that large entry and return. If the PD entry is ABSENT (the top 2 MiB of
+/// the window has no PT — the guest never touched it) we install the reserved
+/// `CKPT_PT_PAGE` static as the PT (its address is a valid PT PA, PA==VA for
+/// identity-mapped .bss). Then we write the leaf `pa | P | RW`. Returns `false`
+/// only if the PDPT or PML4 itself is absent (never, for the 0xB.. region per the
+/// diagnosis); the caller's sanity round-trip + skip is the final safety net in
+/// case PA!=VA for the static.
+///
+/// MEASUREMENT: read-only walk dump for one VA under the CURRENT (dispatch-
+/// context) CR3. Prints `pml4[i]/pdpt[j]/pd[k]` raw entries, substituting the
+/// literal `ABSENT` where a parent level is not-present, so the boot log reveals
+/// exactly how the guest window is mapped (1 GiB PDPT leaf? 2 MiB PD entries?
+/// 4 KiB PTs?) and where 0xBFFF_F000 falls off the chain. Read-only: NEVER writes
+/// a PTE. `label` is emitted verbatim so two calls are easy to diff.
+///
+/// # Safety
+/// Post-EBS, single-core; reads the live host CR3 page-table pages.
+unsafe fn ckpt_walk_dump(va: u64) {
+    unsafe {
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+        let pml4 = (cr3 & 0x000F_FFFF_FFFF_F000) as *const u64;
+        let pml4_i = ((va >> 39) & 0x1FF) as isize;
+        let pdpt_i = ((va >> 30) & 0x1FF) as isize;
+        let pd_i   = ((va >> 21) & 0x1FF) as isize;
+
+        dual_puts(b"\n[ckpt] WALK va=");
+        dual_puthex64(va);
+        dual_puts(b" cr3=");
+        dual_puthex64(cr3);
+
+        let pml4e = core::ptr::read_volatile(pml4.offset(pml4_i));
+        dual_puts(b" pml4[");
+        dual_puthex64(pml4_i as u64);
+        dual_puts(b"]=");
+        dual_puthex64(pml4e);
+
+        dual_puts(b" pdpt[");
+        dual_puthex64(pdpt_i as u64);
+        dual_puts(b"]=");
+        if pml4e & 1 == 0 {
+            dual_puts(b"ABSENT");
+            dual_puts(b" pd[");
+            dual_puthex64(pd_i as u64);
+            dual_puts(b"]=ABSENT\n");
+            return;
+        }
+        let pdpt = (pml4e & 0x000F_FFFF_FFFF_F000) as *const u64;
+        let pdpte = core::ptr::read_volatile(pdpt.offset(pdpt_i));
+        dual_puthex64(pdpte);
+
+        dual_puts(b" pd[");
+        dual_puthex64(pd_i as u64);
+        dual_puts(b"]=");
+        if pdpte & 1 == 0 {
+            dual_puts(b"ABSENT");
+        } else if pdpte & (1 << 7) != 0 {
+            // PDPT 1 GiB large-page leaf — no PD level below it.
+            dual_puts(b"PDPT_1GiB_LEAF(no_pd)");
+        } else {
+            let pd = (pdpte & 0x000F_FFFF_FFFF_F000) as *const u64;
+            let pde = core::ptr::read_volatile(pd.offset(pd_i));
+            dual_puthex64(pde);
+            if pde & 1 != 0 && pde & (1 << 7) != 0 {
+                dual_puts(b" (PD_2MiB_PS=1)");
+            } else if pde & 1 != 0 {
+                dual_puts(b" (PD->PT_4KiB,PS=0)");
+            }
+        }
+        dual_puts(b"\n");
+    }
+}
+
+/// # Safety
+/// Post-EBS, single-core, we own CR3. `pa` is a 4 KiB-aligned conventional-RAM PA.
+unsafe fn host_pt_ensure_page_present_rw(pa: u64) -> bool {
+    unsafe {
+        const P:  u64 = 1;
+        const RW: u64 = 1 << 1;
+        let va = pa & !0xFFFu64;
+
+        // ── MEASUREMENT (one-shot) ───────────────────────────────────────────
+        // Before touching anything, dump the ACTUAL dispatch-context CR3 walk for
+        // the failing header page (0xBFFF_F000) AND a known-good guest page
+        // (0x80000000, the window base where the kernel lives). Read-only.
+        // Comparing the two at the same CR3 reveals the real window mapping shape
+        // and where 0xBFFF_F000 falls off. Latched so it fires exactly once.
+        if !*ptr::addr_of!(CKPT_WALK_DUMPED) {
+            *ptr::addr_of_mut!(CKPT_WALK_DUMPED) = true;
+            ckpt_walk_dump(0xBFFF_F000);
+            ckpt_walk_dump(0x8000_0000);
+        }
+
+        let saved_cr0: u64;
+        core::arch::asm!("mov {}, cr0", out(reg) saved_cr0, options(nomem, nostack));
+        core::arch::asm!("mov cr0, {}", in(reg) saved_cr0 & !(1u64 << 16),
+                         options(nomem, nostack));
+        let cr3: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack));
+        let pml4 = (cr3 & 0x0000_FFFF_FFFF_F000) as *mut u64;
+
+        let mut ok = false;
+        'walk: {
+            let pml4_idx = ((va >> 39) & 0x1FF) as isize;
+            let pml4e = core::ptr::read_volatile(pml4.offset(pml4_idx));
+            if pml4e & 1 == 0 { break 'walk; }            // no PDPT — give up
+            core::ptr::write_volatile(pml4.offset(pml4_idx), pml4e | RW);
+            let pdpt = (pml4e & 0x0000_FFFF_FFFF_F000) as *mut u64;
+
+            let pdpt_idx = ((va >> 30) & 0x1FF) as isize;
+            let pdpte = core::ptr::read_volatile(pdpt.offset(pdpt_idx));
+            if pdpte & 1 == 0 { break 'walk; }            // no PD — give up
+            core::ptr::write_volatile(pdpt.offset(pdpt_idx), pdpte | RW);
+            if pdpte & (1 << 7) != 0 { ok = true; break 'walk; } // 1 GiB leaf maps it
+            let pd = (pdpte & 0x0000_FFFF_FFFF_F000) as *mut u64;
+
+            const PS: u64 = 1 << 7;   // page-size bit (2 MiB leaf at the PD level)
+            let pd_idx = ((va >> 21) & 0x1FF) as isize;
+            let pde = core::ptr::read_volatile(pd.offset(pd_idx));
+            if pde & 1 != 0 {
+                // PD entry PRESENT. The guest window is mapped with 2 MiB large
+                // pages (PS=1) — OR-in W on this PDE and we are done (no PT level).
+                core::ptr::write_volatile(pd.offset(pd_idx), pde | RW);
+                ok = true;
+                break 'walk;
+            }
+
+            // PD entry ABSENT — the top 2 MiB of the window (0xBFE00000–0xBFFFFFFF)
+            // has no leaf because the guest never touched it. The window is
+            // 2 MiB-large-page mapped (the sibling PD entries are PS=1), so install
+            // a 2 MiB PS leaf here rather than a 4 KiB PT — no PT page, no
+            // PA-of-a-static assumption. Copy the flag bits (memtype / global / etc.)
+            // from a PRESENT sibling PDE in this same PD so the new leaf matches the
+            // window's caching; default to plain P|RW|PS if no sibling is present.
+            let mut sib_flags = P | RW | PS;
+            let mut s = 0isize;
+            while s < 512 {
+                if s != pd_idx {
+                    let e = core::ptr::read_volatile(pd.offset(s));
+                    if e & 1 != 0 && e & PS != 0 {
+                        // Low 12 flag bits + PS, minus the address field.
+                        sib_flags = (e & 0xFFF) | PS | P | RW;
+                        break;
+                    }
+                }
+                s += 1;
+            }
+            // Identity 2 MiB leaf: PA == VA's 2 MiB-aligned base (0xBFE00000).
+            let leaf_pa = va & !0x1F_FFFFu64;
+            core::ptr::write_volatile(pd.offset(pd_idx), leaf_pa | sib_flags);
+            // One-shot diagnostic: report the sibling flags copied + the leaf.
+            if !*ptr::addr_of!(CKPT_PT_INSTALLED) {
+                *ptr::addr_of_mut!(CKPT_PT_INSTALLED) = true;
+                dual_puts(b"[ckpt] PD[511] 2MiB leaf installed: leaf_pa=");
+                dual_puthex64(leaf_pa);
+                dual_puts(b" sib_flags=");
+                dual_puthex64(sib_flags);
+                dual_puts(b"\n");
+            }
+            ok = true;
+        }
+
+        // Flush TLB for the touched VA (CR3 reload is the simplest global flush).
+        let cr3_v: u64;
+        core::arch::asm!("mov {}, cr3", out(reg) cr3_v, options(nomem, nostack));
+        core::arch::asm!("mov cr3, {}", in(reg) cr3_v, options(nomem, nostack));
+        core::arch::asm!("mov cr0, {}", in(reg) saved_cr0, options(nomem, nostack));
+        ok
+    }
+}
+
 /// Identity-map `count` 1-GiB pages starting at `base_pa` into the HOST CR3 by
 /// installing 1-GiB-leaf PDPTEs. OVMF only identity-maps the low 4 GiB, so a
 /// high-RAM region — the PMEM `/system` image staged at 8 GiB — is otherwise
@@ -3518,6 +4739,12 @@ unsafe fn host_pt_map_identity_1g(base_pa: u64, count: u64) {
 /// # Safety
 /// `base_pa..base_pa+size_pa` must be entirely inside `[0, 4 GiB)` and
 /// host-identity-mapped (UEFI does this for low 4 GiB).
+///
+/// Retained but UNUSED after the guest-DRAM relocation: the new 4 GiB window is
+/// raw, hole-free high-RAM (like the PMEM images, which are never probed), so the
+/// hole-probe is skipped. Kept for the legacy <4 GiB UEFI-AllocatePages path and
+/// any future low-RAM staging that needs hole detection.
+#[allow(dead_code)]
 unsafe fn probe_handoff_writable_extent(base_pa: u64, size_pa: u64) -> u64 {
     // Phase-F: probe MULTIPLE offsets within each 4 KiB page (start,
     // middle, end). A single write/read at offset 0 missed UEFI holes
@@ -3639,6 +4866,10 @@ unsafe fn read_guest_window_identity(guest_pa: u64, max_len: usize) -> Option<(*
 /// x86 faulted, the prior entries are the call/branch chain that led there.
 pub static mut DBG_GUEST_PC_RING: [u64; 16] = [0; 16];
 pub static mut DBG_GUEST_PC_IDX: usize = 0;
+/// SP_EL0/TTBR0 change-trace ring: [pc, sp_el0, ttbr0] per change.
+const SREG_RING_LEN: usize = 24;
+pub static mut SREG_RING: [[u64; 3]; SREG_RING_LEN] = [[0; 3]; SREG_RING_LEN];
+pub static mut SREG_RING_IDX: usize = 0;
 
 // ── Dedicated dispatch-loop stack ────────────────────────────────────────────
 // The boot flow reaches the host-mode dispatch loop deep on the UEFI stack,
@@ -3702,6 +4933,13 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
         );
         // Clear any software-TLB residue left by the boot proof programs.
         aether_translator::runtime::mmu::aether_mmu_flush_all();
+        // Latch init's deterministic fatal-fault FAR so the EL0 capture snapshots
+        // the exact crashing GPR file (not a later/other-process fault).
+        *ptr::addr_of_mut!(aether_translator::runtime::mmu::EL0FLT_WATCH) =
+            0x0000_007c_e827_4c08u64;
+        // Store-VALUE watch: find where the corrupted code pointer is written.
+        *ptr::addr_of_mut!(aether_translator::runtime::mmu::SV_WATCH) =
+            0x0000_007c_e827_4c08u64;
 
         // Phase 3 PIVOT: the GKI kernel has NO virtio-blk driver (CONFIG_VIRTIO_*
         // all unset) but has CONFIG_OF_PMEM=y. The AOSP system.raw image is
@@ -3715,13 +4953,23 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
         //   (2) identity-map it into the HOST CR3 (OVMF maps only the low 4 GiB)
         //       so the VMX-root host-CALL dispatch can deref it without #PF.
         {
-            use crate::android_handoff::{PMEM_SYSTEM_PA, PMEM_SYSTEM_SIZE};
+            use crate::android_handoff::{PMEM_SYSTEM_PA, PMEM_SYSTEM_SIZE, PMEM_VENDOR_SIZE};
+            // vendor.raw is staged CONTIGUOUS right after system.raw, so ONE WIN2
+            // span covers both PMEM devices (/dev/pmem0 system + /dev/pmem1 vendor).
+            let pmem_total = PMEM_SYSTEM_SIZE + PMEM_VENDOR_SIZE;
             aether_translator::runtime::mmu::aether_mmu_set_window2(
                 PMEM_SYSTEM_PA,
-                PMEM_SYSTEM_SIZE,
+                pmem_total,
             );
-            // 1 GiB-leaf identity map covering the PMEM region (round size up).
-            let gigs = (PMEM_SYSTEM_SIZE + (1u64 << 30) - 1) >> 30;
+            // [vwatch] Boot 3: A's freepointer (A+0x60) was VALID, pointing one hop
+            // down to X=0xffffff801e002e10 — the actually-corrupted object. Watch
+            // X+0x60=0xffffff801e002e70 (which holds the garbage) to name the
+            // corruptor that wrote it.
+            // Boot 4: capture-only (LAST_INPAGE_ALLOC finds corrupted_obj at the
+            // fault). Watchpoint disabled this boot; set to corrupted_obj+0x60 next.
+            *ptr::addr_of_mut!(aether_translator::runtime::mmu::WATCH_VA) = 0u64;
+            // 1 GiB-leaf identity map covering the whole PMEM region (round up).
+            let gigs = (pmem_total + (1u64 << 30) - 1) >> 30;
             host_pt_map_identity_1g(PMEM_SYSTEM_PA, gigs);
             // Sanity: the QEMU loader should have placed the ext4 image here. The
             // ext4 superblock sits at byte offset 0x400; its magic (0x53 0xEF)
@@ -3842,23 +5090,43 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
         aether_translator::runtime::mmu::aether_arm_ebpf_store_value_max(0);
         dual_puts(b"[x30!] init-stack ring armed [0x...0800b000, 0x...0800c000) val_max=0\n");
 
-        // Seed the live guest register file: x0..x30 (slots 0..30), SP (slot
-        // 0xF8/8 = 31), PC (slot 0x100/8 = 32). npf_ctx_ptr() seeds the RO ID
-        // sysregs on first touch.
-        let ctx = npf_ctx_ptr();
-        for i in 0..31usize {
-            *ctx.add(i) = regs.x[i];
-        }
-        *ctx.add(0xF8 / 8) = regs.sp;
-        *ctx.add(NPF_PC_SLOT) = regs.pc;
+        // ── CHECKPOINT RESTORE branch ────────────────────────────────────────
+        // At this point EPT/Stage-2 + the WIN guest-PA window (dispatch_window())
+        // are set up, so the reserved header page is readable. If a valid
+        // checkpoint header is present, copy the saved ARM64 register file back
+        // into the LIVE context (NPF_GUEST_CTX) and SKIP the fresh kernel-entry
+        // seed below — the restored 1 GiB DRAM already holds the kernel, init,
+        // /data, and the guest's page tables, so the DBT resumes mid-boot. On a
+        // fresh boot (no/old header) this is a cheap no-op and we seed normally.
+        let restored = CHECKPOINT_ENABLED && checkpoint_try_restore();
+        if restored {
+            // npf_ctx_ptr() is still called for its return pointer, but since
+            // checkpoint_try_restore() set NPF_CTX_SEEDED it will NOT re-seed the
+            // sysregs (which would clobber the restored ID-reg/sysreg slots).
+            let _ctx = npf_ctx_ptr();
+            let rpc = (*ptr::addr_of!(NPF_GUEST_CTX))[NPF_PC_SLOT];
+            dual_puts(b"[x86] host-mode dispatch loop: RESUME (restored) pc=");
+            dual_puthex64(rpc);
+            dual_puts(b"\n");
+        } else {
+            // Seed the live guest register file: x0..x30 (slots 0..30), SP (slot
+            // 0xF8/8 = 31), PC (slot 0x100/8 = 32). npf_ctx_ptr() seeds the RO ID
+            // sysregs on first touch.
+            let ctx = npf_ctx_ptr();
+            for i in 0..31usize {
+                *ctx.add(i) = regs.x[i];
+            }
+            *ctx.add(0xF8 / 8) = regs.sp;
+            *ctx.add(NPF_PC_SLOT) = regs.pc;
 
-        dual_puts(b"[x86] host-mode dispatch loop: entry pc=");
-        dual_puthex64(regs.pc);
-        dual_puts(b" x0(dtb)=");
-        dual_puthex64(regs.x[0]);
-        dual_puts(b" sp=");
-        dual_puthex64(regs.sp);
-        dual_puts(b"\n");
+            dual_puts(b"[x86] host-mode dispatch loop: entry pc=");
+            dual_puthex64(regs.pc);
+            dual_puts(b" x0(dtb)=");
+            dual_puthex64(regs.x[0]);
+            dual_puts(b" sp=");
+            dual_puthex64(regs.sp);
+            dual_puts(b"\n");
+        }
 
         // ── On-screen observability for the live kernel grind ────────────────
         // DBT_TRACE_FIRST  — trace EVERY one of the first N blocks (iter, pc, raw
@@ -3923,7 +5191,10 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
         let mut last_pc:   u64 = regs.pc;
         let mut last_insn: u32 = 0;
 
-        const MAX_ITERS: u64 = 2_000_000_000; // userspace grind; watchdog HARD_WALL bounds wall time
+        // 2e9 capped the boot at ~t5312 (post-fs-data) EVERY run, well before zygote.
+        // Raised to 50e9 so the boot can reach zygote -> system_server -> SurfaceFlinger;
+        // strong_watch.sh (NOPROGRESS/STUCK) catches a real hang long before this backstop.
+        const MAX_ITERS: u64 = 50_000_000_000;
         // Stall detector: /init makes syscalls continuously while it runs. If
         // SYSCALL_TOTAL stops advancing for STALL_NO_SVC_LIMIT dispatches, the
         // guest is wedged (init blocked on a syscall / waiting on a missing
@@ -3932,10 +5203,28 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
         // its own because the idle guest produces almost no dispatches).
         let mut last_svc_total: u64 = 0;
         let mut no_svc_streak: u64 = 0;
-        const STALL_NO_SVC_LIMIT: u64 = 2_000_000;
+        // 80M: after the KPTI kernel-pgd fix + tramp fast-path /init reaches
+        // mount() and demand-pages a large post-mount region. A 600M run PROVED
+        // the post-mount wedge is a real loop in el1_abort (kernel-uaccess CoW on
+        // /init's exe at 0x5583d07xxx never resolves), NOT slowness — total stays
+        // 0x536 for 130M+ dispatches. 80M is enough headroom for any legitimate
+        // syscall-free stretch while surfacing the wedge diagnostic promptly.
+        const STALL_NO_SVC_LIMIT: u64 = 80_000_000;
         let mut iter: u64 = 0;
         loop {
             iter += 1;
+            // ── Periodic checkpoint (top-of-loop = clean BETWEEN-block boundary,
+            // NPF_GUEST_CTX coherent). Writes the header into the reserved DRAM
+            // page, emits CHECKPOINT_READY, and busy-waits ~30 s host wall-clock
+            // so the external host-side pmemsave can dump a quiescent 1 GiB DRAM.
+            // Gated on CHECKPOINT_ENABLED inside the helper; fires once per
+            // CHECKPOINT_EVERY iters (never at iter 0).
+            if CHECKPOINT_ENABLED && iter > 0 && iter % CHECKPOINT_EVERY == 0 {
+                // regs.pc is the original kernel entry == the kimg fallback base
+                // (kimg_pa_base at the fallback setup above); saved so restore can
+                // re-arm the kimg VA->PA fallback identically.
+                checkpoint_write_and_pause(iter, regs.pc);
+            }
             {
                 let cur_svc =
                     *ptr::addr_of!(aether_translator::runtime::exceptions::SYSCALL_TOTAL);
@@ -3949,7 +5238,7 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                     // otherwise false-trigger the stall dump during early boot.
                     no_svc_streak += 1;
                     if no_svc_streak == STALL_NO_SVC_LIMIT {
-                        dual_puts(b"[stall] init: no syscall for 2M dispatches -- forcing diag dump\n");
+                        dual_puts(b"[stall] init: no syscall for 80M dispatches -- forcing diag dump\n");
                         iter = MAX_ITERS + 1;
                     }
                 }
@@ -3962,6 +5251,21 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
             // cap. A climbing total with varied nr = forward progress; a frozen
             // total = a stall (the detector above then dumps the full ring).
             if (iter & 0xF_FFFF) == 0 {
+                // ── Display Gap 1: vblank present — copy the guest simple-framebuffer
+                // to the real host GOP framebuffer. The guest FB IPA is host-backed
+                // (WIN identity map) so it is directly readable here; same
+                // geometry+format as the GOP FB → a straight copy. Empty early in
+                // boot (harmless) until simpledrm + SurfaceFlinger render into it.
+                if let (Some(gfb), Some(hfb)) =
+                    (crate::kernel::dtb_framebuffer(), host_framebuffer())
+                {
+                    let n = core::cmp::min(gfb.size, hfb.size) as usize;
+                    if gfb.base != 0 && hfb.base != 0 && n > 0 {
+                        core::ptr::copy_nonoverlapping(
+                            gfb.base as *const u8, hfb.base as *mut u8, n,
+                        );
+                    }
+                }
                 use aether_translator::runtime::exceptions as exc;
                 let total = *ptr::addr_of!(exc::SYSCALL_TOTAL);
                 if total > 0 {
@@ -3975,7 +5279,104 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                     dual_puthex64(last[0]);
                     dual_puts(b" x0=");
                     dual_puthex64(last[1]);
+                    dual_puts(b" kpti=");
+                    dual_puthex64(*ptr::addr_of!(
+                        aether_translator::runtime::mmu::MMU_KPTI_FALLBACK_HITS));
+                    dual_puts(b" t1sw=");
+                    dual_puthex64(aether_translator::runtime::exceptions::TTBR1_SWITCH_FIRED
+                        .load(core::sync::atomic::Ordering::Relaxed));
+                    dual_puts(b" fbcur=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_FB_CUR));
+                    dual_puts(b" fbkpgd=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::MMU_FB_KPGD));
+                    dual_puts(b" lastvma=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::LAST_VMA_ALLOC));
+                    dual_puts(b" casp[724/728/72c]=");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::CASP_INSN0));
+                    dual_puts(b"/");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::CASP_INSN1));
+                    dual_puts(b"/");
+                    dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::CASP_INSN2));
+                    dual_puts(b" lowOK=");
+                    dual_puthex64(aether_translator::runtime::mmu::CASP_LOWER_OK
+                        .load(core::sync::atomic::Ordering::Relaxed));
+                    dual_puts(b" lowSpill=");
+                    dual_puthex64(aether_translator::runtime::mmu::CASP_LOWER_SPILL
+                        .load(core::sync::atomic::Ordering::Relaxed));
+                    dual_puts(b" hit=");
+                    dual_puthex64(aether_translator::runtime::mmu::CASP_HIT
+                        .load(core::sync::atomic::Ordering::Relaxed));
+                    // Heap-leak diagnostics: total bytes bumped (== leaked),
+                    // allocation count, and a size histogram (8 buckets:
+                    // <64 <256 <1Ki <4Ki <16Ki <64Ki <256Ki >=256Ki).
+                    // `global_alloc` is compiled out under cfg(test) (the host
+                    // test harness uses the system allocator).
+                    #[cfg(not(test))]
+                    {
+                    dual_puts(b" heap=");
+                    dual_puthex64(crate::global_alloc::heap_used() as u64);
+                    dual_puts(b" nalloc=");
+                    dual_puthex64(crate::global_alloc::alloc_count() as u64);
+                    dual_puts(b" hist=");
+                    }
+                    #[cfg(not(test))]
+                    {
+                        let mut hb = 0usize;
+                        while hb < 8 {
+                            dual_puthex64(crate::global_alloc::alloc_hist(hb) as u64);
+                            dual_puts(b"/");
+                            hb += 1;
+                        }
+                    }
                     dual_puts(b"\n");
+                    // [vwatch] fork-path freelist corruptor capture (ring of last 8).
+                    if *ptr::addr_of!(aether_translator::runtime::mmu::WATCH_VA_HITS) != 0 {
+                        dual_puts(b"[vwatch] va=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::WATCH_VA));
+                        dual_puts(b" hits=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::WATCH_VA_HITS));
+                        dual_puts(b"\n");
+                        let mut j = 0usize;
+                        while j < 8 {
+                            dual_puts(b"[vwatch]  pc=");
+                            dual_puthex64((*ptr::addr_of!(
+                                aether_translator::runtime::mmu::WATCH_VA_RING_PC))[j]);
+                            dual_puts(b" val=");
+                            dual_puthex64((*ptr::addr_of!(
+                                aether_translator::runtime::mmu::WATCH_VA_RING_VAL))[j]);
+                            dual_puts(b"\n");
+                            j += 1;
+                        }
+                    }
+                    // [garb] precise corrupted-object capture at the fault.
+                    if *ptr::addr_of!(aether_translator::runtime::mmu::GARB_LATCH) != 0 {
+                        dual_puts(b"[garb] corrupted_obj(A)=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::GARB_LASTVMA));
+                        dual_puts(b" => WATCH_VA should be A+0x60=");
+                        dual_puthex64((*ptr::addr_of!(aether_translator::runtime::mmu::GARB_LASTVMA)).wrapping_add(0x60));
+                        dual_puts(b" garbageVA=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::GARB_VA));
+                        dual_puts(b" corrupted_obj=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::LAST_INPAGE_ALLOC));
+                        dual_puts(b" => next WATCH_VA=");
+                        dual_puthex64((*ptr::addr_of!(aether_translator::runtime::mmu::LAST_INPAGE_ALLOC)).wrapping_add(0x60));
+                        dual_puts(b"\n");
+                    }
+                    if *ptr::addr_of!(aether_translator::runtime::mmu::OFLTW_LATCH) != 0 {
+                        dual_puts(b"[ofltw] faultblock_pc=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::OFLTW_PC));
+                        dual_puts(b" far=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::OFLTW_FAR));
+                        dual_puts(b" sp_el0=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::OFLTW_SP0));
+                        dual_puts(b" esr=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::OFLTW_ESR));
+                        dual_puts(b" sp_el1=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::OFLTW_SP1));
+                        dual_puts(b" spact=");
+                        dual_puthex64(*ptr::addr_of!(aether_translator::runtime::mmu::OFLTW_SPACT));
+                        dual_puts(b"\n");
+                    }
                 }
             }
             if iter > MAX_ITERS {
@@ -4116,12 +5517,37 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
             }
             let pc = (*ptr::addr_of!(NPF_GUEST_CTX))[NPF_PC_SLOT];
             last_pc = pc;
+            // [vma] record the just-allocated vm_area_struct (x0) at vm_area_dup+0x2c
+            // (the block after `bl kmem_cache_alloc`). At the fork-corruption fault
+            // the LAST recorded value is the corrupted object → WATCH_VA=that+0x60.
             // Record the recent guest-PC ring so a HOST CPU fault in translated
             // code (caught by the host IDT) can name the offending block.
             {
                 let gi = *ptr::addr_of!(DBG_GUEST_PC_IDX);
                 *ptr::addr_of_mut!(DBG_GUEST_PC_RING[gi % 16]) = pc;
                 *ptr::addr_of_mut!(DBG_GUEST_PC_IDX) = gi.wrapping_add(1);
+            }
+            // ── SP_EL0 / TTBR0 change-trace ring ────────────────────────────
+            // The enter_from_kernel_mode nested-abort loop reads current=SP_EL0
+            // and finds a USER address (should be the kernel task ptr) with
+            // TTBR0=idmap. Record (pc, sp_el0, ttbr0) whenever either changes so
+            // the loop dump can show WHICH block set the bad values.
+            {
+                const SR0: usize = aether_translator::runtime::context::SYSREG_SLOT0;
+                let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                let sp0 = g[SR0 + 16];
+                let t0 = g[SR0 + 1];
+                static mut SREG_LAST_SP0: u64 = 0;
+                static mut SREG_LAST_T0: u64 = 0;
+                if sp0 != *ptr::addr_of!(SREG_LAST_SP0)
+                    || t0 != *ptr::addr_of!(SREG_LAST_T0)
+                {
+                    *ptr::addr_of_mut!(SREG_LAST_SP0) = sp0;
+                    *ptr::addr_of_mut!(SREG_LAST_T0) = t0;
+                    let si = *ptr::addr_of!(SREG_RING_IDX);
+                    *ptr::addr_of_mut!(SREG_RING[si % SREG_RING_LEN]) = [pc, sp0, t0];
+                    *ptr::addr_of_mut!(SREG_RING_IDX) = si.wrapping_add(1);
+                }
             }
             // ── SLUB cmpxchg_double DEADLOCK operand trace ──────────────────
             // The /init mmap path deadlocks in ___slab_alloc's __cmpxchg_double_slab
@@ -4244,8 +5670,7 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                         let g = &*ptr::addr_of!(NPF_GUEST_CTX);
                         let x29 = g[29];
                         let nva = x29.wrapping_sub(0x20);
-                        let npa = aether_translator::runtime::mmu::aether_mmu_xlate(
-                            ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, nva, 0, 8);
+                        let npa = diag_xlate(nva, 8);
                         let nval = if npa != 0 { ptr::read_volatile(npa as *const u64) } else { 0xDEAD_DEAD };
                         dual_puts(b"[parse_args] hit#=");
                         dual_puthex64(h);
@@ -4492,7 +5917,7 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                             for i in 0..32u64 {
                                 let va = buf_va + i * 8;
                                 // Use the same xlate path the dispatcher uses.
-                                let pa = aether_translator::runtime::mmu::aether_mmu_xlate(ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                                let pa = diag_xlate(va, 8);
                                 if pa == 0 { continue; }
                                 let insn_u64 = ptr::read_volatile(pa as *const u64);
                                 dual_puts(b"[bpf_jit]    [");
@@ -4508,12 +5933,12 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                         // x19 holds the bpf_prog pointer (saved x0 at function entry).
                         let prog_va: u64 = g[19];
                         if prog_va != 0 {
-                            let pa = aether_translator::runtime::mmu::aether_mmu_xlate(ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, prog_va, 0, 8);
+                            let pa = diag_xlate(prog_va, 8);
                             if pa != 0 {
                                 dual_puts(b"[bpf_jit]   *prog[0..64] dump:\n");
                                 for i in 0..8u64 {
                                     let va = prog_va + i * 8;
-                                    let p = aether_translator::runtime::mmu::aether_mmu_xlate(ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                                    let p = diag_xlate(va, 8);
                                     if p == 0 { continue; }
                                     let v = ptr::read_volatile(p as *const u64);
                                     dual_puts(b"[bpf_jit]    +");
@@ -4669,8 +6094,7 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                             let mut off = 0u64;
                             while off < g[2].min(0x40) {
                                 let va = src1.wrapping_add(off);
-                                let pa = aether_translator::runtime::mmu::aether_mmu_xlate(
-                                    ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                                let pa = diag_xlate(va, 8);
                                 if pa == 0 { break; }
                                 let v = ptr::read_volatile(pa as *const u64);
                                 dual_puts(b"[memcpy->src]   +");
@@ -5025,8 +6449,7 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                                     let mut fo = 0u64;
                                     while fo <= 0x58 {
                                         let va = fbase.wrapping_add(fo);
-                                        let pa = aether_translator::runtime::mmu::aether_mmu_xlate(
-                                            ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                                        let pa = diag_xlate(va, 8);
                                         dual_puts(b"[nfetch] FILE+");
                                         dual_puthex64(fo);
                                         dual_puts(b" = ");
@@ -5044,11 +6467,8 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                                     let mut depth = 0u64;
                                     while depth < 12 {
                                         if fp < 0x1000 || (fp & 7) != 0 { break; }
-                                        let pfp = aether_translator::runtime::mmu::aether_mmu_xlate(
-                                            ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, fp, 0, 8);
-                                        let plr = aether_translator::runtime::mmu::aether_mmu_xlate(
-                                            ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64,
-                                            fp.wrapping_add(8), 0, 8);
+                                        let pfp = diag_xlate(fp, 8);
+                                        let plr = diag_xlate(fp.wrapping_add(8), 8);
                                         if pfp == 0 || plr == 0 { break; }
                                         let saved_fp = ptr::read_volatile(pfp as *const u64);
                                         let saved_lr = ptr::read_volatile(plr as *const u64);
@@ -5385,6 +6805,21 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                 dual_puts(b" (1=decode 2=lift 3=short 4=empty) iter=");
                 dual_puthex64(iter);
                 dual_puts(b"\n");
+                // EL0-undef capture (2026-06-30): a decode/lift failure (kind 1/2)
+                // is how a genuinely UNIMPLEMENTED ARM instruction (e.g. ARMv8.8
+                // MOPS CPY*/SET*, an unhandled SIMD/FP encoding) surfaces — it
+                // halts here rather than reaching the guest. Print the source EL so
+                // an EL0 (init/bionic post-apexd) coverage gap is distinguished
+                // from a kernel-side one. `fw` already carries the offending ARM
+                // word; pair it with the EL for a one-boot pin.
+                {
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    const SR0: usize = aether_translator::runtime::context::SYSREG_SLOT0;
+                    let cur_el = (g[SR0 + 42] >> 2) & 0b11;
+                    dual_puts(b"[dbt]   EL=");
+                    dual_puthex64(cur_el);
+                    dual_puts(b" (0=EL0/userspace 1=EL1/kernel)\n");
+                }
                 exit_code = 1;
                 sum_pc = fpc;
                 sum_a = fw as u64;
@@ -5395,7 +6830,16 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
 
             // 4. Safety-gate the emitted bytes (a UD2 = an unsupported op the
             //    grind must add; print the pc so it can be disassembled).
-            let (bva, blen) = match aether_dbt_block_host_va(pc) {
+            //    HOT-PATH: use the CACHED structural-safety verdict
+            //    (aether_dbt_block_host_va_safe). The verdict was computed once
+            //    at translate time and stored in the block cache, so a cache hit
+            //    (the common case on every warm dispatch) skips re-running
+            //    block_bytes_are_safe — an O(block-len) windows(6) scan over the
+            //    emitted x86 bytes that previously ran on EVERY dispatch
+            //    including hits. Semantically identical: the bytes of a cached
+            //    block never change after translation, so the cached verdict
+            //    equals a fresh scan.
+            let (_bva, _blen, block_safe) = match aether_dbt_block_host_va_safe(pc) {
                 Some(v) => v,
                 None => {
                     dual_puts(b"[dbt] host_va miss after Ok translate (BUG) pc=");
@@ -5407,7 +6851,7 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                     break;
                 }
             };
-            if !block_is_safe_to_enter(bva, blen) {
+            if !block_safe {
                 // BRK (ARMv8 BRK imm16 = 0xD4_20_xx_xx) — kernel BUG_BRK_IMM
                 // class (0x800-0x8FF), KASAN traps, etc. Lifter lowers BRK to
                 // UD2 (correct per spec — it must trap), but UD2 halts the
@@ -5643,6 +7087,63 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                     dual_puts(b" cnt=");
                     dual_puthex64(cur_unsafe as u64);
                     dual_puts(b"\n");
+                    // EL0-undef capture (2026-06-30): print the CURRENT EL of the
+                    // faulting context and the ARM instruction word read back from
+                    // GUEST memory at the block-entry PC via the soft-MMU fetch
+                    // walker. The `inject undef` header alone did not distinguish an
+                    // EL0 (init/bionic) undef from an EL1 (kernel) one, nor did it
+                    // confirm WHICH ARM word the safety gate UD2'd on. This pins
+                    // both in a single boot. Cheap: only fires on an actual UNSAFE
+                    // block (rare). EL is SR_CURRENTEL (sysreg sub-slot 42).
+                    {
+                        let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                        const SR0: usize = aether_translator::runtime::context::SYSREG_SLOT0;
+                        let cur_el = (g[SR0 + 42] >> 2) & 0b11;
+                        dual_puts(b"[dbt]   EL=");
+                        dual_puthex64(cur_el);
+                        dual_puts(b" (0=EL0/userspace 1=EL1/kernel) word@pc=");
+                        if let Some(gpa) = npf_fetch_guest_pa(pc) {
+                            dual_puthex64(core::ptr::read_volatile(gpa as *const u32) as u64);
+                        } else {
+                            dual_puts(b"<fetch-flt>");
+                        }
+                        dual_puts(b"\n");
+                    }
+                    // EL0-undef capture (2026-06-30): pin the EXACT offending op.
+                    // The lowering records the guest ARM PC + a reason tag of the
+                    // SPECIFIC op that called emit_ud2 (UNSAFE_OP_PC/UNSAFE_OP_REASON
+                    // in backend::encode), set at the emit_ud2 callsite during
+                    // lowering. Print that PC, its reason (unimpl vs spill), and the
+                    // ARM word read back from guest memory — so the offending
+                    // instruction is identified directly instead of inferring it
+                    // from the whole-block dump below. Note: the recorded PC is for
+                    // the LAST-translated UNSAFE block; on a fresh undef of THIS pc
+                    // (the common case) it is this block's offending op.
+                    {
+                        let (op_pc, reason) =
+                            aether_translator::backend::encode::unsafe_op_info();
+                        dual_puts(b"[dbt]   UNSAFE_OP pc=");
+                        dual_puthex64(op_pc);
+                        dual_puts(b" reason=");
+                        // 0=UNIMPL (missing opcode lowering), 1=SPILL (register
+                        // pressure tripped a requires_gpr/addr_in spill guard).
+                        if reason == aether_translator::backend::encode::UNSAFE_REASON_SPILL {
+                            dual_puts(b"SPILL");
+                        } else {
+                            dual_puts(b"UNIMPL");
+                        }
+                        dual_puts(b" word=");
+                        if op_pc != 0 {
+                            if let Some(gpa) = npf_fetch_guest_pa(op_pc) {
+                                dual_puthex64(core::ptr::read_volatile(gpa as *const u32) as u64);
+                            } else {
+                                dual_puts(b"<fetch-flt>");
+                            }
+                        } else {
+                            dual_puts(b"<none>");
+                        }
+                        dual_puts(b"\n");
+                    }
                     // Dump the block's ARM instruction WORDS so the unimplemented
                     // op can be identified. Userspace code (linker64/bionic/init)
                     // is demand-paged from the ramdisk, NOT in ./Image, so these
@@ -5663,6 +7164,22 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                         }
                         dual_puts(b"\n");
                     }
+                    // Dump the GUEST ARM instruction words of the UNSAFE block so
+                    // the offending (UD2-lowered) op can be disassembled directly.
+                    dual_puts(b"[dbt-arm] pc=");
+                    dual_puthex64(pc);
+                    dual_puts(b" insns:");
+                    let mut gai = 0u64;
+                    while gai < 20 {
+                        if let Some(gpa) = npf_fetch_guest_pa(pc.wrapping_add(gai * 4)) {
+                            dual_puts(b" ");
+                            dual_puthex64(core::ptr::read_volatile(gpa as *const u32) as u64);
+                        } else {
+                            break;
+                        }
+                        gai += 1;
+                    }
+                    dual_puts(b"\n");
                     // Phase-E investigation: dump the first 192 bytes of the
                     // UNSAFE block AND the byte offset of the UD2 sentinel so
                     // the lowering arm can be identified from the byte
@@ -5717,6 +7234,24 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                 dual_puts(b" iter=");
                 dual_puthex64(iter);
                 dual_puts(b"\n");
+                // EL0-undef capture (2026-06-30): even past the inject cap, pin the
+                // halting block's EL + ARM word so a late (post-apexd, EL0) undef
+                // that exhausted the cap is still identified rather than silently
+                // halting on a stale storm. Mirrors the in-cap capture above.
+                {
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    const SR0: usize = aether_translator::runtime::context::SYSREG_SLOT0;
+                    let cur_el = (g[SR0 + 42] >> 2) & 0b11;
+                    dual_puts(b"[dbt]   EL=");
+                    dual_puthex64(cur_el);
+                    dual_puts(b" (0=EL0/userspace 1=EL1/kernel) word@pc=");
+                    if let Some(gpa) = npf_fetch_guest_pa(pc) {
+                        dual_puthex64(core::ptr::read_volatile(gpa as *const u32) as u64);
+                    } else {
+                        dual_puts(b"<fetch-flt>");
+                    }
+                    dual_puts(b"\n");
+                }
                 exit_code = 2;
                 sum_pc = pc;
                 sum_a = insn0 as u64;
@@ -5894,8 +7429,7 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                         let mut k = 0u64;
                         while k < 12 {
                             let va = sp_base.wrapping_add(k * 8);
-                            let pa = aether_translator::runtime::mmu::aether_mmu_xlate(
-                                ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                            let pa = diag_xlate(va, 8);
                             dual_puts(b"[x30!]   @");
                             dual_puthex64(va);
                             dual_puts(b" = ");
@@ -5908,8 +7442,7 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                         let mut k = 0u64;
                         while k < 8 {
                             let va = 0xFFFF_FFC0_0800_BA40u64.wrapping_add(k * 8);
-                            let pa = aether_translator::runtime::mmu::aether_mmu_xlate(
-                                ptr::addr_of_mut!(NPF_GUEST_CTX) as *mut u64, va, 0, 8);
+                            let pa = diag_xlate(va, 8);
                             dual_puts(b"[x30!]   @");
                             dual_puthex64(va);
                             dual_puts(b" = ");

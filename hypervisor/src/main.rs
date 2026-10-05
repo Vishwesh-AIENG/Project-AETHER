@@ -278,6 +278,8 @@ mod arm64_entry {
             // ARM tier has no PMEM system image (native Android, real block devs).
             pmem_base:    0,
             pmem_size:    0,
+            pmem_base2:   0,
+            pmem_size2:   0,
         };
 
         puts(&uart, "  ch36: Building Android DTB (4-core SMP + IRQ forwarding)...\r\n");
@@ -587,6 +589,8 @@ mod x86_entry {
     static MSG_NPT_NO:    &[u16] = &utf16_z!("  NPT NOT supported by this AMD CPU\r\n");
 
     static MSG_HANDOFF:   &[u16] = &utf16_z!("  Handing off to boot_x86_hypervisor (ExitBootServices)\r\n");
+    #[cfg(feature = "whpx_hostmode")]
+    static MSG_WHPX:      &[u16] = &utf16_z!("  [whpx] host-mode DBT active — HW-virt (VMX/SVM) not required\r\n");
 
     #[unsafe(no_mangle)]
     pub extern "efiapi" fn efi_main(
@@ -622,6 +626,13 @@ mod x86_entry {
         let vmx_features = unsafe { VmxCpuFeatures::detect() };
         let svm_features = unsafe { SvmCpuFeatures::detect() };
 
+        // NOTE: under the `whpx_hostmode` feature the live Android boot runs the
+        // DBT in *host mode* (CALL into translated x86 blocks + software MMU) and
+        // never executes VMXON/VMRUN — so VMX/SVM/EPT/NPT support is irrelevant.
+        // WHPX deliberately does NOT expose those extensions to the guest (and a
+        // VMX-less `-cpu` model is required to avoid OVMF's IA32_FEATURE_CONTROL
+        // #GP). We therefore PRINT the probe result but skip the support `halt()`s
+        // in that build, falling through straight to the host-mode dispatch path.
         unsafe {
             match vendor {
                 Some(CpuVendor::Intel) => {
@@ -630,6 +641,7 @@ mod x86_entry {
                         puts(st, MSG_EPT_OK);
                     } else {
                         puts(st, MSG_VMX_NO);
+                        #[cfg(not(feature = "whpx_hostmode"))]
                         halt();
                     }
                 }
@@ -637,17 +649,25 @@ mod x86_entry {
                     if svm_supported && svm_features.svm_supported {
                         puts(st, MSG_SVM_OK);
                         if svm_features.npt_supported { puts(st, MSG_NPT_OK); }
-                        else { puts(st, MSG_NPT_NO); halt(); }
+                        else {
+                            puts(st, MSG_NPT_NO);
+                            #[cfg(not(feature = "whpx_hostmode"))]
+                            halt();
+                        }
                     } else {
                         puts(st, MSG_SVM_NO);
+                        #[cfg(not(feature = "whpx_hostmode"))]
                         halt();
                     }
                 }
                 None => {
-                    puts(st, MSG_HANDOFF);
+                    puts(st, MSG_OTHER);
+                    #[cfg(not(feature = "whpx_hostmode"))]
                     halt();
                 }
             }
+            #[cfg(feature = "whpx_hostmode")]
+            puts(st, MSG_WHPX);
             puts(st, MSG_HANDOFF);
             capture_framebuffer(system_table);
         }

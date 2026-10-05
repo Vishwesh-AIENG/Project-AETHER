@@ -351,23 +351,23 @@ fn anchors() -> Vec<V> {
         V { word: 0xDAC00020, expected: DataOp1Src { sf: true, rd: Reg(0), rn: Reg(1), opcode: 0 } },
         V { word: 0xDAC01020, expected: DataOp1Src { sf: true, rd: Reg(0), rn: Reg(1), opcode: 4 } },
         // Load/store unsigned offset
-        V { word: 0xF9400020, expected: Ldr { rt: Reg(0), size: AccessSize::DoubleWord, signed: false,
+        V { word: 0xF9400020, expected: Ldr { rt: Reg(0), size: AccessSize::DoubleWord, signed: false, is_64: true,
             addr: Offset { base: Reg(1), imm: 0 }, is_fp: false } },
         V { word: 0xF9000020, expected: Str { rt: Reg(0), size: AccessSize::DoubleWord,
             addr: Offset { base: Reg(1), imm: 0 }, is_fp: false } },
-        V { word: 0xB9400020, expected: Ldr { rt: Reg(0), size: AccessSize::Word, signed: false,
+        V { word: 0xB9400020, expected: Ldr { rt: Reg(0), size: AccessSize::Word, signed: false, is_64: true,
             addr: Offset { base: Reg(1), imm: 0 }, is_fp: false } },
-        V { word: 0x39400020, expected: Ldr { rt: Reg(0), size: AccessSize::Byte, signed: false,
+        V { word: 0x39400020, expected: Ldr { rt: Reg(0), size: AccessSize::Byte, signed: false, is_64: true,
             addr: Offset { base: Reg(1), imm: 0 }, is_fp: false } },
         // Imm pre/post/unscaled
-        V { word: 0xF8408420, expected: Ldr { rt: Reg(0), size: AccessSize::DoubleWord, signed: false,
+        V { word: 0xF8408420, expected: Ldr { rt: Reg(0), size: AccessSize::DoubleWord, signed: false, is_64: true,
             addr: PostIndex { base: Reg(1), imm: 8 }, is_fp: false } },
-        V { word: 0xF8408C20, expected: Ldr { rt: Reg(0), size: AccessSize::DoubleWord, signed: false,
+        V { word: 0xF8408C20, expected: Ldr { rt: Reg(0), size: AccessSize::DoubleWord, signed: false, is_64: true,
             addr: PreIndex { base: Reg(1), imm: 8 }, is_fp: false } },
-        V { word: 0xF8408020, expected: Ldr { rt: Reg(0), size: AccessSize::DoubleWord, signed: false,
+        V { word: 0xF8408020, expected: Ldr { rt: Reg(0), size: AccessSize::DoubleWord, signed: false, is_64: true,
             addr: Offset { base: Reg(1), imm: 8 }, is_fp: false } },
         // Literal
-        V { word: 0x58000020, expected: Ldr { rt: Reg(0), size: AccessSize::DoubleWord, signed: false,
+        V { word: 0x58000020, expected: Ldr { rt: Reg(0), size: AccessSize::DoubleWord, signed: false, is_64: true,
             addr: Pcrel { offset: 4 }, is_fp: false } },
         // Pair
         V { word: 0xA9400420, expected: Ldp {
@@ -808,8 +808,8 @@ fn push_loadstore_unsigned(out: &mut Vec<V>) {
                     let addr = Offset { base: Reg(rn), imm };
                     let exp = match opc {
                         0 => Str { rt: Reg(rt), size: access, addr, is_fp: false },
-                        1 => Ldr { rt: Reg(rt), size: access, signed: false, addr, is_fp: false },
-                        2 => Ldr { rt: Reg(rt), size: access, signed: true, addr, is_fp: false },
+                        1 => Ldr { rt: Reg(rt), size: access, signed: false, addr, is_fp: false, is_64: true },
+                        2 => Ldr { rt: Reg(rt), size: access, signed: true, addr, is_fp: false, is_64: true },
                         _ => unreachable!(),
                     };
                     out.push(V { word: w, expected: exp });
@@ -849,8 +849,8 @@ fn push_loadstore_imm_pre_post(out: &mut Vec<V>) {
                         };
                         let exp = match opc {
                             0 => Str { rt: Reg(rt), size: access, addr, is_fp: false },
-                            1 => Ldr { rt: Reg(rt), size: access, signed: false, addr, is_fp: false },
-                            2 => Ldr { rt: Reg(rt), size: access, signed: true, addr, is_fp: false },
+                            1 => Ldr { rt: Reg(rt), size: access, signed: false, addr, is_fp: false, is_64: true },
+                            2 => Ldr { rt: Reg(rt), size: access, signed: true, addr, is_fp: false, is_64: true },
                             _ => unreachable!(),
                         };
                         out.push(V { word: w, expected: exp });
@@ -894,8 +894,8 @@ fn push_loadstore_reg_offset(out: &mut Vec<V>) {
                         let addr = RegOffset { base: Reg(rn), index: Reg(rm), extend, shift };
                         let exp = match opc {
                             0 => Str { rt: Reg(rt), size: access, addr, is_fp: false },
-                            1 => Ldr { rt: Reg(rt), size: access, signed: false, addr, is_fp: false },
-                            2 => Ldr { rt: Reg(rt), size: access, signed: true, addr, is_fp: false },
+                            1 => Ldr { rt: Reg(rt), size: access, signed: false, addr, is_fp: false, is_64: true },
+                            2 => Ldr { rt: Reg(rt), size: access, signed: true, addr, is_fp: false, is_64: true },
                             _ => unreachable!(),
                         };
                         out.push(V { word: w, expected: exp });
@@ -925,7 +925,7 @@ fn push_literal(out: &mut Vec<V>) {
                     word: w,
                     expected: Ldr {
                         rt: Reg(rt), size: access, signed,
-                        addr: Pcrel { offset: imm }, is_fp: false
+                        addr: Pcrel { offset: imm }, is_fp: false, is_64: true
                     },
                 });
             }

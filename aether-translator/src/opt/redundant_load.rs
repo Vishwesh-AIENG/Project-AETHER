@@ -44,6 +44,7 @@ impl RedundantLoadPass {
                     | IrOp::StorePair { .. }
                     | IrOp::AtomicRmw { .. }
                     | IrOp::AtomicCas { .. }
+                    | IrOp::AtomicCasPair { .. }
                     | IrOp::Dmb { .. }
                     | IrOp::Dsb { .. }
                     | IrOp::Isb

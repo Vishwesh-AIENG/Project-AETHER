@@ -348,6 +348,54 @@ pub const AETHER_GKI_DEFCONFIG: &[DefconfigEntry] = &[
     // ARM PMU: hardware performance counters.
     DefconfigEntry::must_enable(b"CONFIG_HW_PERF_EVENTS"),
 
+    // ── Flat-PMEM boot dependencies (AETHER x86 bring-up) ────────────────────
+    //
+    // The GKI kernel has NO virtio-blk driver, so AETHER stages system.raw and
+    // vendor.raw into fixed high-RAM regions and exposes them as `pmem-region`
+    // DT nodes (android_handoff::PMEM_SYSTEM_PA / PMEM_VENDOR_PA). The of_pmem
+    // driver turns those nodes into /dev/pmem0 and /dev/pmem1, which first-stage
+    // init mounts as /system and /vendor. These two CONFIGs are what make the
+    // pmem block devices appear — WITHOUT them /dev/pmem0/1 never materialize
+    // and the kernel hangs forever on `rootwait` (root=/dev/pmem0).
+    //
+    // The running boot.img kernel already has these (per project history); these
+    // entries make the validator track them so a future kernel rebuild that
+    // drops them is caught BEFORE it produces a silently-unbootable image.
+
+    // libnvdimm: the persistent-memory subsystem of_pmem plugs into. Hard
+    // prerequisite for CONFIG_OF_PMEM — of_pmem registers an nvdimm bus.
+    DefconfigEntry::must_enable(b"CONFIG_LIBNVDIMM"),
+    // of_pmem: device-tree binding that turns a `compatible="pmem-region"` node
+    // into a /dev/pmemN block device. THE mechanism behind the flat-PMEM boot.
+    DefconfigEntry::must_enable(b"CONFIG_OF_PMEM"),
+
+    // ── Display (simple-framebuffer → SurfaceFlinger present path) ───────────
+    //
+    // android_handoff carves a framebuffer from the top of guest RAM and emits a
+    // top-level "simple-framebuffer" DT node (kernel.rs set_dtb_framebuffer). The
+    // kernel's simpledrm driver binds that node and creates /dev/dri/card0, which
+    // SurfaceFlinger's HWComposer presents to. Without simpledrm there is NO DRM
+    // device and SurfaceFlinger has nothing to draw on — the display gate cannot
+    // pass even when every userspace binary is healthy.
+
+    // simpledrm: minimal DRM driver that binds a "simple-framebuffer" DT node and
+    // exposes /dev/dri/card0. The leaf display driver for the flat boot.
+    DefconfigEntry::must_enable(b"CONFIG_DRM_SIMPLEDRM"),
+    // fbdev emulation over DRM: provides the /dev/fb0 compatibility node and the
+    // fbcon console some early userspace probes expect on top of the DRM device.
+    DefconfigEntry::must_enable(b"CONFIG_DRM_FBDEV_EMULATION"),
+
+    // ── Swap (zram — quality, not boot-critical) ─────────────────────────────
+    //
+    // zram gives a compressed in-RAM swap device so the flat boot (no swap
+    // partition) can survive memory pressure without LMKD thrashing. Quality of
+    // life rather than a hard boot dependency, but tracked so a rebuild keeps it.
+
+    // zram: compressed RAM block device used as swap on the flat layout.
+    DefconfigEntry::must_enable(b"CONFIG_ZRAM"),
+    // zsmalloc: the compressed-page allocator zram stores into. Required by ZRAM.
+    DefconfigEntry::must_enable(b"CONFIG_ZSMALLOC"),
+
     // ── Explicitly disabled ──────────────────────────────────────────────────
 
     // Virtual terminal: Android does not use VT; disabling saves 64KB.
@@ -785,9 +833,16 @@ pub fn build_production_android_dtb(
         let n = hex_u64_prod(&mut name[pfx.len()..], base.memory_base);
         b.begin_node(&name[..pfx.len() + n])?;
         b.prop_str(b"device_type", b"memory")?;
+        // Reserve the TOP 2 MiB for the hypervisor's checkpoint/restore header.
+        // The host CR3 maps the window with 2 MiB large pages, so the header page
+        // (window_base + size - 0x1000) lives in the top 2 MiB leaf. Reserving the
+        // whole 2 MiB block keeps the guest off the header AND keeps the advertised
+        // size 2 MiB-ALIGNED (a prior 0x1000 shrink was non-aligned and hung the
+        // guest in wg_mod_init). Mirrors kernel::build_android_dtb.
+        let usable_size = base.memory_size.saturating_sub(0x20_0000);
         b.prop_cells(b"reg", &[
             (base.memory_base >> 32) as u32, base.memory_base as u32,
-            (base.memory_size >> 32) as u32, base.memory_size as u32,
+            (usable_size >> 32) as u32, usable_size as u32,
         ])?;
         b.end_node()?;
     }
@@ -1199,6 +1254,8 @@ mod tests {
             initrd_end:   0,
             pmem_base:    0,
             pmem_size:    0,
+            pmem_base2:   0,
+            pmem_size2:   0,
         };
         // Minimal cmdline.
         let cl = b"console=ttyAMA0 androidboot.hardware=aether";

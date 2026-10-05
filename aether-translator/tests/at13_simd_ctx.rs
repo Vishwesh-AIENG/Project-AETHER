@@ -13,8 +13,6 @@ use aether_translator::ir::{BlockId, IrBlock, IrOp};
 use aether_translator::lift::lift;
 use aether_translator::regalloc::linear_scan::{AllocResult, AssignMap};
 
-use std::collections::BTreeMap;
-
 fn empty_alloc() -> AllocResult {
     AllocResult {
         assignments: AssignMap::new(),
@@ -31,7 +29,7 @@ fn pipeline(word: u32) -> (DecodedInsn, Vec<IrOp>, Vec<u8>) {
     lift(&insn, &mut blk).expect("lift");
     let alloc = empty_alloc();
     let mut enc = X86Encoder::new();
-    let mut patches = BTreeMap::new();
+    let mut patches: Vec<(usize, BlockId)> = Vec::new();
     IntLower::lower_block(&blk, &alloc, &mut enc, &mut patches);
     (insn, blk.ops.clone(), enc.finish())
 }
@@ -143,7 +141,7 @@ fn init_block_simd_ops_no_ud2() {
         let mut blk = IrBlock::new(BlockId(0));
         lift(&insn, &mut blk).unwrap_or_else(|e| panic!("LIFT FAIL {name}: {e:?}"));
         let mut enc = X86Encoder::new();
-        let mut patches = BTreeMap::new();
+        let mut patches: Vec<(usize, BlockId)> = Vec::new();
         IntLower::lower_block(&blk, &empty_alloc(), &mut enc, &mut patches);
         let bytes = enc.finish();
         assert!(!contains_seq(&bytes, &UD2), "{name} ({word:#x}) lowers to UD2 — unimplemented. insn={insn:?} ops={:?}", blk.ops);
@@ -299,7 +297,7 @@ fn uaddlv_byte_no_ud2() {
 #[test]
 fn strchr_block_ops_decode() {
     let (i, ops, _) = pipeline(0x4e209822); // cmeq v2.16b, v1.16b, #0
-    assert!(matches!(i, DecodedInsn::SimdCmeqZero { rd: VReg(2), rn: VReg(1), size: 0, q: true }), "{i:?}");
+    assert!(matches!(i, DecodedInsn::SimdIntCmpZero { rd: VReg(2), rn: VReg(1), op: 0, size: 0, q: true }), "{i:?}");
     assert!(ops.iter().any(|o| matches!(o, IrOp::VecCmpZero { d: 2, n: 1, .. })), "{ops:?}");
 
     let (i, ops, _) = pipeline(0x0f0c8445); // shrn v5.8b, v2.8h, #4

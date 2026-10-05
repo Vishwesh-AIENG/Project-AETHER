@@ -167,9 +167,23 @@ impl<'a> LiftCtx<'a> {
                 self.pending_wb = Some((base, v_new_base));
                 v_base
             }
-            AddrMode::RegOffset { base, index, extend: _, shift } => {
+            AddrMode::RegOffset { base, index, extend, shift } => {
+                use crate::decoder::ExtendKind;
                 let v_base = self.read_reg_or_sp(base, true, true);
-                let v_idx = self.read_reg(index, true);
+                // Honor the index extend kind (was dropped → SXTW always wrong,
+                // UXTW wrong when the X reg has dirty upper bits). B6 makes a
+                // 32-bit read zero-extend, so UXTW = read_reg(index,false) as-is;
+                // SXTW = sign-extend the low 32; UXTX/SXTX/LSL = full 64-bit.
+                let v_idx = match extend {
+                    ExtendKind::Uxtw => self.read_reg(index, false),
+                    ExtendKind::Sxtw => {
+                        let w = self.read_reg(index, false);
+                        let v = self.val(IrValueKind::I64);
+                        self.push(IrOp::Sext { dst: v, a: w, from_bits: 32, to_bits: 64 });
+                        v
+                    }
+                    _ => self.read_reg(index, true),
+                };
                 let v_shifted = if shift > 0 {
                     let v_sh = self.const_i64(shift as i64);
                     let v = self.val(IrValueKind::I64);
@@ -246,6 +260,12 @@ pub fn lift(insn: &DecodedInsn, block: &mut IrBlock) -> Result<(), LiftErr> {
 /// Lift with explicit PC (for B/BL/CB[N]Z/TB[N]Z offset resolution).
 pub fn lift_at(insn: &DecodedInsn, block: &mut IrBlock, pc: u64) -> Result<(), LiftErr> {
     let mut cx = LiftCtx::new(block, pc);
+    // Diagnostic: stamp FAULT_OP_PC with the EXACT instruction PC before its ops,
+    // so a fault anywhere (lifted memop OR a runtime helper it invokes) records
+    // the precise last guest instruction. pc==0 in unit tests — skip there.
+    if pc != 0 {
+        cx.push(IrOp::StampFaultPc(pc));
+    }
     lift_insn(&mut cx, insn)
 }
 
@@ -277,7 +297,9 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
 
         // ===== Integer ALU immediate =====
         AddImm { sf, rd, rn, imm, shift_12, set_flags } => {
-            let v_rn = cx.read_reg_or_sp(rn, sf, !set_flags);
+            // ADD/SUB (immediate) source is <Xn|SP> for BOTH the S and non-S
+            // forms — rn==31 is SP, not XZR (only Rd loses SP when set_flags).
+            let v_rn = cx.read_reg_or_sp(rn, sf, true);
             let imm_val = (imm as i64) << if shift_12 { 12 } else { 0 };
             let v_imm = if sf { cx.const_i64(imm_val) } else { cx.const_i32(imm_val as i32) };
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
@@ -291,7 +313,9 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.write_reg_or_sp(rd, v_res, sf, !set_flags);
         }
         SubImm { sf, rd, rn, imm, shift_12, set_flags } => {
-            let v_rn = cx.read_reg_or_sp(rn, sf, !set_flags);
+            // ADD/SUB (immediate) source is <Xn|SP> for BOTH the S and non-S
+            // forms — rn==31 is SP, not XZR (only Rd loses SP when set_flags).
+            let v_rn = cx.read_reg_or_sp(rn, sf, true);
             let imm_val = (imm as i64) << if shift_12 { 12 } else { 0 };
             let v_imm = if sf { cx.const_i64(imm_val) } else { cx.const_i32(imm_val as i32) };
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
@@ -315,21 +339,26 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             } else {
                 cx.push(IrOp::And { dst: v_res, a: v_rn, b: v_imm });
             }
-            cx.write_reg(rd, v_res, sf);
+            // Logical-immediate destination is <Xd|SP> for the non-flag-setting
+            // forms (AND/ORR/EOR); rd==31 is SP (`and sp,x9,#~15` stack-realign).
+            // ANDS keeps XZR-discard (TST = ANDS Rd=XZR), so gate on !set_flags.
+            cx.write_reg_or_sp(rd, v_res, sf, !set_flags);
         }
         OrrImm { sf, rd, rn, imm } => {
             let v_rn = cx.read_reg(rn, sf);
             let v_imm = cx.const_i64(imm as i64);
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             cx.push(IrOp::Or { dst: v_res, a: v_rn, b: v_imm });
-            cx.write_reg(rd, v_res, sf);
+            // ORR-imm destination is <Xd|SP>; rd==31 is SP, not XZR.
+            cx.write_reg_or_sp(rd, v_res, sf, true);
         }
         EorImm { sf, rd, rn, imm } => {
             let v_rn = cx.read_reg(rn, sf);
             let v_imm = cx.const_i64(imm as i64);
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             cx.push(IrOp::Xor { dst: v_res, a: v_rn, b: v_imm });
-            cx.write_reg(rd, v_res, sf);
+            // EOR-imm destination is <Xd|SP>; rd==31 is SP, not XZR.
+            cx.write_reg_or_sp(rd, v_res, sf, true);
         }
         MovWide { sf, opc, hw, rd, imm } => {
             let shift = (hw as i64) * 16;
@@ -436,18 +465,30 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // during `unpack_to_rootfs` of the initramfs. Correct operand roles:
             //   low  half = rm >> lsb           (right-shifted low operand)
             //   high half = rn << (width - lsb) (left-shifted high operand)
-            let v_rn = cx.read_reg(rn, sf);
-            let v_rm = cx.read_reg(rm, sf);
-            let width = if sf { 64 } else { 32 };
-            let v_lsb = cx.const_i64(lsb as i64);
-            let v_complement = cx.const_i64((width - lsb as u8) as i64);
-            let v_lo = cx.val(IrValueKind::I64);
-            cx.push(IrOp::LShr { dst: v_lo, a: v_rm, b: v_lsb });
-            let v_hi = cx.val(IrValueKind::I64);
-            cx.push(IrOp::Shl { dst: v_hi, a: v_rn, b: v_complement });
-            let v_res = cx.val(IrValueKind::I64);
-            cx.push(IrOp::Or { dst: v_res, a: v_lo, b: v_hi });
-            cx.write_reg(rd, v_res, sf);
+            if lsb == 0 {
+                // EXTR Xd,Xn,Xm,#0 = Xm (low half). The general path would do
+                // `Shl(rn, width)`, but x86 masks the shift count (mod 64/32) so
+                // shl-by-width becomes shl-by-0 = rn, corrupting the OR. Special-
+                // case to just copy Xm. (B6 zero-extends a W-read, so the W-form
+                // result is correctly the zero-extended Wm.)
+                let v_rm = cx.read_reg(rm, sf);
+                cx.write_reg(rd, v_rm, sf);
+            } else {
+                // For the W-form, B6 makes read_reg(_,false) zero-extend, so the
+                // LShr no longer leaks Rm[63:32] into the low-32 result.
+                let v_rn = cx.read_reg(rn, sf);
+                let v_rm = cx.read_reg(rm, sf);
+                let width = if sf { 64 } else { 32 };
+                let v_lsb = cx.const_i64(lsb as i64);
+                let v_complement = cx.const_i64((width - lsb as u8) as i64);
+                let v_lo = cx.val(IrValueKind::I64);
+                cx.push(IrOp::LShr { dst: v_lo, a: v_rm, b: v_lsb });
+                let v_hi = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Shl { dst: v_hi, a: v_rn, b: v_complement });
+                let v_res = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Or { dst: v_res, a: v_lo, b: v_hi });
+                cx.write_reg(rd, v_res, sf);
+            }
         }
 
         // ===== Integer ALU register =====
@@ -599,7 +640,10 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 cx.push(IrOp::Shl { dst: v, a: v_rm_ext, b: v_amt });
                 v
             };
-            let v_rn = cx.read_reg_or_sp(rn, sf, !set_flags);
+            // ADD/SUB (extended register) source is <Xn|SP> for BOTH the S and
+            // non-S forms — rn==31 is SP, not XZR. This is the ONLY form that can
+            // compare SP against a register (`CMP SP, Xm` = SUBS XZR,SP,Xm,UXTX).
+            let v_rn = cx.read_reg_or_sp(rn, sf, true);
             let v_res = cx.val(if dest_64 { IrValueKind::I64 } else { IrValueKind::I32 });
             if sub {
                 if set_flags {
@@ -717,8 +761,23 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let v_rm = cx.read_reg(rm, sf);
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             if signed {
-                cx.push(IrOp::SDiv { dst: v_res, a: v_rn, b: v_rm });
+                // B8: W-form SDIV. B6 zero-extends a W-read, but a 64-bit idiv of
+                // a negative 32-bit dividend would then divide the (large
+                // positive) zero-extended value. Sign-extend the 32-bit operands
+                // to 64 so the signed quotient is correct.
+                let (a, b) = if sf {
+                    (v_rn, v_rm)
+                } else {
+                    let sn = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Sext { dst: sn, a: v_rn, from_bits: 32, to_bits: 64 });
+                    let sm = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Sext { dst: sm, a: v_rm, from_bits: 32, to_bits: 64 });
+                    (sn, sm)
+                };
+                cx.push(IrOp::SDiv { dst: v_res, a, b });
             } else {
+                // Unsigned: B6's zero-extended W-read makes the 64-bit unsigned
+                // div yield the correct low-32 quotient (B17).
                 cx.push(IrOp::UDiv { dst: v_res, a: v_rn, b: v_rm });
             }
             cx.write_reg(rd, v_res, sf);
@@ -842,8 +901,14 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let v_res = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
             match opcode {
                 0 => cx.push(IrOp::Rbit { dst: v_res, a: v_rn, sf }),
-                1 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: 2 }),
-                2 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: 4 }),
+                // REV16 (B14): per-16-bit-lane byte swap. Encode W vs X in `bytes`
+                // (2 = 2 lanes over low 32, 3 = 4 lanes over 64) since IrOp::Rev
+                // carries no sf. Previously bytes:2 lowered to a NOP.
+                1 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: if sf { 3 } else { 2 } }),
+                // opcode 2: REV Wd (sf=0, bytes:4 = bswap32+zext) vs REV32 Xd
+                // (sf=1, bytes:5 = per-32-bit-word bswap). B15: the X-form
+                // previously zeroed the high word via bswap_r32.
+                2 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: if sf { 5 } else { 4 } }),
                 3 => cx.push(IrOp::Rev { dst: v_res, a: v_rn, bytes: 8 }),
                 4 => cx.push(IrOp::Clz { dst: v_res, a: v_rn, sf }),
                 5 => cx.push(IrOp::Cls { dst: v_res, a: v_rn, sf }),
@@ -879,7 +944,7 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
         }
 
         // ===== Load / Store =====
-        Ldr { rt, size, signed, addr, is_fp } => {
+        Ldr { rt, size, signed, addr, is_fp, is_64 } => {
             let v_addr = cx.lift_addr_mode(&addr, true);
             // FP/SIMD destination (LDR Sn/Dn/Qn) must land in the ctx q-register
             // file via WriteFpr, NOT in the integer register. QuadWord is always
@@ -887,11 +952,25 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // `ldr d1,[..]` to GPR x1 (the old size-only rule) let a later
             // `mov x1,..` clobber it — exactly the bionic vsnprintf _flags
             // corruption (lost __SSTR) that NULL'd a stdio FILE's _write fp.
-            // (Byte/HalfWord FP element loads are rare and have no F8/F16 LoadTy;
-            // they keep the GPR path until a real case needs them.)
+            // Byte/HalfWord FP element loads (`LDR Bt/Ht`) have no F8/F16 LoadTy,
+            // but MUST still land in the ctx q-register file — routing them to the
+            // GPR path clobbered a live Xt and left Vt stale (FP16/scalar-byte
+            // crypto tails). Load U8/U16 into a temp, zero Vt, insert at lane 0
+            // (scalar LDR B/H zeroes the rest of Vt; source is memory so there is
+            // no read-before-wipe hazard).
             let fp = size == AccessSize::QuadWord
                 || (is_fp && matches!(size, AccessSize::Word | AccessSize::DoubleWord));
-            if fp {
+            let fp_bh = is_fp && matches!(size, AccessSize::Byte | AccessSize::HalfWord);
+            if fp_bh {
+                let (ty, esize) = match size {
+                    AccessSize::Byte => (LoadTy::U8, 1u8),
+                    _ => (LoadTy::U16, 2u8),
+                };
+                let v_data = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Load { dst: v_data, addr: v_addr, ty, order: MemOrder::Relaxed });
+                cx.push(IrOp::VecMoviImm { d: rt.0, lo: 0, hi: 0 });
+                cx.push(IrOp::VecInsGpr { d: rt.0, lane: 0, src: v_data, size: esize });
+            } else if fp {
                 let v_data = cx.val(IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 });
                 let ty = match size {
                     AccessSize::Word => LoadTy::F32,
@@ -907,7 +986,11 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                     ty: load_ty_for(size, signed),
                     order: MemOrder::Relaxed,
                 });
-                cx.write_reg(rt, v_data, true);
+                // B24: commit with the destination width. For a signed sub-word
+                // W-form load (LDRSB/LDRSH Wt, is_64=false) the movsx sign-extended
+                // to 64; write_reg(.., false) narrows via the WriteGpr mov_rr32 so
+                // bits [63:32] are zeroed per ARM. (Unsigned / X-form: is_64=true.)
+                cx.write_reg(rt, v_data, is_64);
             }
             cx.flush_wb();
         }
@@ -915,7 +998,18 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let v_addr = cx.lift_addr_mode(&addr, true);
             let fp = size == AccessSize::QuadWord
                 || (is_fp && matches!(size, AccessSize::Word | AccessSize::DoubleWord));
-            if fp {
+            let fp_bh = is_fp && matches!(size, AccessSize::Byte | AccessSize::HalfWord);
+            if fp_bh {
+                // `STR Bt/Ht`: extract lane 0 of Vt (NOT GPR Xt — routing to the
+                // GPR path stored garbage integer data) and store the low byte/half.
+                let (ty, esize) = match size {
+                    AccessSize::Byte => (StoreTy::U8, 1u8),
+                    _ => (StoreTy::U16, 2u8),
+                };
+                let v = cx.val(IrValueKind::I64);
+                cx.push(IrOp::VecExtractLane { dst: v, n: rt.0, lane: 0, size: esize, signed: false });
+                cx.push(IrOp::Store { val: v, addr: v_addr, ty, order: MemOrder::Relaxed });
+            } else if fp {
                 let v = cx.val(IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 });
                 cx.push(IrOp::ReadFpr { dst: v, reg: rt.0 });
                 let ty = match size {
@@ -1071,15 +1165,52 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // `size` is log2 element; the IR op carries element BYTES.
             cx.push(IrOp::VecAddvLong { d: rd.0, n: rn.0, esize: 1u8 << size, q, signed });
         }
-        DecodedInsn::SimdCmeqZero { rd, rn, size, q } => {
-            // CMEQ Vd, Vn, #0 — per-lane compare-against-zero.
-            cx.push(IrOp::VecCmpZero {
-                op: crate::ir::ops::VecCmpOp::Eq,
-                size,
-                q,
-                d: rd.0,
-                n: rn.0,
-            });
+        DecodedInsn::SimdIntCmpZero { rd, rn, op, size, q } => {
+            // CMEQ/CMGT/CMGE/CMLT/CMLE Vd, Vn, #0 — per-lane compare-against-zero.
+            // op: 0=Eq 1=Gt 2=Ge 3=Lt 4=Le (Gt/Ge/Lt/Le are signed).
+            use crate::ir::ops::VecCmpOp;
+            let cmp = match op {
+                0 => VecCmpOp::Eq,
+                1 => VecCmpOp::SGt,
+                2 => VecCmpOp::SGe,
+                3 => VecCmpOp::SLt,
+                _ => VecCmpOp::SLe,
+            };
+            cx.push(IrOp::VecCmpZero { op: cmp, size, q, d: rd.0, n: rn.0 });
+        }
+        DecodedInsn::SimdFpUn { rd, rn, op, dbl, q } => {
+            // FABS/FNEG/FSQRT (vector) — FP 2-reg-misc single-source.
+            use crate::ir::ops::VecFpUnOp;
+            let op = match op {
+                0 => VecFpUnOp::Abs,
+                1 => VecFpUnOp::Neg,
+                _ => VecFpUnOp::Sqrt,
+            };
+            cx.push(IrOp::VecFpUn { op, dbl, q, d: rd.0, n: rn.0 });
+        }
+        DecodedInsn::SimdFpCmpZero { rd, rn, op, dbl, q } => {
+            // FCMEQ/FCMGT/FCMGE/FCMLT/FCMLE Vd, Vn, #0.0 — FP compare-vs-zero.
+            use crate::ir::ops::VecFpCmpOp;
+            let op = match op {
+                0 => VecFpCmpOp::Eq,
+                1 => VecFpCmpOp::Gt,
+                2 => VecFpCmpOp::Ge,
+                3 => VecFpCmpOp::Lt,
+                _ => VecFpCmpOp::Le,
+            };
+            cx.push(IrOp::VecFpCmp { op, dbl, q, d: rd.0, n: rn.0, m: 0, zero: true });
+        }
+        DecodedInsn::SimdFpRound { rd, rn, round, dbl, q } => {
+            // FRINT{N,M,P,Z,A} Vd.<T>,Vn.<T> — vector round-to-integral.
+            use crate::ir::ops::RoundMode;
+            let round = match round {
+                0 => RoundMode::Nearest,         // FRINTN (ties-even)
+                1 => RoundMode::NegInf,          // FRINTM (floor)
+                2 => RoundMode::PosInf,          // FRINTP (ceil)
+                3 => RoundMode::Zero,            // FRINTZ (trunc)
+                _ => RoundMode::NearestTiesAway, // FRINTA (ties-away)
+            };
+            cx.push(IrOp::VecFpRound { d: rd.0, n: rn.0, dbl, q, round });
         }
         DecodedInsn::SimdShrn { rd, rn, shift, esize_out, high } => {
             // SHRN/SHRN2 — shift-right-narrow.
@@ -1092,6 +1223,100 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
         DecodedInsn::SimdExt { rd, rn, rm, imm, q } => {
             // EXT — extract from the Vn:Vm concatenation.
             cx.push(IrOp::VecExt { d: rd.0, n: rn.0, m: rm.0, imm, q });
+        }
+        DecodedInsn::SimdTbl1 { rd, rn, rm, q } => {
+            // TBL (1 table reg) — byte permute Vn through index Vm.
+            cx.push(IrOp::VecTbl1 { d: rd.0, n: rn.0, m: rm.0, q });
+        }
+        DecodedInsn::SimdTblN { rd, rn, rm, len, op, q } => {
+            // TBL/TBX (1..4 table regs, wrapping mod 32) — byte permute the
+            // {Vn..Vn+len} table through index Vm.
+            cx.push(IrOp::VecTblN { d: rd.0, n: rn.0, m: rm.0, len, op, q });
+        }
+        DecodedInsn::SimdShlImm { rd, rn, shift, size, q } => {
+            // SHL — vector shift-left by immediate.
+            cx.push(IrOp::VecShift {
+                op: crate::ir::ops::VecShiftOp::Shl,
+                size,
+                q,
+                d: rd.0,
+                n: rn.0,
+                amount: shift,
+            });
+        }
+        DecodedInsn::SimdShrImm { rd, rn, shift, size, q, signed } => {
+            // SSHR (arithmetic) / USHR (logical) — vector shift-right by immediate.
+            cx.push(IrOp::VecShift {
+                op: if signed {
+                    crate::ir::ops::VecShiftOp::SShr
+                } else {
+                    crate::ir::ops::VecShiftOp::UShr
+                },
+                size,
+                q,
+                d: rd.0,
+                n: rn.0,
+                amount: shift,
+            });
+        }
+        DecodedInsn::SimdSraImm { rd, rn, shift, size, q, signed } => {
+            // SSRA (arithmetic) / USRA (logical) — shift-right-and-accumulate:
+            // Vd[e] += (Vn[e] >> shift). `rd` is read AND written.
+            cx.push(IrOp::VecShiftAcc {
+                signed,
+                size,
+                q,
+                d: rd.0,
+                n: rn.0,
+                amount: shift,
+            });
+        }
+        DecodedInsn::SimdShlReg { rd, rn, rm, size, q, signed } => {
+            // SSHL/USHL — register variable per-lane shift.
+            cx.push(IrOp::VecShiftReg { d: rd.0, n: rn.0, m: rm.0, size, q, signed });
+        }
+        DecodedInsn::SimdShiftIns { rd, rn, shift, size, q, left } => {
+            // SRI/SLI — shift-right/left-and-insert (rd is read+written).
+            cx.push(IrOp::VecShiftIns { d: rd.0, n: rn.0, shift, size, q, left });
+        }
+        DecodedInsn::SimdShrnSat { rd, rn, shift, esize_out, high, round, src_signed, dst_signed, modular } => {
+            // SQSHRN/UQSHRN/SQSHRUN/SQRSHRN/UQRSHRN/SQRSHRUN/RSHRN — saturating/
+            // rounding narrowing shift-right (`modular`=RSHRN, truncating).
+            cx.push(IrOp::VecShiftNarrowSat {
+                d: rd.0, n: rn.0, shift, esize_out, high, round, src_signed, dst_signed, modular,
+            });
+        }
+        DecodedInsn::SimdDupElem { rd, rn, size, lane, q } => {
+            // DUP (element) — broadcast Vn[lane] to all lanes of Vd.
+            cx.push(IrOp::VecDupElem { d: rd.0, n: rn.0, size, lane, q });
+        }
+        DecodedInsn::SimdPmull { rd, rn, rm, high } => {
+            // PMULL/PMULL2 .1q — carryless 64×64→128 multiply (GHASH/GCM).
+            cx.push(IrOp::VecPmull { d: rd.0, n: rn.0, m: rm.0, high });
+        }
+        DecodedInsn::SimdScalarDup { rd, rn, size, lane } => {
+            // `mov dN, vM.<T>[lane]` — copy one lane to Vd lane 0, zero the rest.
+            // Reuse the copy ops: EXTRACT the source lane to a GPR FIRST, THEN zero
+            // Vd, THEN insert. The extract must precede the zero: when rd == rn (the
+            // ubiquitous `mov dX, vX.d[1]` high-lane fold in boringssl GHASH/P-256),
+            // zeroing Vd first would wipe the source lane before it is read, yielding
+            // 0 instead of the high limb → wrong bignum → silent crypto corruption.
+            let bytes = 1u8 << size;
+            let v = cx.val(IrValueKind::I64);
+            cx.push(IrOp::VecExtractLane { dst: v, n: rn.0, lane, size: bytes, signed: false });
+            cx.push(IrOp::VecMoviImm { d: rd.0, lo: 0, hi: 0 });
+            cx.push(IrOp::VecInsGpr { d: rd.0, lane: 0, src: v, size: bytes });
+        }
+        DecodedInsn::SimdScalarShl { rd, rn, shift } => {
+            // `shl dN, dM, #shift` — 64-bit scalar shift-left; q=false zeroes Vd[127:64].
+            cx.push(IrOp::VecShift {
+                op: crate::ir::ops::VecShiftOp::Shl,
+                size: 3,
+                q: false,
+                d: rd.0,
+                n: rn.0,
+                amount: shift,
+            });
         }
         DecodedInsn::SimdMulLong { rd, rn, rm, size, q, signed, accum, sub } => {
             // UMULL/SMULL/UMLAL/SMLAL/UMLSL/SMLSL — integer multiply-long.
@@ -1117,6 +1342,17 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // ADDV — reduce-add (element BYTES = 1<<size).
             cx.push(IrOp::VecReduceAdd { d: rd.0, n: rn.0, esize: 1u8 << size, q });
         }
+        DecodedInsn::SimdReduceMinMax { rd, rn, size, q, is_min, signed } => {
+            // SMAXV/UMAXV/SMINV/UMINV — reduce min/max across lanes (B20/B29).
+            use crate::ir::ops::VecReduceOp;
+            let op = match (is_min, signed) {
+                (false, true) => VecReduceOp::SMax,
+                (false, false) => VecReduceOp::UMax,
+                (true, true) => VecReduceOp::SMin,
+                (true, false) => VecReduceOp::UMin,
+            };
+            cx.push(IrOp::VecReduce { op, size, q, d: rd.0, n: rn.0 });
+        }
         DecodedInsn::SimdInsElem { rd, rn, dst_lane, src_lane, size } => {
             // INS (element) — lane→lane copy via a GPR temp (size ≤ 8 bytes):
             // extract Vn's src lane, insert into Vd's dst lane (others preserved).
@@ -1124,6 +1360,43 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let v = cx.val(IrValueKind::I64);
             cx.push(IrOp::VecExtractLane { dst: v, n: rn.0, lane: src_lane, size: bytes, signed: false });
             cx.push(IrOp::VecInsGpr { d: rd.0, lane: dst_lane, src: v, size: bytes });
+        }
+        DecodedInsn::SimdByElem { rd, rn, rm, fp_op, is_fp, dbl, size, q, idx } => {
+            // FMUL/FMLA/FMLS/MUL by element — broadcast Vm[idx], multiply-accumulate.
+            use crate::ir::ops::VecFpOp;
+            let op = match fp_op {
+                1 => VecFpOp::Mla,
+                2 => VecFpOp::Mls,
+                _ => VecFpOp::Mul,
+            };
+            cx.push(IrOp::VecByElem {
+                op, is_fp, dbl, size, q, d: rd.0, n: rn.0, m: rm.0, idx,
+            });
+        }
+        DecodedInsn::SimdCvtFp { rd, rn, to_fp, signed, dbl, q } => {
+            // SCVTF/UCVTF/FCVTZS/FCVTZU (vector) — int↔FP convert.
+            cx.push(IrOp::VecCvtFp { to_fp, signed, dbl, q, d: rd.0, n: rn.0 });
+        }
+        DecodedInsn::SimdZipTrn { rd, rn, rm, kind, size, q } => {
+            // ZIP1/ZIP2/TRN1/TRN2 — interleave Vn:Vm.
+            cx.push(IrOp::VecZipTrn { kind, size, q, d: rd.0, n: rn.0, m: rm.0 });
+        }
+        DecodedInsn::SimdAbsNeg { rd, rn, size, q, neg } => {
+            // ABS/NEG (vector integer) — 2-reg-misc unary.
+            use crate::ir::ops::VecUnOp;
+            let op = if neg { VecUnOp::Neg } else { VecUnOp::Abs };
+            cx.push(IrOp::VecUn { op, size, q, d: rd.0, n: rn.0 });
+        }
+        DecodedInsn::SimdScalar3Same { rd, rn, rm, sub } => {
+            // Scalar ADD/SUB (D-form) — lane-0 64-bit op; reuse the D-form VecBin
+            // (paddq/psubq + D-form zero-the-upper-64 fixup).
+            use crate::ir::ops::VecBinOp;
+            let op = if sub { VecBinOp::Sub } else { VecBinOp::Add };
+            cx.push(IrOp::VecBin { op, size: 3, q: false, d: rd.0, n: rn.0, m: rm.0 });
+        }
+        DecodedInsn::SimdScalarPair { rd, rn, is_fp, dbl } => {
+            // ADDP/FADDP scalar — sum the two lanes of Vn into Vd lane 0.
+            cx.push(IrOp::VecScalarPair { is_fp, dbl, d: rd.0, n: rn.0 });
         }
         DecodedInsn::SimdLd1Multi { is_load, regs, q, rt, rn, writeback, rm } => {
             // LD1/ST1 multiple structures: `regs` consecutive V-regs from/to [Xn]
@@ -1165,6 +1438,42 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 let newbase = cx.val(IrValueKind::I64);
                 cx.push(IrOp::Add { dst: newbase, a: v_base, b: inc });
                 cx.write_reg_or_sp(rn, newbase, true, true);
+            }
+        }
+        DecodedInsn::SimdLd1Lane { rt, rn, esize, lane, is_load, writeback, rm } => {
+            // Single-lane LD1/ST1: load one element into Vt[lane] (other lanes
+            // kept) or store Vt[lane] out; optional post-index writeback.
+            let addr = cx.read_reg_or_sp(rn, true, true);
+            if is_load {
+                let v = cx.val(IrValueKind::I64);
+                let ty = match esize {
+                    1 => LoadTy::U8,
+                    2 => LoadTy::U16,
+                    4 => LoadTy::U32,
+                    _ => LoadTy::U64,
+                };
+                cx.push(IrOp::Load { dst: v, addr, ty, order: MemOrder::Relaxed });
+                cx.push(IrOp::VecInsGpr { d: rt.0, lane, src: v, size: esize });
+            } else {
+                let v = cx.val(IrValueKind::I64);
+                cx.push(IrOp::VecExtractLane { dst: v, n: rt.0, lane, size: esize, signed: false });
+                let ty = match esize {
+                    1 => StoreTy::U8,
+                    2 => StoreTy::U16,
+                    4 => StoreTy::U32,
+                    _ => StoreTy::U64,
+                };
+                cx.push(IrOp::Store { val: v, addr, ty, order: MemOrder::Relaxed });
+            }
+            if writeback {
+                let inc = if rm == 31 {
+                    cx.const_i64(esize as i64)
+                } else {
+                    cx.read_reg(Reg(rm), true)
+                };
+                let newaddr = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Add { dst: newaddr, a: addr, b: inc });
+                cx.write_reg_or_sp(rn, newaddr, true, true);
             }
         }
         DecodedInsn::SimdLd1Rep { rt, rn, size, q, writeback, rm } => {
@@ -1212,7 +1521,8 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // pair is loaded as two adjacent words. The host's atomic
             // monitor isn't needed (single CPU has no real race), so we
             // emit two consecutive LoadExclusive ops at offsets [0, width).
-            let v_addr = cx.read_reg(rn, true);
+            // Base is [Xn|SP] — rn==31 means SP, not XZR.
+            let v_addr = cx.read_reg_or_sp(rn, true, true);
             let v_data = cx.val(IrValueKind::I64);
             cx.push(IrOp::LoadExclusive {
                 dst: v_data, addr: v_addr, ty: load_ty_for(size, false),
@@ -1242,7 +1552,8 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // pair stale. Fix: emit two consecutive StoreExclusive ops; OR
             // their status bits so any failure surfaces (the kernel only
             // looks at status==0 vs !=0).
-            let v_addr = cx.read_reg(rn, true);
+            // Base is [Xn|SP] — rn==31 means SP, not XZR.
+            let v_addr = cx.read_reg_or_sp(rn, true, true);
             let v_data = cx.read_reg(rt, true);
             let v_status = cx.val(IrValueKind::I32);
             cx.push(IrOp::StoreExclusive {
@@ -1275,7 +1586,8 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             }
         }
         Ldar { size, rt, rn } | Ldapr { size, rt, rn } => {
-            let v_addr = cx.read_reg(rn, true);
+            // Base is [Xn|SP] — rn==31 means SP, not XZR.
+            let v_addr = cx.read_reg_or_sp(rn, true, true);
             let v_data = cx.val(IrValueKind::I64);
             cx.push(IrOp::Load {
                 dst: v_data, addr: v_addr,
@@ -1285,7 +1597,8 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.write_reg(rt, v_data, true);
         }
         Stlr { size, rt, rn } => {
-            let v_addr = cx.read_reg(rn, true);
+            // Base is [Xn|SP] — rn==31 means SP, not XZR.
+            let v_addr = cx.read_reg_or_sp(rn, true, true);
             let v_data = cx.read_reg(rt, true);
             cx.push(IrOp::Store {
                 val: v_data, addr: v_addr,
@@ -1294,7 +1607,8 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             });
         }
         Cas { size, rs, rt, rn, acquire, release } => {
-            let v_addr = cx.read_reg(rn, true);
+            // Base is [Xn|SP] — rn==31 means SP, not XZR.
+            let v_addr = cx.read_reg_or_sp(rn, true, true);
             let v_expected = cx.read_reg(rs, true);
             let v_new = cx.read_reg(rt, true);
             let v_loaded = cx.val(IrValueKind::I64);
@@ -1310,8 +1624,36 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             });
             cx.write_reg(rs, v_loaded, true);
         }
+        Casp { size, rs, rt, rn, acquire, release } => {
+            // CASP {Rs,Rs+1} expected, {Rt,Rt+1} new, [Rn]. Even register pairs.
+            use crate::decoder::Reg;
+            let rs1 = Reg(rs.idx() + 1);
+            let rt1 = Reg(rt.idx() + 1);
+            // Base is [Xn|SP] — rn==31 means SP, not XZR.
+            let v_addr = cx.read_reg_or_sp(rn, true, true);
+            let v_exp_a = cx.read_reg(rs, true);
+            let v_exp_b = cx.read_reg(rs1, true);
+            let v_new_a = cx.read_reg(rt, true);
+            let v_new_b = cx.read_reg(rt1, true);
+            let v_old_a = cx.val(IrValueKind::I64);
+            let v_old_b = cx.val(IrValueKind::I64);
+            let order = match (acquire, release) {
+                (true, true) => MemOrder::AcqRel,
+                (true, false) => MemOrder::Acquire,
+                (false, true) => MemOrder::Release,
+                _ => MemOrder::Relaxed,
+            };
+            cx.push(IrOp::AtomicCasPair {
+                dst_a: v_old_a, dst_b: v_old_b, addr: v_addr,
+                expected_a: v_exp_a, expected_b: v_exp_b,
+                new_a: v_new_a, new_b: v_new_b, order, size: atomic_bytes(size),
+            });
+            cx.write_reg(rs, v_old_a, true);
+            cx.write_reg(rs1, v_old_b, true);
+        }
         LdAtomicRmw { size, op, rs, rt, rn, acquire, release } => {
-            let v_addr = cx.read_reg(rn, true);
+            // Base is [Xn|SP] — rn==31 means SP, not XZR.
+            let v_addr = cx.read_reg_or_sp(rn, true, true);
             let v_val = cx.read_reg(rs, true);
             let order = match (acquire, release) {
                 (true, true) => MemOrder::AcqRel,
@@ -1337,7 +1679,8 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             cx.write_reg(rt, v_loaded, true);
         }
         Swp { size, rs, rt, rn, acquire, release } => {
-            let v_addr = cx.read_reg(rn, true);
+            // Base is [Xn|SP] — rn==31 means SP, not XZR.
+            let v_addr = cx.read_reg_or_sp(rn, true, true);
             let v_val = cx.read_reg(rs, true);
             let order = match (acquire, release) {
                 (true, true) => MemOrder::AcqRel,
@@ -1606,11 +1949,16 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             }
         }
         SysIc { rt, .. } => {
-            // IC cache maintenance — model as a Hint (require Rt read for
-            // liveness). Does not touch the software MMU TLB or the JIT
-            // block cache, so a no-op is correct.
+            // IC instruction-cache maintenance (IC IVAU / IALLU / IALLUIS). B27:
+            // the guest publishes self-modified code with `IC IVAU; DSB; ISB` and
+            // NO TLBI (the VA->PA mapping is unchanged — only the page CONTENTS
+            // change). The JIT block cache keys on guest PC with no content tag,
+            // so a no-op here keeps serving the STALE x86 translation of the old
+            // bytes (ART JIT/AOT codegen, mprotect(RX)-after-write trampolines).
+            // Conservatively flush the block cache (TlbInval{None} ->
+            // aether_dbt_invalidate_all) on any IC so the next fetch re-translates.
             let _ = cx.read_reg(rt, true);
-            cx.push(IrOp::Hint { imm: 128 });
+            cx.push(IrOp::TlbInval { va: None });
         }
         SysAt { op1, crm, op2, rt } => {
             // AT (Address Translate). Phase-E: instead of treating as a
@@ -1722,8 +2070,10 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                         0b0011 => Some(FpBinOp::Sub),
                         0b0100 => Some(FpBinOp::Max),
                         0b0101 => Some(FpBinOp::Min),
+                        0b0110 => Some(FpBinOp::MaxNm), // FMAXNM (ignore-NaN)
+                        0b0111 => Some(FpBinOp::MinNm), // FMINNM (ignore-NaN)
                         0b1000 => Some(FpBinOp::NMul),
-                        _ => None, // FMAXNM/FMINNM — Tier 1
+                        _ => None,
                     };
                     if let Some(op) = op {
                         cx.push(IrOp::FpBin { op, dbl, d: rd, n: rn, m: rm });
@@ -1746,7 +2096,7 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                         let signed = opc == 0b010;
                         let sf = (w >> 31) & 1; // GPR width: 0=W(32) 1=X(64)
                         let gv = cx.read_reg(Reg(rn), sf == 1);
-                        cx.push(IrOp::FpCvtIntScalar { d: rd, src: gv, to_dbl: dbl, signed });
+                        cx.push(IrOp::FpCvtIntScalar { d: rd, src: gv, to_dbl: dbl, signed, src_64: sf == 1 });
                         done = true;
                     }
                 }
@@ -1768,10 +2118,113 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                             _                     => RoundMode::Zero,            // FCVTZ (rmode 11)
                         };
                         let dst = cx.val(if to_64 { IrValueKind::I64 } else { IrValueKind::I32 });
-                        cx.push(IrOp::FpCvtToIntScalar { dst, n: rn, from_dbl: dbl, to_64, round });
+                        // opc bit0: 0=signed (FCVT..S), 1=unsigned (FCVT..U). B31.
+                        let signed = opc & 1 == 0;
+                        cx.push(IrOp::FpCvtToIntScalar { dst, n: rn, from_dbl: dbl, to_64, round, signed });
                         cx.write_reg(Reg(rd), dst, to_64);
                         done = true;
                     }
+                }
+                // FP data-processing (1 source): FMOV/FABS/FNEG/FSQRT Sd,Sn — bits
+                // [28:24]=11110, bit21=1, bits[14:10]=10000, opcode=bits[20:15]. B20.
+                else if (w & 0xFF20_7C00) == 0x1E20_4000 {
+                    use crate::ir::ops::FpUnOp;
+                    let opcode = (w >> 15) & 0x3F;
+                    let op = match opcode {
+                        0b000000 => Some(FpUnOp::Mov),
+                        0b000001 => Some(FpUnOp::Abs),
+                        0b000010 => Some(FpUnOp::Neg),
+                        0b000011 => Some(FpUnOp::Sqrt),
+                        _ => None,
+                    };
+                    if let Some(op) = op {
+                        cx.push(IrOp::FpUn { op, dbl, d: rd, n: rn });
+                        done = true;
+                    } else if matches!(
+                        opcode,
+                        0b001000 | 0b001001 | 0b001010 | 0b001011 | 0b001100 | 0b001110 | 0b001111
+                    ) {
+                        // FRINTN/P/M/Z/A/X/I — round to integral, FP result.
+                        // FRINTX/FRINTI raise inexact (suppress-inexact OFF); the
+                        // others suppress it. FRINTI uses the current FPCR mode →
+                        // approximate as nearest (the FPCR default).
+                        use crate::ir::ops::RoundMode;
+                        let (round, raise_inexact) = match opcode {
+                            0b001000 => (RoundMode::Nearest, false), // FRINTN
+                            0b001001 => (RoundMode::PosInf, false),  // FRINTP
+                            0b001010 => (RoundMode::NegInf, false),  // FRINTM
+                            0b001011 => (RoundMode::Zero, false),    // FRINTZ
+                            0b001100 => (RoundMode::NearestTiesAway, false), // FRINTA
+                            0b001110 => (RoundMode::Current, true),  // FRINTX (raises inexact)
+                            _ => (RoundMode::Current, false),        // FRINTI
+                        };
+                        cx.push(IrOp::FpRound { d: rd, n: rn, dbl, round, raise_inexact });
+                        done = true;
+                    } else if matches!(opcode, 0b000100 | 0b000101 | 0b000111) {
+                        // FCVT between precisions: opcode = 0b0001dd where dd
+                        // (bits[16:15]) = DEST size; `type` (bits[23:22]) = SOURCE
+                        // size. 00=single(32), 01=double(64), 11=half(16).
+                        let prec = |t: u32| match t { 0 => 32u8, 1 => 64, 3 => 16, _ => 0 };
+                        let from_bits = prec((w >> 22) & 0x3);
+                        let to_bits = prec(opcode & 0x3);
+                        if from_bits != 0 && to_bits != 0 && from_bits != to_bits {
+                            cx.push(IrOp::FpCvt2 { d: rd, n: rn, from_bits, to_bits });
+                            done = true;
+                        }
+                    }
+                }
+                // FCSEL Dd,Dn,Dm,cond — bits[11:10]=11. Dd = cond ? Dn : Dm.
+                if !done && (w & 0x5F20_0C00) == 0x1E20_0C00 {
+                    let cond = crate::decoder::Cond::from_bits(((w >> 12) & 0xF) as u8);
+                    cx.push(IrOp::FpCsel { d: rd, n: rn, m: rm, cond, dbl });
+                    done = true;
+                }
+                // FP data-processing (3 source): FMADD/FMSUB/FNMADD/FNMSUB
+                // Sd,Sn,Sm,Sa. Group prefix bits[31:24]=0001_1111 (bit24=1, which
+                // distinguishes it from the 1-/2-source 0x1E-prefixed group above).
+                //   op = {o1(bit21), o0(bit15)}: 00=FMADD 01=FMSUB 10=FNMADD 11=FNMSUB
+                //   Ra = bits[14:10] (the accumulator/addend).
+                // Fused single-rounding → x86 FMA3 (VFMADD213 etc) in the lowerer.
+                if !done && (w & 0xFF00_0000) == 0x1F00_0000 {
+                    use crate::ir::ops::FpFmaOp;
+                    let ra = ((w >> 10) & 0x1F) as u8;
+                    let o1 = (w >> 21) & 1;
+                    let o0 = (w >> 15) & 1;
+                    let op = match (o1, o0) {
+                        (0, 0) => FpFmaOp::Madd,
+                        (0, _) => FpFmaOp::Msub,
+                        (1, 0) => FpFmaOp::NMadd,
+                        (_, _) => FpFmaOp::NMsub,
+                    };
+                    cx.push(IrOp::FpFma { op, dbl, d: rd, n: rn, m: rm, a: ra });
+                    done = true;
+                }
+                // FMOV scalar immediate (FMOV Dd/Sd, #imm) — mask 0xFF20_1C00 ==
+                // 0x1E20_1000, imm8 = bits[20:13]. Expand the 8-bit float (ARM
+                // VFPExpandImm) to the IEEE bit pattern and move it into Vd via a
+                // 128-bit immediate (rest of Vd zeroed).
+                if !done && (w & 0xFF20_1C00) == 0x1E20_1000 {
+                    let imm8 = (w >> 13) & 0xFF;
+                    let a = (imm8 >> 7) & 1;
+                    let bb = (imm8 >> 6) & 1;
+                    let c = (imm8 >> 5) & 1;
+                    let dd = (imm8 >> 4) & 1;
+                    let efgh = (imm8 & 0xF) as u64;
+                    let lo: u64 = if dbl {
+                        // double: exp = NOT(b):b*8:c:d (11 bits), frac = efgh:0*48.
+                        let exp = (((1 - bb) as u64) << 10)
+                            | ((if bb == 1 { 0xFFu64 } else { 0 }) << 2)
+                            | ((c as u64) << 1) | (dd as u64);
+                        ((a as u64) << 63) | (exp << 52) | (efgh << 48)
+                    } else {
+                        // single: exp = NOT(b):b*5:c:d (8 bits), frac = efgh:0*19.
+                        let exp = (((1 - bb) as u32) << 7)
+                            | ((if bb == 1 { 0x1Fu32 } else { 0 }) << 2)
+                            | ((c as u32) << 1) | (dd as u32);
+                        (((a as u32) << 31) | (exp << 23) | ((efgh as u32) << 19)) as u64
+                    };
+                    cx.push(IrOp::VecMoviImm { d: rd, lo, hi: 0 });
+                    done = true;
                 }
             }
             if !done {
@@ -1781,14 +2234,14 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             }
         }
         CryptoAes { op, rd, rn } => {
-            let v_in = cx.val(IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 });
-            cx.push(IrOp::ReadFpr { dst: v_in, reg: rn.0 });
-            let v_out = cx.val(IrValueKind::Vec128 { lane: crate::ir::value::LaneType::I8 });
-            // op: 4=AESE, 5=AESD, 6=AESMC, 7=AESIMC. Phase A maps all to AesE
-            // as a placeholder — Phase B distinguishes properly.
-            let _ = op;
-            cx.push(IrOp::AesE { dst: v_out, a: v_in, key: v_in });
-            cx.push(IrOp::WriteFpr { reg: rd.0, src: v_out });
+            // Ctx-template crypto op — reads/writes the guest q-regs directly
+            // (lowered via x86 AES-NI in lower_simd_ctx::lower_crypto_aes).
+            // kind = the ARM AES opcode: 4=AESE 5=AESD 6=AESMC 7=AESIMC.
+            //   AESE Vd,Vn:  Vd = SubBytes(ShiftRows(Vd XOR Vn))   (Vd is src+dst)
+            //   AESD Vd,Vn:  Vd = InvSubBytes(InvShiftRows(Vd XOR Vn))
+            //   AESMC Vd,Vn: Vd = MixColumns(Vn)                   (Vn only)
+            //   AESIMC Vd,Vn:Vd = InvMixColumns(Vn)
+            cx.push(IrOp::CryptoAesR { kind: op, d: rd.0, n: rn.0, m: 0 });
         }
         CryptoSha { op, raw } => {
             // SHA-256 family → ctx-template runtime helper. Distinguish the 2-reg
@@ -1811,9 +2264,27 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             } else {
                 None
             };
-            match kind {
-                Some(k) => cx.push(IrOp::CryptoSha256 { kind: k, d, n, m }),
-                None => {
+            // SHA-1: 3-reg op 0/1/2/3 = C/P/M/SU0; 2-reg op 0/1 = H/SU1. kind
+            // matches crypto_rt::SHA1_* (C=0,P=1,M=2,H=3,SU0=4,SU1=5).
+            let sha1_kind = if is_3reg && op == 0 {
+                Some(0u8)
+            } else if is_3reg && op == 1 {
+                Some(1u8)
+            } else if is_3reg && op == 2 {
+                Some(2u8)
+            } else if is_3reg && op == 3 {
+                Some(4u8)
+            } else if is_2reg && op == 0 {
+                Some(3u8)
+            } else if is_2reg && op == 1 {
+                Some(5u8)
+            } else {
+                None
+            };
+            match (kind, sha1_kind) {
+                (Some(k), _) => cx.push(IrOp::CryptoSha256 { kind: k, d, n, m }),
+                (_, Some(k)) => cx.push(IrOp::CryptoShaR { kind: k, d, n, m }),
+                (None, None) => {
                     let v = cx.val(IrValueKind::I32);
                     cx.push(IrOp::ConstI32 { dst: v, val: raw as i32 });
                     cx.push(IrOp::Hint { imm: 200u8.wrapping_add(op) });
@@ -1847,6 +2318,48 @@ fn lift_simd_3same(
     m: u8,
 ) {
     use crate::ir::ops::{VecBinOp as B, VecCmpOp as C, VecPairOp as P};
+    // ── FP 3-same (opcode 0b11xxx) ──────────────────────────────────────────
+    // The `size` field here is {a:sz}: a=size[1] selects the op pair (add vs sub,
+    // max vs min, …); sz=size[0] is 0=single / 1=double. (q already validated by
+    // the decoder.) Unsupported FP opcodes route to a coarse Hint (Tier 1).
+    if opcode >= 0b11000 {
+        use crate::ir::ops::{VecFpOp as F, VecFpCmpOp as FC};
+        let a = (size >> 1) & 1; // bit23
+        let dbl = (size & 1) == 1; // sz: 0=single, 1=double
+        let vf = |op| IrOp::VecFp { op, dbl, q, d, n, m };
+        let vfc = |op| IrOp::VecFpCmp { op, dbl, q, d, n, m, zero: false };
+        let ir = match (u, opcode, a) {
+            // FMAXNM (a=0) / FMINNM (a=1), U=0.
+            (false, 0b11000, 0) => Some(vf(F::MaxNm)),
+            (false, 0b11000, _) => Some(vf(F::MinNm)),
+            // FMLA (a=0) / FMLS (a=1), U=0.
+            (false, 0b11001, 0) => Some(vf(F::Mla)),
+            (false, 0b11001, _) => Some(vf(F::Mls)),
+            // FADD (a=0) / FSUB (a=1), U=0.
+            (false, 0b11010, 0) => Some(vf(F::Add)),
+            (false, 0b11010, _) => Some(vf(F::Sub)),
+            // FABD (a=1), U=1.
+            (true, 0b11010, 1) => Some(vf(F::Abd)),
+            // FMUL (a=0), U=1.
+            (true, 0b11011, 0) => Some(vf(F::Mul)),
+            // FCMEQ (a=0), U=0.
+            (false, 0b11100, 0) => Some(vfc(FC::Eq)),
+            // FCMGE (a=0) / FCMGT (a=1), U=1.
+            (true, 0b11100, 0) => Some(vfc(FC::Ge)),
+            (true, 0b11100, 1) => Some(vfc(FC::Gt)),
+            // FMAX (a=0) / FMIN (a=1), U=0.
+            (false, 0b11110, 0) => Some(vf(F::Max)),
+            (false, 0b11110, _) => Some(vf(F::Min)),
+            // FDIV (a=0), U=1.
+            (true, 0b11111, 0) => Some(vf(F::Div)),
+            _ => None, // FMULX/FACGE/FACGT/FADDP/FMAXP/… — Tier 1.
+        };
+        match ir {
+            Some(op) => cx.push(op),
+            None => cx.push(IrOp::Hint { imm: 200 }),
+        }
+        return;
+    }
     let vb = |op| IrOp::VecBin { op, size, q, d, n, m };
     let vc = |op| IrOp::VecCmp { op, size, q, d, n, m };
     let vp = |op| IrOp::VecPair { op, size, q, d, n, m };
@@ -1858,6 +2371,9 @@ fn lift_simd_3same(
         (true, 0b00001) => Some(vb(B::UqAdd)),
         (false, 0b00010) => Some(vb(B::SrHadd)),
         (true, 0b00010) => Some(vb(B::UrHadd)),
+        // halving subtract (SHSUB/UHSUB, opcode 0b00100).
+        (false, 0b00100) => Some(vb(B::SHsub)),
+        (true, 0b00100) => Some(vb(B::UHsub)),
         (false, 0b00101) => Some(vb(B::SqSub)),
         (true, 0b00101) => Some(vb(B::UqSub)),
         // logical (opcode 00011) — selected by (u, size)
@@ -1878,7 +2394,8 @@ fn lift_simd_3same(
         (true, 0b00110) => Some(vc(C::UGt)),
         (false, 0b00111) => Some(vc(C::SGe)),
         (true, 0b00111) => Some(vc(C::UGe)),
-        (true, 0b10001) => Some(vc(C::Eq)), // CMEQ (u=0,10001 is CMTST — Tier 1)
+        (true, 0b10001) => Some(vc(C::Eq)), // CMEQ
+        (false, 0b10001) => Some(vc(C::Tst)), // CMTST
         // min / max
         (false, 0b01100) => Some(vb(B::SMax)),
         (true, 0b01100) => Some(vb(B::UMax)),
@@ -1889,6 +2406,17 @@ fn lift_simd_3same(
         (true, 0b01110) => Some(vb(B::UAbd)),
         (false, 0b01111) => Some(vb(B::SAba)),
         (true, 0b01111) => Some(vb(B::UAba)),
+        // sshl / ushl — register variable per-lane shift (opcode 0b01000).
+        // These don't map to a VecBin op (they need the dedicated scalarized
+        // per-lane variable-shift lowering), so emit VecShiftReg directly.
+        (false, 0b01000) => {
+            cx.push(IrOp::VecShiftReg { d, n, m, size, q, signed: true });
+            return;
+        }
+        (true, 0b01000) => {
+            cx.push(IrOp::VecShiftReg { d, n, m, size, q, signed: false });
+            return;
+        }
         // add / sub
         (false, 0b10000) => Some(vb(B::Add)),
         (true, 0b10000) => Some(vb(B::Sub)),
@@ -1923,7 +2451,53 @@ fn lift_shift_reg(
     }
     let v_amt = cx.const_i64(amount as i64);
     let v_dst = cx.val(if sf { IrValueKind::I64 } else { IrValueKind::I32 });
-    cx.push(shift_to_irop(kind)(v_dst, v_rm, v_amt));
+    if !sf {
+        // W-form shifted register operand (ADD/SUB/AND/ORR/EOR Wd,Wn,Wm,<shift>#imm).
+        // v_rm is read_reg(rm,false), but ReadGpr historically returned the full
+        // 64-bit Xm — a right shift then pulls Xm[63:32] into the low-32 result.
+        // Normalize Wm to 32 bits BEFORE the shift, mirroring the variable-shift
+        // "THE DCACHE BUG" handling above (lift_data_proc_shift_reg / Shift op).
+        match kind {
+            // LSL: dirty upper bits move above bit 31 (harmless) but mask anyway.
+            // LSR: 64-bit shift would leak Xm[63:32] into the low 32 — mask first.
+            ShiftKind::Lsl | ShiftKind::Lsr => {
+                let v_rm32 = cx.val(IrValueKind::I32);
+                let v_lowmask = cx.const_i64(0xFFFF_FFFF);
+                cx.push(IrOp::And { dst: v_rm32, a: v_rm, b: v_lowmask });
+                cx.push(shift_to_irop(kind)(v_dst, v_rm32, v_amt));
+            }
+            ShiftKind::Asr => {
+                // Sign-extend Wm 32->64 so ASR propagates bit31; the W-write
+                // truncation then keeps the correct low 32.
+                let v_sext = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Sext { dst: v_sext, a: v_rm, from_bits: 32, to_bits: 64 });
+                cx.push(IrOp::AShr { dst: v_dst, a: v_sext, b: v_amt });
+            }
+            ShiftKind::Ror => {
+                // 32-bit ROR by the constant `amount`: (Wm>>amt)|(Wm<<(32-amt)),
+                // masked to 32. amount is the immediate; fold (32-amt) at lift time.
+                let v_rm32 = cx.val(IrValueKind::I32);
+                let v_lowmask = cx.const_i64(0xFFFF_FFFF);
+                cx.push(IrOp::And { dst: v_rm32, a: v_rm, b: v_lowmask });
+                let amt = (amount & 31) as i64;
+                if amt == 0 {
+                    return v_rm32;
+                }
+                let v_amt_lo = cx.const_i64(amt);
+                let v_amt_hi = cx.const_i64(32 - amt);
+                let v_lo = cx.val(IrValueKind::I64);
+                cx.push(IrOp::LShr { dst: v_lo, a: v_rm32, b: v_amt_lo });
+                let v_hi = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Shl { dst: v_hi, a: v_rm32, b: v_amt_hi });
+                let v_or = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Or { dst: v_or, a: v_lo, b: v_hi });
+                let v_mask32 = cx.const_i64(0xFFFF_FFFF);
+                cx.push(IrOp::And { dst: v_dst, a: v_or, b: v_mask32 });
+            }
+        }
+    } else {
+        cx.push(shift_to_irop(kind)(v_dst, v_rm, v_amt));
+    }
     v_dst
 }
 
@@ -2109,5 +2683,129 @@ mod tests {
         assert!(svc_idx.is_some(), "SVC must emit an Svc op: {:?}", blk.ops);
         assert!(wpc_idx.is_some(), "SVC must stage return PC via WritePc: {:?}", blk.ops);
         assert!(wpc_idx < svc_idx, "WritePc must precede Svc: {:?}", blk.ops);
+    }
+
+    // ── L1 (SEVERE): SP-base in exclusive/acquire-release/LSE-atomic forms ──
+    // The base register of LDXR/STXR/LDAR/STLR/LDAPR/CAS/CASP/LD<atomic>/SWP is
+    // <Xn|SP>; rn==31 must lift to ReadSp, NOT ReadGpr{reg:31} (which reads XZR=0
+    // → a NULL access instead of the stack address). Regression guard for the
+    // silent whole-class mis-lift found in the 2026-07-03 lift review.
+    #[test]
+    fn lift_ldar_sp_base_reads_sp_not_xzr() {
+        use crate::decoder::AccessSize;
+        // LDAR X0, [SP] = 0xC8DFFFE0.
+        let insn = decode_instruction(0xC8DF_FFE0).expect("decode LDAR X0,[SP]");
+        assert!(
+            matches!(insn, DecodedInsn::Ldar { size: AccessSize::DoubleWord, rt, rn }
+                if rt.0 == 0 && rn.0 == 31),
+            "LDAR X0,[SP] -> Ldar{{DoubleWord, rt=0, rn=31}}: {insn:?}",
+        );
+        let mut blk = fresh_block();
+        lift(&insn, &mut blk).expect("lift LDAR");
+        assert!(
+            blk.ops.iter().any(|o| matches!(o, IrOp::ReadSp { .. })),
+            "LDAR [SP] must read SP via ReadSp: {:?}", blk.ops,
+        );
+        assert!(
+            !blk.ops.iter().any(|o| matches!(o, IrOp::ReadGpr { reg: 31, .. })),
+            "LDAR [SP] must NOT read XZR for the base: {:?}", blk.ops,
+        );
+    }
+
+    #[test]
+    fn lift_swp_sp_base_reads_sp_not_xzr() {
+        // SWP X2, X3, [SP] = 0xF82280E3 (LSE atomic, base=SP).
+        //   sz=11, A=0, R=0, Rs=2, opcode=1000(SWP), Rn=31, Rt=3.
+        let word: u32 = (0b11 << 30) | (0b111000 << 24) | (0b001 << 21)
+            | (2 << 16) | (0b1000 << 12) | (31 << 5) | 3;
+        let insn = decode_instruction(word).expect("decode SWP X2,X3,[SP]");
+        assert!(
+            matches!(insn, DecodedInsn::Swp { rn, .. } if rn.0 == 31),
+            "SWP [SP] -> Swp{{rn=31}}: {insn:?}",
+        );
+        let mut blk = fresh_block();
+        lift(&insn, &mut blk).expect("lift SWP");
+        assert!(
+            blk.ops.iter().any(|o| matches!(o, IrOp::ReadSp { .. })),
+            "SWP [SP] must read SP via ReadSp: {:?}", blk.ops,
+        );
+        // The atomic value operand Rs (x2) is a plain ReadGpr; only the base
+        // must be ReadSp. There must be no ReadGpr{reg:31} (base would be XZR).
+        assert!(
+            !blk.ops.iter().any(|o| matches!(o, IrOp::ReadGpr { reg: 31, .. })),
+            "SWP [SP] must NOT read XZR for the base: {:?}", blk.ops,
+        );
+    }
+
+    // ── L4: AND/ORR/EOR SP, Xn, #imm (logical-immediate, Rd=SP) ──
+    // Non-flag-setting logical-immediate destination is <Xd|SP>; rd==31 is SP,
+    // not XZR. The write must be WriteSp, not silently discarded.
+    #[test]
+    fn lift_and_imm_sp_dest_writes_sp() {
+        // AND SP, X9, #0xFFFFFFFFFFFFFFF0 = 0x927CED3F (stack-realign idiom).
+        let insn = decode_instruction(0x927C_ED3F).expect("decode AND SP,X9,#~15");
+        assert!(
+            matches!(insn, DecodedInsn::AndImm { rd, rn, set_flags: false, .. }
+                if rd.0 == 31 && rn.0 == 9),
+            "AND SP,X9,#imm -> AndImm{{rd=31, rn=9, !set_flags}}: {insn:?}",
+        );
+        let mut blk = fresh_block();
+        lift(&insn, &mut blk).expect("lift AND-imm");
+        assert!(
+            blk.ops.iter().any(|o| matches!(o, IrOp::WriteSp { .. })),
+            "AND SP,#imm must write SP via WriteSp: {:?}", blk.ops,
+        );
+        assert!(
+            !blk.ops.iter().any(|o| matches!(o, IrOp::WriteGpr { reg: 31, .. })),
+            "AND SP,#imm must not emit a (discarded) WriteGpr reg=31: {:?}", blk.ops,
+        );
+    }
+
+    // ── L3: LDR/STR Bt/Ht (V=1 byte/half FP) route to the q-register file ──
+    // These MUST NOT land in the GPR file (that clobbered a live Xt / stored
+    // garbage). Load path: zero Vt then insert lane 0; store path: extract lane 0.
+    #[test]
+    fn lift_ldr_byte_fp_lands_in_vreg_not_gpr() {
+        use crate::decoder::AccessSize;
+        // LDR B0, [X1] = 0x3D400020.
+        let insn = decode_instruction(0x3D40_0020).expect("decode LDR B0,[X1]");
+        assert!(
+            matches!(insn, DecodedInsn::Ldr { size: AccessSize::Byte, is_fp: true, rt, .. }
+                if rt.0 == 0),
+            "LDR B0,[X1] -> Ldr{{Byte, is_fp, rt=0}}: {insn:?}",
+        );
+        let mut blk = fresh_block();
+        lift(&insn, &mut blk).expect("lift LDR B");
+        assert!(
+            blk.ops.iter().any(|o| matches!(o, IrOp::VecInsGpr { d: 0, lane: 0, size: 1, .. })),
+            "LDR B0 must insert into V0 lane 0 (size 1): {:?}", blk.ops,
+        );
+        assert!(
+            !blk.ops.iter().any(|o| matches!(o, IrOp::WriteGpr { .. })),
+            "LDR B0 must NOT write a GPR: {:?}", blk.ops,
+        );
+    }
+
+    #[test]
+    fn lift_str_half_fp_extracts_lane_not_gpr() {
+        use crate::decoder::AccessSize;
+        // STR H3, [X1] = 0x7D000023.
+        let insn = decode_instruction(0x7D00_0023).expect("decode STR H3,[X1]");
+        assert!(
+            matches!(insn, DecodedInsn::Str { size: AccessSize::HalfWord, is_fp: true, rt, .. }
+                if rt.0 == 3),
+            "STR H3,[X1] -> Str{{HalfWord, is_fp, rt=3}}: {insn:?}",
+        );
+        let mut blk = fresh_block();
+        lift(&insn, &mut blk).expect("lift STR H");
+        assert!(
+            blk.ops.iter().any(|o| matches!(o, IrOp::VecExtractLane { n: 3, lane: 0, size: 2, .. })),
+            "STR H3 must extract V3 lane 0 (size 2): {:?}", blk.ops,
+        );
+        // The store data must come from the vreg extract, not a GPR read of x3.
+        assert!(
+            !blk.ops.iter().any(|o| matches!(o, IrOp::ReadGpr { reg: 3, .. })),
+            "STR H3 must NOT read GPR x3 for the store data: {:?}", blk.ops,
+        );
     }
 }

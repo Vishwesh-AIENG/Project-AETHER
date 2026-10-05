@@ -44,8 +44,18 @@ const SP_SLOT: usize = SP_OFFSET / 8; // 31
 static REAL_VECTORS_EL1: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
+/// Telemetry: how many times the KPTI TTBR1 entry/exit switch actually fired
+/// (packed: low 32 = inject→swapper, high 32 = eret→tramp). Read by the boot
+/// heartbeat to confirm the switch engages.
+pub static TTBR1_SWITCH_FIRED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 // Sysreg sub-indices — MUST match `backend/lower_int.rs` `sysreg_read_idx`.
+/// TTBR1_EL1 (kernel translation base). `sysreg_read_idx` maps `TtbrEl1_1 => 2`.
+const SR_TTBR1: usize = 2;
 const SR_VBAR: usize = 6;
+/// Page-frame mask (bits [47:12]) for extracting a pgd base from TTBR1_EL1.
+const TTBR_BASE_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 const SR_ESR: usize = 12;
 const SR_ELR: usize = 13;
 const SR_SPSR: usize = 14;
@@ -58,6 +68,33 @@ const SR_SP_EL1: usize = 17;
 const SR_DAIF: usize = 22;
 const SR_SPSEL: usize = 23;
 const SR_CURRENTEL: usize = 42;
+
+// [eretw] one-shot snapshot of the kernel state at the ERET that returns init to
+// the corrupted resume PC (0x7ce8274c08) — used to pin the exception-return-path
+// DBT miscompile. Dumped by boot_x86 at the PSCI halt.
+pub static mut ERETW_LATCH: u64 = 0;
+pub static mut ERETW_OP_PC: u64 = 0;
+pub static mut ERETW_SPSR: u64 = 0;
+pub static mut ERETW_ELR: u64 = 0;
+pub static mut ERETW_SP_EL0: u64 = 0;
+pub static mut ERETW_SP_EL1: u64 = 0;
+pub static mut ERETW_X: [u64; 31] = [0; 31];
+
+// [eretil] el0_undef corruptor hunt (2026-06-30). The fatal init SIGILL is an
+// `el0_undef` (ESR_EL1 EC=0x00), which covers BOTH "unknown instruction" AND
+// "illegal execution state (PSTATE.IL=1)". One mechanism for the latter is an
+// ERET that restores a SPSR with IL set (bit 20) or an illegal/unexpected mode
+// field — a miscompiled block that wrote a bad SPSR_EL1, or a corrupted SPSR
+// slot. `eret()` latches the FIRST such return so the hypervisor heartbeat can
+// print it: the restored SPSR, the ELR (the EL0 PC that will immediately raise
+// el0_undef), the target EL, and the op PC of the faulting block. The
+// translator is `no_std` and cannot call the hypervisor's `dual_puts`, so it
+// surfaces statics (mirroring ERETW_* above) that boot_x86 dumps.
+pub static mut ERETIL_LATCH: u64 = 0;
+pub static mut ERETIL_SPSR: u64 = 0;
+pub static mut ERETIL_ELR: u64 = 0;
+pub static mut ERETIL_TGT_EL: u64 = 0;
+pub static mut ERETIL_OP_PC: u64 = 0;
 
 /// True iff the (EL, SPSel) state selects the SP_EL0 bank as the active SP.
 /// EL0 always uses SP_EL0 (SPSel is ignored at EL0); at EL1, SP_EL0 is the
@@ -206,6 +243,19 @@ pub fn inject(ctx: &mut [u64], kind: ExceptionKind, esr: u64, far: u64, set_far:
         let ec = (esr >> 26) & 0x3F;
         let is_abort = ec == 0x20 || ec == 0x21 || ec == 0x24 || ec == 0x25;
         if kind == ExceptionKind::Sync && is_abort {
+            // Source-EL stamp: lower-EL (*_LOW, bit 26 clear) when the
+            // interrupted state was EL0, else same-EL (*_CUR, bit 26 set).
+            //
+            // NOTE (signal-11 audit): the originally-proposed "override to
+            // lower-EL when FAR is a user address but cur_el reads 1" fix was
+            // DELIBERATELY NOT APPLIED. A user-range FAR taken from EL1 is the
+            // signature of LEGITIMATE kernel-uaccess (copy_to/from_user / CoW),
+            // which MUST stay same-EL (0x25) so the kernel routes el1_abort /
+            // do_page_fault as a kernel access of a user page — forcing it to
+            // lower-EL would break that load-bearing path. `cur_el` is tracked
+            // accurately by the dispatcher (EL0 faults record CURRENTEL=0, the
+            // EL1-uaccess CoW faults record CURRENTEL=1 — see the [uflt] dumps),
+            // so `cur_el` is the correct source of truth and no override is safe.
             if cur_el == 0 {
                 esr & !(1 << 26) // lower EL → *_LOW (bit 26 clear)
             } else {
@@ -247,6 +297,28 @@ pub fn inject(ctx: &mut [u64], kind: ExceptionKind, esr: u64, far: u64, set_far:
 
     // Vector to the handler.
     ctx[PC_SLOT] = vbar.wrapping_add(offset);
+
+    // KPTI TTBR1 switch — emulate `tramp_map_kernel`. With page-table isolation
+    // the entry trampoline switches TTBR1_EL1 from the trampoline pgd
+    // (tramp_pg_dir, which maps only the trampoline) to swapper_pg_dir on every
+    // EL0→EL1 entry, so the kernel runs with its real page tables (vmalloc, vmap
+    // stacks, linear map). The DBT redirects exception entry straight to the
+    // real vectors and never runs that trampoline, so do it here. KERNEL_PGD_
+    // SNAPSHOT is the PROVEN swapper base (set only by the mmu fallback's
+    // differential tramp↔swapper resolve, never by a transient pgd), and tramp =
+    // swapper - 0x2000 (arm64 linker: tramp,reserved,swapper are consecutive
+    // PAGE_SIZE pgds). Switch ONLY on a real EL0→EL1 entry whose live TTBR1
+    // actually holds the trampoline pgd; ASID/CnP high bits are preserved.
+    if cur_el == 0 {
+        let snap = crate::runtime::mmu::kernel_pgd_snapshot();
+        if snap != 0 {
+            let cur_base = ctx[sr(SR_TTBR1)] & TTBR_BASE_MASK;
+            if cur_base == snap.wrapping_sub(0x2000) {
+                ctx[sr(SR_TTBR1)] = (ctx[sr(SR_TTBR1)] & !TTBR_BASE_MASK) | snap;
+                TTBR1_SWITCH_FIRED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// If a Data/Instruction Abort is pending (the MMU walker set `PEND_PENDING`),
@@ -304,10 +376,36 @@ pub fn inject_irq(ctx: &mut [u64]) {
 /// kernel resuming its own context after handling a fault) decodes mode=EL1h,
 /// so no SP swap occurs and behaviour matches the previous lowering plus the
 /// now-correct DAIF restore.
+#[allow(unsafe_code)]
 pub fn eret(ctx: &mut [u64]) {
     debug_assert!(ctx.len() >= CTX_U64S, "context buffer too small for ERET");
     let spsr = ctx[sr(SR_SPSR)];
     let elr = ctx[sr(SR_ELR)];
+
+    // [eretw] one-shot: when the ERET target is the corrupted init resume PC
+    // (SV_WATCH = 0x7ce8274c08), snapshot the kernel GPR file + SPs so the
+    // register holding the bad value + its neighbours reveal how the kernel
+    // computed it (the DBT miscompile in the exception-return path).
+    // SAFETY: EL2-private statics, single-vCPU.
+    unsafe {
+        let w = *core::ptr::addr_of!(crate::runtime::mmu::SV_WATCH);
+        if w != 0 && (elr & 0x00FF_FFFF_FFFF_FFFF) == w
+            && *core::ptr::addr_of!(ERETW_LATCH) == 0
+        {
+            *core::ptr::addr_of_mut!(ERETW_LATCH) = 1;
+            *core::ptr::addr_of_mut!(ERETW_OP_PC) =
+                *core::ptr::addr_of!(crate::runtime::mmu::FAULT_OP_PC);
+            *core::ptr::addr_of_mut!(ERETW_SPSR) = spsr;
+            *core::ptr::addr_of_mut!(ERETW_ELR) = elr;
+            *core::ptr::addr_of_mut!(ERETW_SP_EL0) = ctx[sr(SR_SP_EL0)];
+            *core::ptr::addr_of_mut!(ERETW_SP_EL1) = ctx[sr(SR_SP_EL1)];
+            let mut i = 0usize;
+            while i < 31 {
+                (*core::ptr::addr_of_mut!(ERETW_X))[i] = ctx[i];
+                i += 1;
+            }
+        }
+    }
 
     // Decode the target mode from SPSR.M[4:0]. Only the three modes the guest
     // kernel uses are valid; an illegal value is treated as EL1h (the bring-up
@@ -320,6 +418,26 @@ pub fn eret(ctx: &mut [u64]) {
         MODE_EL1H => (1, 1),
         _ => (1, 1),
     };
+
+    // [eretil] Latch the FIRST ERET whose restored SPSR has PSTATE.IL set
+    // (bit 20) or an illegal mode field (none of EL0t/EL1t/EL1h). Either makes
+    // the guest take `el0_undef`/`el1_undef` on the very next instruction — the
+    // SPSR-corruption flavour of the intermittent init SIGILL. Reading addr_of!
+    // of EL2-private statics in a single-vCPU dispatch is sound.
+    // SAFETY: EL2-private statics, single-vCPU.
+    #[allow(unsafe_code)]
+    unsafe {
+        let il = (spsr >> 20) & 1;
+        let bad_mode = !matches!(mode, MODE_EL0T | MODE_EL1T | MODE_EL1H);
+        if (il == 1 || bad_mode) && *core::ptr::addr_of!(ERETIL_LATCH) == 0 {
+            *core::ptr::addr_of_mut!(ERETIL_LATCH) = 1;
+            *core::ptr::addr_of_mut!(ERETIL_SPSR) = spsr;
+            *core::ptr::addr_of_mut!(ERETIL_ELR) = elr;
+            *core::ptr::addr_of_mut!(ERETIL_TGT_EL) = tgt_el;
+            *core::ptr::addr_of_mut!(ERETIL_OP_PC) =
+                *core::ptr::addr_of!(crate::runtime::mmu::FAULT_OP_PC);
+        }
+    }
 
     // SP bank swap, only when the active bank actually changes.
     let cur_el = (ctx[sr(SR_CURRENTEL)] >> 2) & 0b11;
@@ -347,6 +465,22 @@ pub fn eret(ctx: &mut [u64]) {
     ctx[sr(SR_CURRENTEL)] = tgt_el << 2;
     ctx[sr(SR_SPSEL)] = tgt_spsel;
     ctx[PC_SLOT] = elr;
+
+    // KPTI TTBR1 switch — emulate `tramp_unmap_kernel` (inverse of the entry
+    // switch): on an ERET back to EL0 restore TTBR1 to the trampoline pgd
+    // (swapper - 0x2000) so userspace runs with the kernel half unmapped. Only
+    // when TTBR1 currently holds the proven swapper; ASID/CnP bits preserved.
+    if tgt_el == 0 {
+        let snap = crate::runtime::mmu::kernel_pgd_snapshot();
+        if snap != 0 {
+            let cur_base = ctx[sr(SR_TTBR1)] & TTBR_BASE_MASK;
+            if cur_base == snap {
+                ctx[sr(SR_TTBR1)] =
+                    (ctx[sr(SR_TTBR1)] & !TTBR_BASE_MASK) | snap.wrapping_sub(0x2000);
+                TTBR1_SWITCH_FIRED.fetch_add(1 << 32, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// FFI entry for the SVC lowering: a guest `SVC #imm16` takes a synchronous
@@ -382,13 +516,91 @@ pub static mut MMAP_RET: u64 = 0;
 pub static mut MMAP_PENDING: bool = false;
 pub static mut MMAP_RET_VALID: bool = false;
 
+/// Diagnostic capture, resolved AT SVC TIME (TTBR0 still live), of the last
+/// connect() sockaddr path and the last writev()-to-stderr message. By the time
+/// an "Attempted to kill init" panic reaches the PSCI halt, init's address space
+/// is already torn down (exit_mm), so the hypervisor cannot walk these userspace
+/// VAs then — it reads these statics instead to name WHY init exit(1)'d.
+pub static mut LAST_CONNECT_PATH: [u8; 128] = [0; 128];
+pub static mut LAST_CONNECT_LEN: usize = 0;
+pub static mut LAST_STDERR_MSG: [u8; 256] = [0; 256];
+pub static mut LAST_STDERR_LEN: usize = 0;
+/// Ring of the last 8 small writes to fd 1/2/3 — first-stage init's crash text
+/// (LOG(FATAL) / __fortify_fatal / __stack_chk_fail) before logd exists.
+pub const WRITE_RING_N: usize = 16;
+pub static mut WRITE_RING: [[u8; 120]; WRITE_RING_N] = [[0; 120]; WRITE_RING_N];
+pub static mut WRITE_RING_LEN: [u16; WRITE_RING_N] = [0; WRITE_RING_N];
+pub static mut WRITE_RING_FD: [u8; WRITE_RING_N] = [0; WRITE_RING_N];
+pub static mut WRITE_RING_IDX: usize = 0;
+/// Kept for the existing psci-exit dump (the most recent write).
+pub static mut LAST_WRITE_MSG: [u8; 256] = [0; 256];
+pub static mut LAST_WRITE_LEN: usize = 0;
+pub static mut LAST_WRITE_FD: u64 = 0;
+/// mknodat(2) accounting: total device nodes init created, and whether it ever
+/// created /dev/null. If init exits with "failed to open /dev/null" but
+/// DEVNULL_MKNOD_SEEN is true, the node exists in the main namespace and a forked
+/// process simply can't see it (mount-namespace/devtmpfs); if false, init never
+/// made it (its /dev setup path was skipped or the syscall mis-handled).
+pub static mut MKNOD_COUNT: u64 = 0;
+pub static mut DEVNULL_MKNOD_SEEN: bool = false;
+/// mount(2) accounting: total mounts + the fstype init put on /dev (tmpfs vs
+/// devtmpfs). If /dev is tmpfs but mknod_count==0, init's first-stage node setup
+/// is being skipped/failing before the mknod section; if devtmpfs, the kernel
+/// device-model isn't creating /dev/null; if LEN==0, init never mounted /dev.
+pub static mut MOUNT_COUNT: u64 = 0;
+/// Count of empty MS_MOVE mounts whose result was faked to success (root-skip).
+pub static mut MOVE_PATCHED: u64 = 0;
+/// Set when the current SVC is an empty-source MS_MOVE — its ERET fakes x0=0.
+pub static mut MOVE_FAKE_PENDING: u64 = 0;
+/// B36: syscall-correlation token for [`MOVE_FAKE_PENDING`] — the ELR_EL1 (return
+/// address) captured when the fake is armed. The fake is consumed ONLY at the ERET
+/// whose ELR matches, so an intervening signal/IRQ delivery to EL0 (a different
+/// ELR) can't steal the fake and zero an unrelated syscall's x0.
+pub static mut MOVE_FAKE_ELR: u64 = 0;
+/// Ring of init opens matching device-tree/fstab/firmware + their returns.
+pub static mut OPEN_RING_PATH: [[u8; 96]; 12] = [[0; 96]; 12];
+pub static mut OPEN_RING_LEN: [usize; 12] = [0; 12];
+pub static mut OPEN_RING_RET: [u64; 12] = [0; 12];
+pub static mut OPEN_RING_IDX: usize = 0;
+/// idx+1 of the in-flight openat whose ERET will record the return; 0 = none.
+pub static mut OPEN_RING_PENDING: usize = 0;
+pub static mut DEV_MOUNT_FSTYPE: [u8; 32] = [0; 32];
+pub static mut DEV_MOUNT_FSTYPE_LEN: usize = 0;
+/// Capture of init's /proc/mounts read content (the getmntent source) — to
+/// decide whether the empty mnt_dir is a malformed proc line or a parse bug.
+pub static mut READ_PEND_BUF: u64 = 0;
+pub static mut READ_PEND_LEN: u64 = 0;
+pub static mut READ_PEND: u64 = 0;
+pub static mut PROC_MOUNTS_BUF: [u8; 400] = [0; 400];
+pub static mut PROC_MOUNTS_LEN: usize = 0;
+/// Ring of the last mount() (src, target, flags) — to see the failing MS_MOVE.
+pub const MOUNT_RING_N: usize = 8;
+pub static mut MOUNT_RING_SRC: [[u8; 64]; MOUNT_RING_N] = [[0; 64]; MOUNT_RING_N];
+pub static mut MOUNT_RING_TGT: [[u8; 64]; MOUNT_RING_N] = [[0; 64]; MOUNT_RING_N];
+pub static mut MOUNT_RING_FLAGS: [u64; MOUNT_RING_N] = [0; MOUNT_RING_N];
+pub static mut MOUNT_RING_IDX: usize = 0;
+
 #[allow(unsafe_code)]
 pub extern "C" fn aether_svc_enter(ctx: *mut u64, imm16: u64) {
     // SAFETY: caller's contract — ctx is the register-file base.
     let slice = unsafe { core::slice::from_raw_parts_mut(ctx, CTX_U64S) };
+    // B19: snapshot the three PEND slots so the diagnostic arg-string probes below
+    // are PEND-transparent. They call aether_mmu_xlate on USER pointers; an unmapped
+    // page makes the walker record a SPURIOUS pending Data Abort. Restoring the
+    // snapshot at the single exit (rather than a blanket clear) guarantees the
+    // probes leak no fault into the dispatcher regardless of control flow, while
+    // preserving any abort that was genuinely pending at entry.
+    let pend_snapshot = [
+        slice[sr(SLOT_PEND_PENDING)],
+        slice[sr(SLOT_PEND_FAR)],
+        slice[sr(SLOT_PEND_ESR)],
+    ];
     // Diagnostic: record (nr, x0, x1, x2, x30) into the ring.
     // SAFETY: EL2-private statics, single-vCPU.
     unsafe {
+        // Mark the probe window: a fault taken here is spurious (cleared by the
+        // PEND restore below) and must not be mistaken for init's real death.
+        *core::ptr::addr_of_mut!(crate::runtime::mmu::IN_DIAG_PROBE) = 1;
         let i = *core::ptr::addr_of!(SYSCALL_RING_IDX) % 32;
         let ring = core::ptr::addr_of_mut!(SYSCALL_RING);
         (*ring)[i] = [slice[8], slice[0], slice[1], slice[2], slice[30]];
@@ -401,6 +613,283 @@ pub extern "C" fn aether_svc_enter(ctx: *mut u64, imm16: u64) {
             *core::ptr::addr_of_mut!(MMAP_REQ) = [slice[0], slice[1], slice[2], slice[3]];
             *core::ptr::addr_of_mut!(MMAP_PENDING) = true;
         }
+        // connect(fd, sockaddr_un* @ x1, len): capture the socket path (after the
+        // 2-byte sa_family) so a failing connect (ENOENT on a missing /dev/socket
+        // entry) is named at the halt. These VAs are live (init just passed them).
+        if slice[8] == 203 {
+            let mut va = slice[1].wrapping_add(2);
+            let out = core::ptr::addr_of_mut!(LAST_CONNECT_PATH);
+            let mut j = 0usize;
+            while j < 127 {
+                let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, va, 0, 1);
+                if pa == 0 { break; }
+                let b = *(pa as *const u8);
+                if b == 0 { break; }
+                (*out)[j] = b;
+                va = va.wrapping_add(1);
+                j += 1;
+            }
+            *core::ptr::addr_of_mut!(LAST_CONNECT_LEN) = j;
+        }
+        // writev(2=stderr, iovec* @ x1, cnt @ x2): concatenate the iov strings —
+        // init's own error text right before exit_group(1).
+        if slice[8] == 66 && slice[0] == 2 {
+            let iov = slice[1];
+            let cnt = if slice[2] < 8 { slice[2] } else { 8 };
+            let out = core::ptr::addr_of_mut!(LAST_STDERR_MSG);
+            let mut o = 0usize;
+            let mut v = 0u64;
+            while v < cnt && o < 255 {
+                let bpa = crate::runtime::mmu::aether_mmu_xlate(ctx, iov + v * 16, 0, 8);
+                let lpa = crate::runtime::mmu::aether_mmu_xlate(ctx, iov + v * 16 + 8, 0, 8);
+                if bpa == 0 || lpa == 0 { break; }
+                let base = *(bpa as *const u64);
+                let len = *(lpa as *const u64);
+                let mut va = base;
+                let mut j = 0u64;
+                while j < len && o < 255 {
+                    let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, va, 0, 1);
+                    if pa == 0 { break; }
+                    (*out)[o] = *(pa as *const u8);
+                    o += 1;
+                    va = va.wrapping_add(1);
+                    j += 1;
+                }
+                v += 1;
+            }
+            *core::ptr::addr_of_mut!(LAST_STDERR_LEN) = o;
+        }
+        // write(fd, buf @ x1, len @ x2): capture the text of any small write to a
+        // low fd (1/2/3) — first-stage init's LOG(FATAL) message (the abort/
+        // SIGABRT reason) goes here before logd exists. Keep the LAST one.
+        if slice[8] == 64 && slice[0] <= 3 && slice[2] > 0 && slice[2] <= 255 {
+            let buf = slice[1];
+            let len = slice[2];
+            let out = core::ptr::addr_of_mut!(LAST_WRITE_MSG);
+            let mut o = 0usize;
+            let mut va = buf;
+            while (o as u64) < len && o < 255 {
+                let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, va, 0, 1);
+                if pa == 0 { break; }
+                (*out)[o] = *(pa as *const u8);
+                o += 1;
+                va = va.wrapping_add(1);
+            }
+            *core::ptr::addr_of_mut!(LAST_WRITE_LEN) = o;
+            *core::ptr::addr_of_mut!(LAST_WRITE_FD) = slice[0];
+            // Also push into the ring so the crash message (overwritten by the
+            // later backtrace + reboot notice in the single buffer) is preserved.
+            let ri = *core::ptr::addr_of!(WRITE_RING_IDX) % WRITE_RING_N;
+            let rout = core::ptr::addr_of_mut!(WRITE_RING[ri]);
+            let mut k = 0usize;
+            let mut rva = buf;
+            while (k as u64) < len && k < 120 {
+                let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, rva, 0, 1);
+                if pa == 0 { break; }
+                (*rout)[k] = *(pa as *const u8);
+                k += 1;
+                rva = rva.wrapping_add(1);
+            }
+            *core::ptr::addr_of_mut!(WRITE_RING_LEN[ri]) = k as u16;
+            *core::ptr::addr_of_mut!(WRITE_RING_FD[ri]) = slice[0] as u8;
+            *core::ptr::addr_of_mut!(WRITE_RING_IDX) =
+                (*core::ptr::addr_of!(WRITE_RING_IDX)).wrapping_add(1);
+        }
+        // mknodat(dirfd, path @ x1, mode, dev): count device-node creations and
+        // flag the /dev/null one (exact match incl. NUL terminator).
+        if slice[8] == 33 {
+            *core::ptr::addr_of_mut!(MKNOD_COUNT) =
+                (*core::ptr::addr_of!(MKNOD_COUNT)).wrapping_add(1);
+            let mut va = slice[1];
+            let t = b"/dev/null\0";
+            let mut m = 0usize;
+            let mut ok = true;
+            while m < t.len() {
+                let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, va, 0, 1);
+                if pa == 0 { ok = false; break; }
+                if *(pa as *const u8) != t[m] { ok = false; break; }
+                va = va.wrapping_add(1);
+                m += 1;
+            }
+            if ok {
+                *core::ptr::addr_of_mut!(DEVNULL_MKNOD_SEEN) = true;
+            }
+        }
+        // mount(source @ x0, target @ x1, fstype @ x2, ...): capture the fstype of
+        // the /dev mount — tmpfs vs devtmpfs explains why /dev/null is absent.
+        if slice[8] == 40 {
+            *core::ptr::addr_of_mut!(MOUNT_COUNT) =
+                (*core::ptr::addr_of!(MOUNT_COUNT)).wrapping_add(1);
+            // switch_root root-skip fix. init's getmntent mis-parses the root
+            // mnt_dir ("/") as "" (DBT sscanf bug), so SwitchRoot's `mnt_dir == "/"
+            // -> continue` skip MISSES the root and init wrongly does
+            // mount("", "/first_stage_ramdisk", MS_MOVE). The root must NOT be moved
+            // (moving it under its own subtree is impossible — EINVAL/ELOOP). So
+            // when the MS_MOVE source is empty, flag this SVC to return SUCCESS at
+            // its ERET: a no-op that exactly matches the correct "skip the root"
+            // behaviour, letting the sub-mount moves + final pivot proceed.
+            // (MS_MOVE = 0x2000.) The underlying getmntent miscompile is the real
+            // bug; this unblocks the pivot until it is found+fixed.
+            if slice[3] & 0x2000 != 0 && slice[0] != 0 {
+                let spa = crate::runtime::mmu::aether_mmu_xlate(ctx, slice[0], 0, 1);
+                if spa != 0 && *(spa as *const u8) == 0 {
+                    // Empty MS_MOVE source from the getmntent bug. Reconstruct the
+                    // real mount point from the TARGET: switch_root moves each
+                    // mnt_dir to new_root + mnt_dir, so for
+                    // target = "/first_stage_ramdisk/<sub>" the source must be
+                    // "/<sub>". For target == "/first_stage_ramdisk" exactly it is
+                    // the rootfs move (skip — can't move root under its subtree).
+                    const PFX: &[u8] = b"/first_stage_ramdisk";
+                    let mut tgt = [0u8; 64];
+                    let mut va = slice[1];
+                    let mut tl = 0usize;
+                    while tl < 63 {
+                        let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, va, 0, 1);
+                        if pa == 0 { break; }
+                        let b = *(pa as *const u8);
+                        if b == 0 { break; }
+                        tgt[tl] = b;
+                        va = va.wrapping_add(1);
+                        tl += 1;
+                    }
+                    let is_pfx = tl >= PFX.len() && &tgt[..PFX.len()] == PFX;
+                    let src_len = if is_pfx { tl - PFX.len() } else { 0 };
+                    // B7/B35: NEVER overrun the libc++ char SSO inline buffer
+                    // (~22 bytes incl. NUL) — a longer reconstructed path would
+                    // scribble past it into the string's size/capacity/heap-ptr
+                    // union. AOSP first-stage submounts are short (the longest,
+                    // "/sys/fs/selinux", is 15). Cap the in-place write at 15
+                    // bytes; for anything longer fall back to the no-op skip.
+                    if is_pfx && src_len > 0 && src_len <= 15 {
+                        // sub-mount: write src into the empty SSO buffer, NUL-term.
+                        let src = &tgt[PFX.len()..tl];
+                        let mut k = 0usize;
+                        let mut ok = true;
+                        while k < src.len() {
+                            let pa = crate::runtime::mmu::aether_mmu_xlate(
+                                ctx, slice[0].wrapping_add(k as u64), 1, 1);
+                            if pa == 0 { ok = false; break; }
+                            *(pa as *mut u8) = src[k];
+                            k += 1;
+                        }
+                        if ok {
+                            let pa = crate::runtime::mmu::aether_mmu_xlate(
+                                ctx, slice[0].wrapping_add(src.len() as u64), 1, 1);
+                            if pa != 0 { *(pa as *mut u8) = 0; }
+                        }
+                        *core::ptr::addr_of_mut!(MOVE_PATCHED) =
+                            (*core::ptr::addr_of!(MOVE_PATCHED)).wrapping_add(1);
+                    } else {
+                        // exact "/first_stage_ramdisk" (rootfs) — fake success.
+                        // B36: tag the fake with this syscall's return ELR so only
+                        // its own ERET-to-EL0 consumes it.
+                        *core::ptr::addr_of_mut!(MOVE_FAKE_PENDING) = 1;
+                        *core::ptr::addr_of_mut!(MOVE_FAKE_ELR) = slice[sr(SR_ELR)];
+                        *core::ptr::addr_of_mut!(MOVE_PATCHED) =
+                            (*core::ptr::addr_of!(MOVE_PATCHED)).wrapping_add(1);
+                    }
+                }
+            }
+            let mut va = slice[1];
+            let t = b"/dev\0";
+            let mut m = 0usize;
+            let mut ok = true;
+            while m < t.len() {
+                let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, va, 0, 1);
+                if pa == 0 { ok = false; break; }
+                if *(pa as *const u8) != t[m] { ok = false; break; }
+                va = va.wrapping_add(1);
+                m += 1;
+            }
+            if ok {
+                let mut fva = slice[2];
+                let out = core::ptr::addr_of_mut!(DEV_MOUNT_FSTYPE);
+                let mut j = 0usize;
+                while j < 31 {
+                    let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, fva, 0, 1);
+                    if pa == 0 { break; }
+                    let b = *(pa as *const u8);
+                    if b == 0 { break; }
+                    (*out)[j] = b;
+                    fva = fva.wrapping_add(1);
+                    j += 1;
+                }
+                *core::ptr::addr_of_mut!(DEV_MOUNT_FSTYPE_LEN) = j;
+            }
+            // Capture EVERY mount() call's (src, target, flags) into a ring so the
+            // failing switch_root MS_MOVE — mount("", "/first_stage_ramdisk",
+            // MS_MOVE) = EINVAL — is visible: is the empty source init's own
+            // getmntent parse, or a DBT-mistranslated arg?
+            let ri = *core::ptr::addr_of!(MOUNT_RING_IDX) % MOUNT_RING_N;
+            let rd = |va0: u64, out: *mut [u8; 64]| {
+                let mut va = va0;
+                let mut k = 0usize;
+                while k < 63 {
+                    let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, va, 0, 1);
+                    if pa == 0 { break; }
+                    let b = *(pa as *const u8);
+                    if b == 0 { break; }
+                    (*out)[k] = b;
+                    va = va.wrapping_add(1);
+                    k += 1;
+                }
+                (*out)[k] = 0;
+            };
+            (*core::ptr::addr_of_mut!(MOUNT_RING_SRC))[ri] = [0; 64];
+            (*core::ptr::addr_of_mut!(MOUNT_RING_TGT))[ri] = [0; 64];
+            rd(slice[0], core::ptr::addr_of_mut!(MOUNT_RING_SRC[ri]));
+            rd(slice[1], core::ptr::addr_of_mut!(MOUNT_RING_TGT[ri]));
+            *core::ptr::addr_of_mut!(MOUNT_RING_FLAGS[ri]) = slice[3];
+            *core::ptr::addr_of_mut!(MOUNT_RING_IDX) =
+                (*core::ptr::addr_of!(MOUNT_RING_IDX)).wrapping_add(1);
+        }
+        // read(fd, buf @ x1, len @ x2): stash the buffer for the matching ERET so
+        // the FILLED content can be inspected for the /proc/mounts table.
+        if slice[8] == 63 && slice[2] >= 128 {
+            *core::ptr::addr_of_mut!(READ_PEND_BUF) = slice[1];
+            *core::ptr::addr_of_mut!(READ_PEND_LEN) = slice[2];
+            *core::ptr::addr_of_mut!(READ_PEND) = 1;
+        }
+        // openat(dirfd@x0, path@x1, ...): if the path mentions fstab/device-tree,
+        // stash it + flag the SVC so its ERET records the fd/-errno. Reveals which
+        // fstab path the FirstStageMount opendir/open hits and whether it succeeds.
+        // openat(56) / faccessat(48) / newfstatat(79) — all take the path at x1.
+        if slice[8] == 56 || slice[8] == 48 || slice[8] == 79 {
+            let mut tmp = [0u8; 96];
+            let mut va = slice[1];
+            let mut j = 0usize;
+            while j < 95 {
+                let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, va, 0, 1);
+                if pa == 0 { break; }
+                let b = *(pa as *const u8);
+                if b == 0 { break; }
+                tmp[j] = b;
+                va = va.wrapping_add(1);
+                j += 1;
+            }
+            // match "tree" / "fstab" / "firmware" substring (device-tree, fstab.*,
+            // firmware/android, /sys/firmware).
+            let has = |pat: &[u8]| -> bool {
+                if pat.len() > j { return false; }
+                let mut i = 0usize;
+                while i + pat.len() <= j {
+                    if &tmp[i..i + pat.len()] == pat { return true; }
+                    i += 1;
+                }
+                false
+            };
+            if has(b"tree") || has(b"fstab") || has(b"firmware")
+                || has(b"cmdline") || has(b"bootconfig") || has(b"/proc/mounts")
+            {
+                let idx = *core::ptr::addr_of!(OPEN_RING_IDX) % 12;
+                let out = core::ptr::addr_of_mut!(OPEN_RING_PATH);
+                let mut k = 0usize;
+                while k < j { (*out)[idx][k] = tmp[k]; k += 1; }
+                (*core::ptr::addr_of_mut!(OPEN_RING_LEN))[idx] = j;
+                (*core::ptr::addr_of_mut!(OPEN_RING_RET))[idx] = 0xDEAD;
+                *core::ptr::addr_of_mut!(OPEN_RING_PENDING) = idx + 1;
+            }
+        }
     }
     // (The prctl(PR_SET_VMA)→-EINVAL intercept that briefly lived here was a RED
     // HERRING. The "intermittent EL0-write SIGSEGV" it tried to dodge was really
@@ -409,6 +898,21 @@ pub extern "C" fn aether_svc_enter(ctx: *mut u64, imm16: u64) {
     // VMA right before the straddling memcpy). Faking -EINVAL is a fingerprint
     // deviation and is no longer needed, so the syscall now falls through to the
     // kernel's real (no-op, returns 0) handler.)
+    // The diagnostic path-string probes above (connect/writev/mknodat/mount)
+    // call aether_mmu_xlate on USER pointers; when a string page is not mapped
+    // the walker records a SPURIOUS pending Data Abort in the PEND slots. Left
+    // set, the dispatcher injects it on a LATER block — at ret_to_user with
+    // SP_EL0 = the user SP — and enter_from_kernel_mode then loops forever
+    // dereferencing current=SP_EL0 (a user address). An SVC is not itself a
+    // fault, so any probe-induced PEND must not survive into the syscall entry.
+    // (This was the mount()-time enter_from_kernel_mode nested-abort wedge.)
+    // B19: restore the entry snapshot — discards probe-induced PEND, keeps a
+    // genuinely-pending abort (normally none, since SVC is not itself a fault).
+    slice[sr(SLOT_PEND_PENDING)] = pend_snapshot[0];
+    slice[sr(SLOT_PEND_FAR)] = pend_snapshot[1];
+    slice[sr(SLOT_PEND_ESR)] = pend_snapshot[2];
+    // SAFETY: EL2-private static, single-vCPU. End the probe window.
+    unsafe { *core::ptr::addr_of_mut!(crate::runtime::mmu::IN_DIAG_PROBE) = 0; }
     let esr = (0x15u64 << 26) | (1 << 25) | (imm16 & 0xFFFF);
     inject(slice, ExceptionKind::Sync, esr, 0, false);
 }
@@ -424,6 +928,39 @@ pub extern "C" fn aether_eret_enter(ctx: *mut u64) {
     // SAFETY: caller's contract — ctx is the register-file base.
     let slice = unsafe { core::slice::from_raw_parts_mut(ctx, CTX_U64S) };
     eret(slice);
+    // B19 (HV-side): the leftover /proc-mounts + openat investigation diagnostics
+    // below aether_mmu_xlate GUEST buffers (READ_PEND_BUF) with no PEND guard. If
+    // init's read buffer is bad/lazily-mapped (the kernel would return EFAULT),
+    // the xlate records a SPURIOUS pending Data Abort that the dispatcher then
+    // injects → init SIGSEGV → kill init. Snapshot the PEND slots here and restore
+    // before return so these diagnostics are PEND-transparent.
+    let pend_snap_ee = [
+        slice[sr(SLOT_PEND_PENDING)],
+        slice[sr(SLOT_PEND_FAR)],
+        slice[sr(SLOT_PEND_ESR)],
+    ];
+    // SAFETY: EL2-private statics, single-vCPU.
+    unsafe {
+        // Root-skip: fake the empty-source MS_MOVE (the mis-parsed root mount) to
+        // return 0 (success) so init's switch_root proceeds instead of FATAL-ing
+        // on EINVAL. Only on the ERET back to EL0 after that syscall.
+        if *core::ptr::addr_of!(MOVE_FAKE_PENDING) != 0
+            && ((slice[sr(SR_CURRENTEL)] >> 2) & 0b11) == 0
+            && slice[sr(SR_ELR)] == *core::ptr::addr_of!(MOVE_FAKE_ELR)
+        {
+            *core::ptr::addr_of_mut!(MOVE_FAKE_PENDING) = 0;
+            slice[0] = 0;
+        }
+        // openat(device-tree/fstab/firmware) return capture into the ring.
+        let pend = *core::ptr::addr_of!(OPEN_RING_PENDING);
+        if pend != 0 && ((slice[sr(SR_CURRENTEL)] >> 2) & 0b11) == 0 {
+            let idx = pend - 1;
+            (*core::ptr::addr_of_mut!(OPEN_RING_RET))[idx] = slice[0];
+            *core::ptr::addr_of_mut!(OPEN_RING_IDX) =
+                (*core::ptr::addr_of!(OPEN_RING_IDX)).wrapping_add(1);
+            *core::ptr::addr_of_mut!(OPEN_RING_PENDING) = 0;
+        }
+    }
     // mmap probe: the first ERET back to EL0 after an mmap SVC carries the
     // syscall's return value in x0 (IRQs return to EL1 and don't match).
     // SAFETY: EL2-private statics, single-vCPU.
@@ -433,7 +970,49 @@ pub extern "C" fn aether_eret_enter(ctx: *mut u64) {
             *core::ptr::addr_of_mut!(MMAP_RET_VALID) = true;
             *core::ptr::addr_of_mut!(MMAP_PENDING) = false;
         }
+        // read() ERET: the buffer is now filled. If it looks like the mount table
+        // (contains "tmpfs"), snapshot it — reveals whether /proc/mounts has an
+        // empty mount-point field (kernel) or getmntent mis-parsed (DBT).
+        if *core::ptr::addr_of!(READ_PEND) != 0
+            && ((slice[sr(SR_CURRENTEL)] >> 2) & 0b11) == 0
+        {
+            *core::ptr::addr_of_mut!(READ_PEND) = 0;
+            let buf = *core::ptr::addr_of!(READ_PEND_BUF);
+            let len = *core::ptr::addr_of!(READ_PEND_LEN);
+            let n = if len > 396 { 396 } else { len as usize };
+            let mut tmp = [0u8; 396];
+            let mut k = 0usize;
+            let mut va = buf;
+            while k < n {
+                let pa = crate::runtime::mmu::aether_mmu_xlate(ctx, va, 0, 1);
+                if pa == 0 { break; }
+                tmp[k] = *(pa as *const u8);
+                k += 1;
+                va = va.wrapping_add(1);
+            }
+            // Commit only if it contains "tmpfs" (mount-table marker).
+            let mut has = false;
+            let mut i = 0usize;
+            while i + 5 <= k {
+                if &tmp[i..i + 5] == b"tmpfs" { has = true; break; }
+                i += 1;
+            }
+            if has {
+                let out = core::ptr::addr_of_mut!(PROC_MOUNTS_BUF);
+                let mut j = 0usize;
+                while j < k {
+                    (*out)[j] = tmp[j];
+                    j += 1;
+                }
+                *core::ptr::addr_of_mut!(PROC_MOUNTS_LEN) = k;
+            }
+        }
     }
+    // Restore PEND: a diagnostic xlate of a bad/unmapped guest buffer above must
+    // not leak a spurious Data Abort into the guest (would spuriously kill init).
+    slice[sr(SLOT_PEND_PENDING)] = pend_snap_ee[0];
+    slice[sr(SLOT_PEND_FAR)] = pend_snap_ee[1];
+    slice[sr(SLOT_PEND_ESR)] = pend_snap_ee[2];
 }
 
 #[cfg(test)]
@@ -478,6 +1057,39 @@ mod tests {
         assert_eq!(ctx[PC_SLOT], VBAR + 0x200, "PC = VBAR + sync(SPx) offset");
         // NZCV (live flag word) is unchanged by entry.
         assert_eq!(ctx[NZCV_SLOT], nzcv, "live NZCV untouched on entry");
+    }
+
+    /// EC source-EL stamp (signal-11 audit). The abort EC's same/lower bit
+    /// (ESR bit 26) MUST follow the interrupted EL (`cur_el`), NOT the FAR:
+    ///   * EL0 source  → *_LOW (0x24), bit 26 clear — userspace demand-paging.
+    ///   * EL1 source  → *_CUR (0x25), bit 26 set — INCLUDING a user-range FAR
+    ///     (legitimate kernel-uaccess copy_to/from_user / CoW must route el1).
+    /// This locks the decision to NOT override EL1+user-FAR to lower-EL (that
+    /// would break the load-bearing kernel-uaccess path).
+    #[test]
+    fn abort_ec_follows_source_el_not_far() {
+        let user_far = 0x0000_007E_D22F_1000u64; // a user (TTBR0, bit55=0) address
+        let kern_far = 0xFFFF_FF80_3EE2_0000u64; // a kernel (TTBR1, bit55=1) address
+
+        // EL0 source, user FAR → lower-EL (bit 26 clear → EC 0x24).
+        let mut e0 = el1h_ctx(0x0040_1000, 0);
+        e0[sr(SR_CURRENTEL)] = 0; // EL0
+        inject(&mut e0, ExceptionKind::Sync, (0x25 << 26) | (1 << 25) | 0b0100, user_far, true);
+        assert_eq!((e0[sr(SR_ESR)] >> 26) & 0x3F, 0x24, "EL0 user fault → DABT_LOW");
+
+        // EL1 source, USER FAR → same-EL (kernel-uaccess stays 0x25). The key
+        // assertion: the FAR being a user address does NOT downgrade the EC.
+        let mut e1u = el1h_ctx(0xFFFF_FFC0_0810_0000, 0);
+        inject(&mut e1u, ExceptionKind::Sync, (0x25 << 26) | (1 << 25) | 0b0100, user_far, true);
+        assert_eq!(
+            (e1u[sr(SR_ESR)] >> 26) & 0x3F, 0x25,
+            "EL1 kernel-uaccess of a user VA must stay DABT_CUR (no override)"
+        );
+
+        // EL1 source, kernel FAR → same-EL (0x25).
+        let mut e1k = el1h_ctx(0xFFFF_FFC0_0810_0000, 0);
+        inject(&mut e1k, ExceptionKind::Sync, (0x24 << 26) | (1 << 25) | 0b0100, kern_far, true);
+        assert_eq!((e1k[sr(SR_ESR)] >> 26) & 0x3F, 0x25, "EL1 kernel fault → DABT_CUR");
     }
 
     #[test]
