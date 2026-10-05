@@ -5,7 +5,7 @@
 
 use aether_translator::runtime::app_compat_x86::{
     init_app_compat_x86, AppCompatBug, AppCompatBugKind, AppCompatX86Config, AppCompatX86Error,
-    AppCompatX86Phase, AppCompatX86State, COMPAT_MIN_PASS, COMPAT_TOTAL_APPS,
+    AppCompatX86Phase, COMPAT_MIN_PASS, COMPAT_TOTAL_APPS,
     UART_SIG_APP_FAIL, UART_SIG_APP_PASS, UART_SIG_ATTESTATION_ONLY, UART_SIG_HARNESS_READY,
     UART_SIG_SUITE_DONE,
 };

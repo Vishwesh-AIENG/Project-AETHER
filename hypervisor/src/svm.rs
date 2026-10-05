@@ -525,7 +525,7 @@ pub unsafe fn npt_flip_leaf_to_rx(pml4_pa: u64, host_pa: u64) -> bool {
     let leaf = unsafe { core::ptr::read_volatile(leaf_ptr) };
     if leaf & NPT_PRESENT == 0 { return false; }
     // RX = clear W, clear NX. Preserve PFN [51:12] and memory-type bits.
-    let new_leaf = (leaf & !(NPT_WRITABLE | NPT_NX_BIT)) /* | execute-enabled */;
+    let new_leaf = leaf & !(NPT_WRITABLE | NPT_NX_BIT); // execute-enabled = NX clear
     unsafe { core::ptr::write_volatile(leaf_ptr, new_leaf) };
     true
 }

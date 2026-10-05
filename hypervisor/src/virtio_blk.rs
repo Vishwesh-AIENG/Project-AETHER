@@ -869,7 +869,7 @@ mod tests {
 
         // Driver writes feature halves before FEATURES_OK.
         be.handle_mmio_write(regs::DRIVER_FEATURES_SEL, 1).unwrap();
-        be.handle_mmio_write(regs::DRIVER_FEATURES, ((VIRTIO_F_VERSION_1 >> 32) as u32)).unwrap();
+        be.handle_mmio_write(regs::DRIVER_FEATURES, (VIRTIO_F_VERSION_1 >> 32) as u32).unwrap();
         be.handle_mmio_write(regs::STATUS,
             status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK).unwrap();
         assert_eq!(be.phase, NegotiationPhase::FeaturesOk);
@@ -1074,7 +1074,7 @@ mod tests {
 
         let mem = FakeMem::new();
         // Same descriptor topology as IN test.
-        let mut desc = |idx: u64, addr: u64, len: u32, flags: u16, next: u16| {
+        let desc =|idx: u64, addr: u64, len: u32, flags: u16, next: u16| {
             let mut b = [0u8; 16];
             b[0..8].copy_from_slice(&addr.to_le_bytes());
             b[8..12].copy_from_slice(&len.to_le_bytes());

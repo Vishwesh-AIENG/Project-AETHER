@@ -1272,8 +1272,8 @@ static mut SPURIOUS_ZERO_PAGE: ZeroPage = ZeroPage([0u8; 4096]);
 
 #[allow(unsafe_code)]
 fn spurious_zero_pa() -> u64 {
-    // SAFETY: EL2-private, taking address of a static is sound.
-    unsafe { core::ptr::addr_of!(SPURIOUS_ZERO_PAGE) as u64 }
+    // Taking the address of a static is safe (no read/write happens).
+    core::ptr::addr_of!(SPURIOUS_ZERO_PAGE) as u64
 }
 
 /// One page's translation: a TLB-cached single-page walk. Returns the full host

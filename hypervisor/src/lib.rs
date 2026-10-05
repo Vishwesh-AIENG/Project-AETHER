@@ -62,7 +62,7 @@ pub mod global_alloc {
     const HEAP_SIZE: usize = 3 * 512 * 1024 * 1024;
 
     #[repr(align(16))]
-    struct AlignedHeap([u8; HEAP_SIZE]);
+    struct AlignedHeap(#[allow(dead_code)] [u8; HEAP_SIZE]); // raw arena, accessed via addr_of
 
     static mut HEAP: AlignedHeap = AlignedHeap([0u8; HEAP_SIZE]);
     static HEAD: AtomicUsize = AtomicUsize::new(0);

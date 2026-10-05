@@ -428,7 +428,7 @@ pub fn smcode_test_iteration(
 ) -> Result<(), &'static str> {
     // Phase 1: emit v1
     buf.reset();
-    let off1 = buf.alloc_block(guest_pc, code_v1).map_err(|_| "alloc v1 failed")?;
+    let _off1 = buf.alloc_block(guest_pc, code_v1).map_err(|_| "alloc v1 failed")?;
     if !buf.is_dirty() { return Err("dirty flag not set after emit"); }
     buf.commit();
     if !buf.is_executable() { return Err("not executable after commit"); }

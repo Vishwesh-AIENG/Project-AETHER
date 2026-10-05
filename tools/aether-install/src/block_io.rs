@@ -39,8 +39,17 @@ impl BlockDevice {
         Ok(Self { file, path: path.to_string() })
     }
 
+    /// Open a block device read-only (GPT probing — never needs write access).
+    pub fn open_read_only(path: &str) -> io::Result<Self> {
+        let file = OpenOptions::new().read(true).open(Path::new(path))?;
+        Ok(Self { file, path: path.to_string() })
+    }
+
     /// Write `data` at `byte_offset`. Synchronises after the write so that
     /// the re-read in `verify_at` sees the same bytes.
+    // Not yet called outside tests: the config-partition writer (install step 10)
+    // is still a stub. Kept as the single sync-on-write primitive for it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn write_at(&mut self, byte_offset: u64, data: &[u8]) -> io::Result<()> {
         self.file.seek(SeekFrom::Start(byte_offset))?;
         self.file.write_all(data)?;

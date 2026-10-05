@@ -5,9 +5,13 @@
 fn main() {
     #[cfg(target_os = "windows")]
     {
+        use embed_manifest::manifest::ExecutionLevel;
         use embed_manifest::{embed_manifest, new_manifest};
         if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
-            embed_manifest(new_manifest("AETHER.Setup"))
+            // new_manifest() defaults to asInvoker; the GUI must request admin
+            // so its aether-install --apply child can write UEFI variables.
+            embed_manifest(new_manifest("AETHER.Setup")
+                .requested_execution_level(ExecutionLevel::RequireAdministrator))
                 .expect("failed to embed Windows manifest");
         }
     }

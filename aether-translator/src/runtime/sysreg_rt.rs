@@ -277,7 +277,8 @@ pub extern "C" fn aether_pending_irq() -> u32 {
 ///   [14] ptimer.irq_pending  [15] enabled[30]
 ///   [16] group1[30]          [17] pending[30]
 #[allow(unsafe_code)]
-pub extern "C" fn aether_timer_irq_diag() -> [u64; 18] {
+/// Rust-only diagnostic (not FFI: arrays are not FFI-safe return types).
+pub fn aether_timer_irq_diag() -> [u64; 18] {
     let now = now();
     // SAFETY: EL2-private, single-vCPU; read-only snapshot.
     unsafe {

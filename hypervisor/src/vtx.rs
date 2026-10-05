@@ -1407,7 +1407,9 @@ pub unsafe fn vmcs_write_host_state(host_rsp: u64, host_rip: u64) -> bool {
     { cs_sel = 0; ss_sel = 0; ds_sel = 0; es_sel = 0; fs_sel = 0; gs_sel = 0; tr_sel = 0; }
 
     // GDT and IDT base addresses.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))] // SGDT writes it on x86
     let mut gdtr = [0u8; 10];
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))] // SIDT writes it on x86
     let mut idtr = [0u8; 10];
     #[cfg(target_arch = "x86_64")]
     unsafe {

@@ -4,8 +4,8 @@
 //! (equivalent to `getprop sys.boot_completed=1` on x86 hardware).
 
 use aether_translator::runtime::zygote_launch::{
-    gate_from_log, init_zygote_launch, ZygoteError, ZygoteLaunchConfig, ZygoteLaunchGate,
-    ZygoteLaunchPhase, ZygoteLaunchState, BOOT_COMPLETED_PROP, BOOT_COMPLETED_TIMEOUT_S,
+    gate_from_log, init_zygote_launch, ZygoteError, ZygoteLaunchConfig,
+    ZygoteLaunchPhase, BOOT_COMPLETED_PROP, BOOT_COMPLETED_TIMEOUT_S,
     UART_SIG_BOOT_COMPLETED, UART_SIG_LOGCAT_ALIVE, UART_SIG_SYSTEM_SERVER,
     UART_SIG_ZYGOTE_FORKED, UART_SIG_ZYGOTE_STARTED,
 };

@@ -6,7 +6,7 @@
 //! - JS (V8) benchmark ≥ 60 % of native ARM
 
 use aether_translator::runtime::perf_bench::{
-    init_perf_bench, BenchScore, PerfBenchConfig, PerfBenchError, PerfBenchPhase, PerfBenchState,
+    init_perf_bench, BenchScore, PerfBenchConfig, PerfBenchError, PerfBenchPhase,
     PERF_INT_THRESHOLD, PERF_JS_THRESHOLD, PERF_SIMD_THRESHOLD, UART_SIG_BENCH_DONE,
     UART_SIG_BENCH_START, UART_SIG_INT_SCORE, UART_SIG_JS_SCORE, UART_SIG_SIMD_SCORE,
 };

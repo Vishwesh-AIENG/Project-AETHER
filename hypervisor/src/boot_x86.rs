@@ -23,6 +23,11 @@
 // Intel, exit_code 0x78 for AMD).
 
 #![cfg(target_arch = "x86_64")]
+// Under whpx_hostmode the live DBT runs directly in host mode and never
+// VMLAUNCHes/VMRUNs, so the VMX/SVM foundation path (boot_intel/boot_amd, the
+// EPT/NPT/guest page-table builders and their backing statics) is compiled but
+// unreachable by design. It stays live in the default (VMX/SVM) build.
+#![cfg_attr(feature = "whpx_hostmode", allow(dead_code))]
 
 use core::ffi::c_void;
 use core::ptr;
@@ -91,11 +96,10 @@ unsafe fn fb_fill(rgb: u32) {
 //
 //   FB_RED  paints red  on this hardware (was 0xFF0000 → showed as blue)
 //   FB_BLUE paints blue on this hardware (was 0x0000FF → showed as red)
-// FB_RED is the only color still actively used (halt()). The others are
-// kept in the file as documented constants for future diagnostic helpers
-// that don't wipe the screen — fb_fill() is destructive to dual_puts text.
+// Kept as documented constants for future diagnostic helpers that don't wipe
+// the screen — fb_fill() is destructive to dual_puts text.
 #[allow(dead_code)] const FB_GREEN:  u32 = 0x00_00FF00;
-                    const FB_RED:    u32 = 0x00_0000FF; // hardware-corrected (was 0xFF0000)
+#[allow(dead_code)] const FB_RED:    u32 = 0x00_0000FF; // hardware-corrected (was 0xFF0000)
 #[allow(dead_code)] const FB_AMBER:  u32 = 0x00_FFAA00;
 #[allow(dead_code)] const FB_BLUE:   u32 = 0x00_FF0000; // hardware-corrected (was 0x0000FF)
 #[allow(dead_code)] const FB_PURPLE: u32 = 0x00_8000FF;
@@ -169,14 +173,6 @@ unsafe fn beep_n(n: u32, freq_hz: u32) {
                 core::arch::asm!("pause", options(nomem, nostack));
             }
         }
-    }
-}
-
-/// One-shot status indicator: paint the framebuffer + beep.
-unsafe fn checkpoint(color: u32, beeps: u32, freq_hz: u32) {
-    unsafe {
-        fb_fill(color);
-        beep_n(beeps, freq_hz);
     }
 }
 
@@ -1101,6 +1097,7 @@ unsafe extern "C" fn host_vmexit_entry() -> ! {
 pub unsafe fn boot_x86_hypervisor(
     image_handle: *mut c_void,
     system_table: *const c_void,
+    #[cfg_attr(feature = "whpx_hostmode", allow(unused_variables))] // host mode is vendor-neutral
     vendor: Option<CpuVendor>,
 ) -> ! {
     // ── 0. ESP file-protocol shim — runs while firmware boot services are
@@ -1111,8 +1108,7 @@ pub unsafe fn boot_x86_hypervisor(
     //       Best-effort: if no boot.img is on the ESP the pipeline falls
     //       back to the foundation gate (single HLT in GUEST_RAM).
     {
-        use crate::android_handoff::STAGED_BOOT_IMG_SIZE;
-        use crate::boot_x86_esp::try_read_boot_img_alloc;
+            use crate::boot_x86_esp::try_read_boot_img_alloc;
         // Audit §2a fix: ask UEFI to allocate the staging buffer rather
         // than writing into a fixed PA (0x8000_0000) that on this Ryzen
         // board may not be conventional memory. AllocatePages with
@@ -1669,10 +1665,8 @@ pub unsafe fn boot_x86_hypervisor(
                 // same (region_pa, region_size) the EPT/NPT maps via
                 // `extra_region`). On the UEFI-alloc path this is near 4 GiB,
                 // NOT the STAGED_BOOT_IMG_PA constant — see DISPATCH_WINDOW_*.
-                unsafe {
-                    DISPATCH_WINDOW_BASE = h.region_pa;
-                    DISPATCH_WINDOW_SIZE = h.region_size;
-                }
+                DISPATCH_WINDOW_BASE = h.region_pa;
+                DISPATCH_WINDOW_SIZE = h.region_size;
             }
             // Phase 6: initialise the Android lifecycle scanner so PL011 DR
             // writes from the guest land in userspace_boot + app_compat
@@ -2504,7 +2498,7 @@ unsafe fn boot_amd(
             let data = base + 16384;
             let put = |pa: u64, idx: usize, val: u64| {
                 // SAFETY: in-scratch 4 KiB page; idx < 512.
-                unsafe { core::ptr::write_volatile((pa as *mut u64).add(idx), val) };
+                core::ptr::write_volatile((pa as *mut u64).add(idx), val);
             };
             let table_desc = |next: u64| (next & ADDR_MASK) | 0b11; // valid + table
             let leaf = |oa: u64| (oa & ADDR_MASK) | 0b11 | (1 << 10); // valid+page+AF
@@ -2951,13 +2945,6 @@ pub(crate) static mut NPF_GUEST_CTX: [u64; aether_translator::runtime::context::
 /// True once `NPF_GUEST_CTX` has been seeded with `seed_sysregs`.
 static mut NPF_CTX_SEEDED: bool = false;
 
-/// Sysreg slot indices (relative to `SYSREG_SLOT0`) the fetch path consults.
-/// Mirrors `aether_translator::runtime::mmu::{SLOT_SCTLR}`; SCTLR bit 0 is the
-/// MMU-enable (`M`) bit.
-const NPF_SLOT_SCTLR: usize = aether_translator::runtime::mmu::SLOT_SCTLR;
-/// `SCTLR_EL1.M` — MMU enable bit.
-const NPF_SCTLR_M: u64 = 1 << 0;
-
 /// Ensure `NPF_GUEST_CTX` is seeded (idempotent) and return its base pointer.
 ///
 /// The fetch path ([`npf_fetch_guest_pa`]) and the block-entry path
@@ -3327,23 +3314,6 @@ unsafe fn checkpoint_synth_handoff() -> AndroidHandoff {
             region_size,
             kernel_decompressed: false,
         }
-    }
-}
-
-/// True iff the live guest has its MMU enabled (`SCTLR_EL1.M == 1`). When false
-/// (early boot) instruction fetch is flat (PC == guest PA); when true the PC is
-/// virtual and must be walked.
-///
-/// # Safety
-/// Same single-core EL2 contract as [`npf_ctx_ptr`].
-pub(crate) unsafe fn npf_mmu_enabled() -> bool {
-    // SAFETY: single-core EL2 dispatch.
-    unsafe {
-        let ctx = npf_ctx_ptr();
-        let sctlr = *ctx.add(
-            aether_translator::runtime::context::SYSREG_SLOT0 + NPF_SLOT_SCTLR,
-        );
-        sctlr & NPF_SCTLR_M != 0
     }
 }
 
@@ -4338,60 +4308,15 @@ fn host_tsc() -> u64 {
 // RDTSC down to a 24 MHz virtual ARM generic-counter tick, anchored at the
 // first sample so the counter starts near 0 and the u128 product never
 // overflows in practice.
-const GUEST_CNTFRQ_HZ: u64 = aether_translator::runtime::sysreg_rt::DEFAULT_CNTFRQ;
-static mut TSC_BASE: u64 = 0;
-static mut TSC_HZ: u64 = 0;
+//
+// Superseded: the live loop uses the virtual-time counter below (VIRT_NOW,
+// advanced per dispatched block) instead of scaled RDTSC, so the guest clock
+// tracks DBT throughput rather than wall-clock. The RDTSC scaler was removed.
 /// Virtual-time guest counter accumulator (icount-style CNTVCT). Advanced by a
 /// fixed increment per dispatched block in the dispatch loop — see the timer
 /// block in `enter_translated_block_from_npf`. Decoupled from wall-clock so the
 /// generic-timer tick fires at a sane rate relative to DBT throughput.
 static mut VIRT_NOW: u64 = 0;
-
-#[inline]
-fn cpuid(leaf: u32, sub: u32) -> core::arch::x86_64::CpuidResult {
-    // __cpuid_count is a safe intrinsic on x86_64 (CPUID is always available).
-    core::arch::x86_64::__cpuid_count(leaf, sub)
-}
-
-/// Best-effort host TSC frequency in Hz. Prefers CPUID.15H (crystal × ratio),
-/// then CPUID.16H (base MHz), then a 3 GHz fallback. Exact accuracy is not
-/// required for bring-up — the goal is a roughly-right rate, not wall-clock.
-fn detect_tsc_hz() -> u64 {
-    let max_leaf = cpuid(0, 0).eax;
-    if max_leaf >= 0x15 {
-        let r = cpuid(0x15, 0);
-        // EAX = ratio denominator, EBX = numerator, ECX = nominal crystal Hz.
-        if r.eax != 0 && r.ebx != 0 && r.ecx != 0 {
-            return (r.ecx as u64) * (r.ebx as u64) / (r.eax as u64);
-        }
-    }
-    if max_leaf >= 0x16 {
-        let r = cpuid(0x16, 0);
-        // EAX = processor base frequency in MHz.
-        if r.eax != 0 {
-            return (r.eax as u64) * 1_000_000;
-        }
-    }
-    3_000_000_000
-}
-
-/// The guest's virtual ARM generic counter (`CNTVCT_EL0`): RDTSC scaled to
-/// `GUEST_CNTFRQ_HZ`, anchored at the first call. Monotonic and roughly
-/// wall-clock-correct so the kernel's timekeeping behaves.
-fn host_virtual_count() -> u64 {
-    let now = host_tsc();
-    // SAFETY: single-core EL2 dispatch; one-time lazy init of the anchor + rate.
-    unsafe {
-        if *ptr::addr_of!(TSC_HZ) == 0 {
-            *ptr::addr_of_mut!(TSC_HZ) = detect_tsc_hz();
-            *ptr::addr_of_mut!(TSC_BASE) = now;
-        }
-        let base = *ptr::addr_of!(TSC_BASE);
-        let hz = *ptr::addr_of!(TSC_HZ);
-        let delta = now.wrapping_sub(base) as u128;
-        ((delta * GUEST_CNTFRQ_HZ as u128) / hz as u128) as u64
-    }
-}
 
 /// 4 KiB page mask for the guest instruction-window read.
 const GUEST_PAGE_BYTES: u64 = 0x1000;
@@ -4883,7 +4808,7 @@ pub static mut SREG_RING_IDX: usize = 0;
 // mapped + writable under the host CR3 (the same region .text executes from),
 // and 2 MiB is far more headroom than any block's chain needs.
 #[repr(align(16))]
-struct DispatchStack([u8; 2 * 1024 * 1024]);
+struct DispatchStack(#[allow(dead_code)] [u8; 2 * 1024 * 1024]); // raw stack memory, accessed via addr_of
 static mut DISPATCH_STACK: DispatchStack = DispatchStack([0u8; 2 * 1024 * 1024]);
 static mut DISPATCH_REGS: crate::android_handoff::DbtInitialRegs =
     crate::android_handoff::DbtInitialRegs::zero();
@@ -5183,11 +5108,12 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
         // exit_code: 0=iter-cap 1=TranslateFail 2=block-UNSAFE 3=fetch-abort-storm
         //   4=NO-PROGRESS 5=PSCI/safety halt 6=fetch-window-OOR 7=fetch-no-handler
         //   8=host_va-miss-BUG.
-        let mut exit_code: u32 = 0;
+        // exit_code / sum_iter are assigned on every break path before use.
+        let exit_code: u32;
         let mut sum_pc:    u64 = 0; // faulting / last pc
         let mut sum_a:     u64 = 0; // word | vector | fetch_pa | next-pc context
         let mut sum_b:     u64 = 0; // kind | streak | repeats
-        let mut sum_iter:  u64 = 0;
+        let sum_iter:  u64;
         let mut last_pc:   u64 = regs.pc;
         let mut last_insn: u32 = 0;
 

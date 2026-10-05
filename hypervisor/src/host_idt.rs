@@ -311,7 +311,7 @@ pub unsafe fn install_host_idt() {
         let idt = &mut *addr_of_mut!(IDT);
         // Default every vector to the no-error-code generic stub (pushes a
         // dummy 0 so the handler frame is uniform), then specialise.
-        let g = host_isr_generic as usize as u64;
+        let g = host_isr_generic as *const () as u64;
         for slot in idt.iter_mut() {
             slot.set(g, cs);
         }
@@ -319,14 +319,14 @@ pub unsafe fn install_host_idt() {
         // 13,14,17,21,29,30. These must NOT push a dummy 0 (the CPU already
         // pushed an error code) or the handler frame skews. 8/13/14 have
         // dedicated decoders below; route the rest to host_isr_generic_err.
-        let ge = host_isr_generic_err as usize as u64;
+        let ge = host_isr_generic_err as *const () as u64;
         for &v in &[10usize, 11, 12, 17, 21, 29, 30] {
             idt[v].set(ge, cs);
         }
-        idt[6].set(host_isr_ud as usize as u64, cs);
-        idt[8].set(host_isr_df as usize as u64, cs);
-        idt[13].set(host_isr_gp as usize as u64, cs);
-        idt[14].set(host_isr_pf as usize as u64, cs);
+        idt[6].set(host_isr_ud as *const () as u64, cs);
+        idt[8].set(host_isr_df as *const () as u64, cs);
+        idt[13].set(host_isr_gp as *const () as u64, cs);
+        idt[14].set(host_isr_pf as *const () as u64, cs);
 
         let idtr = Idtr {
             limit: (core::mem::size_of::<[GateDescriptor; 32]>() - 1) as u16,

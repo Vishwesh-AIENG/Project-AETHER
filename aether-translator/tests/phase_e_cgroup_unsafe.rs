@@ -43,7 +43,7 @@ fn cgroup_disable_block_no_ud2() {
     //   adrp x22, .. ; add x22, x22, #0x342
     //   ldrb w8, [x23]
     //   cbz w8, ..
-    let words = [
+    let _words = [
         0xaa0003f7, // mov x23, x0
         0xf0ffd293, 0x911b1a73, // adrp x19; add x19, x19, #0x6c6
         0xd00024_58u32.swap_bytes() & 0, // placeholder

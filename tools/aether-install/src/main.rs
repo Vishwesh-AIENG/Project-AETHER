@@ -24,6 +24,7 @@ mod check;
 mod cli;
 mod compat_report;
 mod device_path;
+mod gpt;
 mod gpu_config;
 mod install;
 mod install_state;

@@ -47,8 +47,6 @@
                      // come online once Phase E unblocks populate_rootfs;
                      // unit tests below exercise every code path now.
 
-use core::str;
-
 /// All errors the cpio parser can produce. Discrete variants so the
 /// caller (and Phase F gate harness) can name the failure mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

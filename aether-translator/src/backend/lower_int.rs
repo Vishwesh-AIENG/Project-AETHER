@@ -1168,7 +1168,10 @@ impl IntLower {
                 Self::store_dest(alloc, enc, *dst, r, sp);
             }
             ConstF32 { .. } | ConstF64 { .. } | ConstVec128 { .. } => {
-                // FP/SIMD constants handled by lower_simd
+                // SSA-register FP/SIMD constants: the lifter never emits these
+                // (live SIMD goes through the ctx-addressed Vec* ops in
+                // lower_simd_ctx). Fail loud if one ever appears.
+                enc.emit_ud2();
             }
 
             // ── Pure integer ALU ───────────────────────────────────────────
@@ -2131,7 +2134,7 @@ impl IntLower {
                     // Each element: load [PA+off] into a work reg (SCRATCH1 if the
                     // dst is spilled — never RAX, which is the PA base), then store
                     // back to the spill slot. A non-spilled dst loads directly.
-                    let mut load_elem = |enc: &mut X86Encoder, dst: IrValueId, off: i32| {
+                    let load_elem = |enc: &mut X86Encoder, dst: IrValueId, off: i32| {
                         let (rd, sp) = Self::dest_work(alloc, dst, SCRATCH1);
                         match ty {
                             LoadTy::U64 => enc.emit_mov_r64_mem(rd, SCRATCH0, off),
@@ -2152,7 +2155,7 @@ impl IntLower {
                     Self::emit_mmu_xlate_call(enc, ra, true, 2 * width); // RAX = host PA
                     // Each value: materialize a spilled element into SCRATCH1 (never
                     // RAX, which is the PA base) before storing to [PA+off].
-                    let mut store_elem = |enc: &mut X86Encoder, val: IrValueId, off: i32| {
+                    let store_elem = |enc: &mut X86Encoder, val: IrValueId, off: i32| {
                         let rv = Self::src_in(alloc, enc, val, SCRATCH1);
                         if width == 8 {
                             enc.emit_mov_mem_r64(SCRATCH0, off, rv);
@@ -2583,8 +2586,10 @@ impl IntLower {
             | VExtractLane { .. } | VPermute { .. } | VTbl { .. } | VTbx { .. }
             | VModImm { .. } | VConvert { .. }
             | VFAdd { .. } | VFSub { .. } | VFMul { .. } | VFDiv { .. } | VFMa { .. } => {
-                // Handled by lower_simd in AT-13.
-                enc.emit_nop();
+                // SSA-register SIMD ops: never emitted by the lifter (live SIMD
+                // is lower_simd_ctx's Vec* ops). Fail loud rather than silently
+                // dropping the operation.
+                enc.emit_ud2();
             }
 
             // ── Crypto / system ───────────────────────────────────────────

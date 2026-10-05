@@ -81,6 +81,8 @@ pub struct CliArgs {
     pub android_image:  Option<String>,
     pub target_disk:    Option<String>,
     pub esp:            Option<String>,
+    /// Whole-disk device holding the ESP's GPT (for the Boot#### device path).
+    pub esp_disk:       Option<String>,
     pub gpu_override:   Option<GpuModeOverride>,
     pub no_gpu_prompt:  bool,
 
@@ -104,6 +106,7 @@ impl CliArgs {
             android_image: None,
             target_disk:   None,
             esp:           None,
+            esp_disk:      None,
             gpu_override:  None,
             no_gpu_prompt: false,
             prepare_aosp_tree: None,
@@ -239,6 +242,7 @@ pub fn parse_from(argv: &[String]) -> Result<CliArgs, CliError> {
             "--android-image"  => { out.android_image = Some(take_value(argv, &mut i)?); }
             "--target-disk"    => { out.target_disk   = Some(take_value(argv, &mut i)?); }
             "--esp"            => { out.esp           = Some(take_value(argv, &mut i)?); }
+            "--esp-disk"       => { out.esp_disk      = Some(take_value(argv, &mut i)?); }
             "--prepare-aosp-tree" => {
                 out.prepare_aosp_tree = Some(take_value(argv, &mut i)?);
             }
@@ -354,6 +358,10 @@ INSTALL / UPDATE FLAGS:
     --esp PATH               EFI System Partition mount point.
                              Linux: /boot/efi
                              Windows: drive letter, e.g. S:
+    --esp-disk PATH          Whole disk whose GPT holds the ESP; read to build
+                             the Boot#### device path. Default: Linux nsid 1 of
+                             --target-disk (/dev/nvme0n1); Windows --target-disk.
+                             Windows example: \\\\.\\PHYSICALDRIVE0
     --gpu MODE               Override the auto GPU selection.
                              MODE = sriov | passthrough | software
     --no-gpu-prompt          Skip GPU selection prompt entirely.

@@ -5,10 +5,9 @@
 //! contain the expected opcodes, and the full pipeline compiles cleanly.
 
 use aether_translator::backend::{X86Encoder, IntLower};
-use aether_translator::ir::{IrBlock, IrFunction, IrOp, BlockId};
-use aether_translator::ir::value::{IrValueId, IrValueKind};
+use aether_translator::ir::{IrBlock, IrOp, BlockId};
+use aether_translator::ir::value::IrValueKind;
 use aether_translator::regalloc::linear_scan::{AllocResult, AssignMap, Assignment};
-use aether_translator::regalloc::x86_regs::ALLOCATABLE_GPRS;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -354,7 +353,7 @@ fn at12_cpuid_passthrough() {
 
 #[test]
 fn at12_cmp_flags() {
-    use aether_translator::ir::IrFlagsId;
+    
     let mut blk = IrBlock::new(BlockId(0));
     let a = blk.new_value(IrValueKind::I64);
     let b = blk.new_value(IrValueKind::I64);

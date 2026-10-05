@@ -4,8 +4,8 @@
 //! libart; `dalvikvm_ran && dex_executed && hello_printed`.
 
 use aether_translator::runtime::bionic_libart::{
-    gate_from_log, init_bionic_libart, BionicLibartConfig, BionicLibartError, BionicLibartGate,
-    BionicLibartPhase, BionicLibartState, HELLO_DEX_CLASS, HELLO_DEX_CLASSPATH,
+    gate_from_log, init_bionic_libart, BionicLibartConfig, BionicLibartError,
+    BionicLibartPhase, HELLO_DEX_CLASS, HELLO_DEX_CLASSPATH,
     HELLO_DEX_EXPECTED, UART_SIG_DALVIKVM_EXIT, UART_SIG_DALVIKVM_START, UART_SIG_HELLO_DEX,
     UART_SIG_LIBART_INIT,
 };

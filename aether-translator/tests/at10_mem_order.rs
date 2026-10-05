@@ -4,7 +4,7 @@
 //! lowering (no-op / MFENCE / CPUID).
 
 use aether_translator::ir::memory::{BarrierDomain, MemOrder, StoreTy, LoadTy};
-use aether_translator::ir::{IrBlock, IrFunction, IrOp, IrValueKind};
+use aether_translator::ir::{IrFunction, IrOp, IrValueKind};
 use aether_translator::opt::MemOrderLowerPass;
 
 fn make_func_with_ops(ops: Vec<IrOp>) -> IrFunction {

@@ -49,7 +49,7 @@ pub fn run(args: &CliArgs) -> i32 {
     let report = match check::run_compat_check() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[1/9] compat check FAILED: {}", e);
+            eprintln!("[1/10] compat check FAILED: {}", e);
             return 4;
         }
     };
@@ -230,20 +230,40 @@ pub fn run(args: &CliArgs) -> i32 {
 
     // Step 7 + 8: UEFI Boot#### entry + BootOrder --
     // The boot entry points at selector.efi (Ch58), which then chainloads
-    // either hypervisor.efi or Windows Boot Manager.
+    // either hypervisor.efi or Windows Boot Manager. Firmware matches the
+    // Hard Drive node to the ESP by its unique partition GUID, so the node is
+    // built from the disk's real GPT. A failed probe is fatal under --apply:
+    // writing a zero-GUID entry would silently never boot.
+    let esp_disk = args.esp_disk.clone()
+        .unwrap_or_else(|| namespace_block_device(&target_disk, 1));
+    let hard_drive = match probe_esp(&esp_disk) {
+        Ok(esp) => {
+            println!("           ESP on {}: partition {} start_lba={} size_lba={} guid={} ({}-byte sectors)",
+                esp_disk, esp.partition_number, esp.start_lba, esp.size_lba,
+                esp.unique_guid.to_string_canonical(), esp.sector_size);
+            esp.hard_drive_node()
+        }
+        Err(e) if args.apply => {
+            eprintln!("           ESP probe FAILED: {}", e);
+            eprintln!("           refusing to write a Boot#### entry without the real ESP GUID;");
+            eprintln!("           pass --esp-disk <whole-disk device holding the ESP> and re-run.");
+            return 8;
+        }
+        Err(e) => {
+            println!("           [plan] ESP probe on {} failed: {}", esp_disk, e);
+            println!("           [plan] --apply would refuse; pass --esp-disk (and run elevated).");
+            HardDriveNode {
+                partition_number:    0,
+                partition_start_lba: 0,
+                partition_size_lba:  0,
+                partition_guid:      GptGuid([0u8; 16]),
+            }
+        }
+    };
     let entry = BootEntry {
         attributes:  LOAD_OPTION_ACTIVE,
         description: "AETHER".to_string(),
-        hard_drive: HardDriveNode {
-            // The ESP partition number / start LBA / size / GUID come from
-            // GPT inspection. Real implementation would call IOCTL_DISK_GET_DRIVE_LAYOUT_EX
-            // on Windows or `parted -m print` / `blkid` on Linux. Placeholders here
-            // are clearly marked.
-            partition_number:    1,
-            partition_start_lba: 2048,
-            partition_size_lba:  0, // filled in by ESP probe in real impl
-            partition_guid:      GptGuid([0u8; 16]),
-        },
+        hard_drive,
         file_path:    "\\EFI\\AETHER\\selector.efi".to_string(),
         optional_data: Vec::new(),
     };
@@ -436,6 +456,14 @@ fn create_nvme_namespace(target_disk: &str) -> Result<(), String> {
          created namespace on {}.",
         target_disk
     ))
+}
+
+/// Read the GPT on `disk` (read-only) and locate the EFI System Partition.
+fn probe_esp(disk: &str) -> Result<crate::gpt::EspInfo, String> {
+    let mut dev = crate::block_io::BlockDevice::open_read_only(disk)
+        .map_err(|e| format!("open {} read-only: {}", disk, e))?;
+    crate::gpt::find_esp(|off, buf| dev.read_at(off, buf))
+        .map_err(|e| format!("{}: {}", dev.path(), e))
 }
 
 /// Map a target disk + nsid to the namespace block-device path.

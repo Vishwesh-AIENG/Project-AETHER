@@ -4,8 +4,8 @@
 //! observed on UART; no forbidden libc symbols; translator ran at least one block.
 
 use aether_translator::runtime::hello_world::{
-    gate_from_log, init_hello_world, HelloWorldConfig, HelloWorldError, HelloWorldGate,
-    HelloWorldPhase, HelloWorldState, EXPECTED_UART_LINES, HELLO_WORLD_BLOCK_LIMIT,
+    gate_from_log, init_hello_world, HelloWorldConfig, HelloWorldError,
+    HelloWorldPhase, EXPECTED_UART_LINES, HELLO_WORLD_BLOCK_LIMIT,
     HELLO_WORLD_EXPECTED, UART_SIG_BINARY_EXIT, UART_SIG_BLOCK_TRANSLATED,
     UART_SIG_DISPATCHER_START, UART_SIG_HELLO_WORLD,
 };

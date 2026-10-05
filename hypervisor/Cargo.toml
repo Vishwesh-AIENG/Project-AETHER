@@ -5,13 +5,20 @@ edition = "2024"
 description = "AETHER Type-1 hypervisor — bare-metal ARM64 EL2"
 build = "build.rs"
 
+# Both bins are no_std UEFI images with their own #[panic_handler]; they cannot
+# be built as host test harnesses (E0152 duplicate panic_impl). Unit tests live
+# in the lib, so `cargo test -p hypervisor` only needs the lib target.
 [[bin]]
 name = "hypervisor"
 path = "src/main.rs"
+test = false
+bench = false
 
 [[bin]]
 name = "selector"
 path = "src/bin/selector.rs"
+test = false
+bench = false
 
 [lib]
 name = "hypervisor"

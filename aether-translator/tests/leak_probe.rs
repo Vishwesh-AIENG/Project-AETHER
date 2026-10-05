@@ -18,24 +18,37 @@
 #![cfg(all(test, target_arch = "x86_64"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
 
 // ── Counting allocator (models the never-freeing bump heap) ──────────────────
+//
+// Counters are PER-THREAD: libtest runs tests on parallel threads, and a
+// process-global counter picked up other tests' (and the harness's)
+// allocations inside a measurement window — the asserts below allow < 4
+// allocations per 4000 iterations, so that noise made the suite flaky. Each
+// test now measures only its own thread. `const` thread-locals with no
+// destructor never allocate, so touching them from the allocator is safe.
 
-static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
-static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static ALLOC_BYTES: Cell<u64> = const { Cell::new(0) };
+    static ALLOC_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+fn count(bytes: usize) {
+    // try_with: the TLS slot may already be gone during thread teardown.
+    let _ = ALLOC_BYTES.try_with(|b| b.set(b.get() + bytes as u64));
+    let _ = ALLOC_COUNT.try_with(|c| c.set(c.get() + 1));
+}
 
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        count(layout.size());
         System.alloc(layout)
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        count(layout.size());
         System.alloc_zeroed(layout)
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -45,8 +58,7 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // A growing realloc allocates fresh; count the new size as a new leak.
-        ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
-        ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        count(new_size);
         System.realloc(ptr, layout, new_size)
     }
 }
@@ -56,8 +68,8 @@ static A: Counting = Counting;
 
 fn snap() -> (u64, u64) {
     (
-        ALLOC_BYTES.load(Ordering::Relaxed),
-        ALLOC_COUNT.load(Ordering::Relaxed),
+        ALLOC_BYTES.with(Cell::get),
+        ALLOC_COUNT.with(Cell::get),
     )
 }
 
@@ -259,7 +271,7 @@ fn bisect_through_encode() {
     let mut enc = X86Encoder::new();
     let mut patches: Vec<(usize, BlockId)> = Vec::new();
 
-    let mut run_once = |func: &mut IrFunction,
+    let run_once = |func: &mut IrFunction,
                         scratch: &mut RegallocScratch,
                         enc: &mut X86Encoder,
                         patches: &mut Vec<(usize, BlockId)>| {
@@ -303,7 +315,7 @@ fn bisect_codebuf_alloc_block() {
     let mut cb = CodeBuf::new(16 * 1024 * 1024);
     let mut bc = BlockCache::new(262144);
 
-    let mut run_once = |cb: &mut CodeBuf, bc: &mut BlockCache, pc: u64| {
+    let run_once = |cb: &mut CodeBuf, bc: &mut BlockCache, pc: u64| {
         let off = cb.alloc_block(pc, &code).unwrap();
         cb.commit();
         bc.insert(pc, off, code.len(), true);

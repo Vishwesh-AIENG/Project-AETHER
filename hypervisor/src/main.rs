@@ -41,6 +41,7 @@ impl core::fmt::Write for Com1Writer {
 }
 
 #[panic_handler]
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))] // only x86 prints it
 fn panic(info: &PanicInfo) -> ! {
     // Surface the panic (message + file:line via PanicInfo's Display) so a
     // silent hypervisor panic during DBT bring-up is diagnosable on the serial
@@ -680,6 +681,7 @@ mod x86_entry {
         unsafe { boot_x86_hypervisor(image_handle, system_table, vendor); }
     }
 
+    #[cfg_attr(feature = "whpx_hostmode", allow(dead_code))] // vendor halt path skipped in host mode
     fn halt() -> ! {
         loop {
             unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)); }

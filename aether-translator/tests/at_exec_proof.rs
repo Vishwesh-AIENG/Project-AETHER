@@ -14,17 +14,18 @@
 
 #![cfg(all(test, target_arch = "x86_64", windows))]
 
-
-// The translator's global DbtRuntime (block cache + code_buf arena) is a single
-// process-wide static; `aether_dbt_init` is idempotent and never resets it, and
-// its internal LOCK only spans each individual `with()` call — NOT a test's
-// translate -> resolve-host-va -> execute sequence. So two tests that drive the
-// global runtime concurrently (esp. translating different blocks at the same PC)
-// race on the shared arena: wrong results or torn-block execution (0xC0000005).
-// Every test that uses the global runtime takes this lock first to make its
-// translate->resolve->execute atomic. (Tests that build IR directly via
-// translate_straight_line do not need it.)
-static GLOBAL_RT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Every test in this file executes JIT-emitted x86 against PROCESS-GLOBAL
+// translator state: the DbtRuntime (block cache + code_buf arena; its internal
+// LOCK spans only one `with()` call, not a translate -> resolve -> execute
+// sequence) AND the software MMU (TLB + pinned window + sysreg slots), which
+// every lowered memory op calls into — including tests that build IR directly
+// via translate_straight_line. Two such tests running concurrently race (loads
+// read 0, torn blocks, 0xC0000005). So every #[test] takes this ONE lock first.
+// Poison-tolerant: one failing test must not cascade-fail the rest.
+static EXEC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    EXEC_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 use aether_translator::backend::{IntLower, X86Encoder};
 use aether_translator::decoder::decode_instruction;
@@ -140,7 +141,7 @@ unsafe fn enter_block(code: *const u8, ctx: *mut u64) {
 /// the stream is the stamp).
 #[test]
 fn mid_block_memop_pc_stamp() {
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
+    let _serial = serial();
     use aether_translator::dbt::{
         aether_dbt_block_host_va, aether_dbt_init, aether_dbt_invalidate_all,
         aether_dbt_translate_block, AetherDbtResult,
@@ -175,7 +176,7 @@ fn mid_block_memop_pc_stamp() {
 /// on real AMD silicon (where a wrong path = a blind triple-fault reset).
 #[test]
 fn public_api_translate_resolve_execute() {
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap(); // serialize global-runtime access
+    let _serial = serial();
     use aether_translator::dbt::{
         aether_dbt_block_host_va, aether_dbt_init, aether_dbt_translate_block, AetherDbtResult,
     };
@@ -220,6 +221,7 @@ fn public_api_translate_resolve_execute() {
 
 #[test]
 fn movz_then_add_executes_and_updates_regfile() {
+    let _serial = serial();
     // MOVZ X0, #0x41        -> 0xD2800820   (X0 = 0x41)
     // ADD  X1, X0, X0       -> 0x8B000001   (X1 = X0 + X0 = 0x82)
     let words = [0xD280_0820u32, 0x8B00_0001u32];
@@ -254,6 +256,7 @@ fn movz_then_add_executes_and_updates_regfile() {
 /// movz whose result is unused in-block must STILL land in ctx.
 #[test]
 fn movz_liveout_only_commits_to_ctx() {
+    let _serial = serial();
     // movz x0, #0   = 0xD2800000  (x0 = 0; x0 NOT read again in this block)
     // movz x1, #5   = 0xD28000A1  (independent — keeps x0 live-out-only)
     let words = [0xD280_0000u32, 0xD280_00A1u32];
@@ -278,6 +281,7 @@ fn movz_liveout_only_commits_to_ctx() {
 /// movz's WriteGpr must be committed to ctx before the block exits via the b.
 #[test]
 fn movz_then_branch_commits_to_ctx() {
+    let _serial = serial();
     // movz x0, #0   = 0xD2800000
     // b   .+8       = 0x14000002  (unconditional branch — block terminator)
     let words = [0xD280_0000u32, 0x1400_0002u32];
@@ -304,6 +308,7 @@ fn movz_then_branch_commits_to_ctx() {
 /// per-byte popcount) + UADDLV (horizontal byte sum), the /init 0x31f800 block.
 #[test]
 fn popcount_idiom_cnt_uaddlv_executes() {
+    let _serial = serial();
     let words = [0x9E67_0100u32, 0x0E20_5800, 0x2E30_3800, 0x1E26_0009];
     let code = translate_straight_line(&words, 0x1000);
     assert_eq!(*code.last().unwrap(), 0xC3, "block must end in RET");
@@ -339,6 +344,7 @@ fn popcount_idiom_cnt_uaddlv_executes() {
 /// For x7 = 2^k, result x23 must == k (ilog2).
 #[test]
 fn alloc_large_system_hash_log2qty_executes() {
+    let _serial = serial();
     let words = [
         0xDAC010E7u32, // clz x7, x7
         0xD28007F7,    // mov x23, #0x3f
@@ -375,6 +381,7 @@ fn alloc_large_system_hash_log2qty_executes() {
 /// Real value: x11 = 0xc_2fe13f6b, shift 15 → correct 0x5fc2, bug 0x185fc2.
 #[test]
 fn lsrv_wform_masks_operand_to_32bit() {
+    let _serial = serial();
     let words = [0x1AC4_2564u32]; // lsr w4, w11, w4
     let code = translate_straight_line(&words, 0x1000);
     let exec = winexec::make_executable(&code);
@@ -402,6 +409,7 @@ fn lsrv_wform_masks_operand_to_32bit() {
 /// Proves the lower_simd_ctx SSE templates numerically, not just no-UD2.
 #[test]
 fn strchr_neon_ops_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8; // u64 index of V<r>[63:0]; +1 = [127:64]
 
@@ -452,6 +460,7 @@ fn strchr_neon_ops_execute() {
 /// the in-range mask merge of the old `Vd`.
 #[test]
 fn tbl_tbx_multi_reg_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8; // u64 index of V<r>[63:0]; +1 = [127:64]
 
@@ -528,6 +537,7 @@ fn tbl_tbx_multi_reg_execute() {
 /// multi-register split. `TBL V7.16B, {V5.16B}, V4.16B` (0x4e0400a7).
 #[test]
 fn tbl_single_reg_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let set_v = |ctx: &mut [u64], r: u8, bytes: &[u8; 16]| {
@@ -562,6 +572,7 @@ fn tbl_single_reg_execute() {
 /// (boringssl-self-check-failed reboot loop) before the lowering was wired.
 #[test]
 fn sha256h_executes_via_crypto_helper() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     use aether_translator::runtime::crypto_rt::sha256h;
     let vd = |r: u8| (vec_disp(r) as usize) / 8; // u64 index of V<r>[63:0]
@@ -646,6 +657,7 @@ fn ref_crc32_iso(mut crc: u32, data: u64, nbytes: usize) -> u32 {
 /// the input X0, not the true CRC.
 #[test]
 fn crc32c_w_executes_native() {
+    let _serial = serial();
     // sf=0, opcode=0b010110 (CRC32C sz=W), Rd=0, Rn=1, Rm=2.
     let word = crc32_word(0, 2, 0b010110, 1, 0);
     // Decoder sanity: this word IS the CRC32C-W we think it is.
@@ -683,6 +695,7 @@ fn crc32c_w_executes_native() {
 /// CRC32CX W0, X1, X2 — 64-bit data Castagnoli, native `crc32 r64, r/m64`.
 #[test]
 fn crc32cx_executes_native() {
+    let _serial = serial();
     // sf=1, opcode=0b010111 (CRC32C sz=X), Rd=0, Rn=1, Rm=2.
     let word = crc32_word(1, 2, 0b010111, 1, 0);
     assert!(
@@ -709,6 +722,7 @@ fn crc32cx_executes_native() {
 /// `aether_crc32_iso` software helper path and return the true ISO CRC.
 #[test]
 fn crc32_iso_b_executes_via_helper() {
+    let _serial = serial();
     use aether_translator::runtime::crypto_rt::aether_crc32_iso;
     // sf=0, opcode=0b010000 (CRC32 ISO sz=B), Rd=0, Rn=1, Rm=2.
     let word = crc32_word(0, 2, 0b010000, 1, 0);
@@ -743,6 +757,7 @@ fn crc32_iso_b_executes_via_helper() {
 /// dividend (i32::MIN), and crucially must NOT raise a host #DE. PRIORITY 2.
 #[test]
 fn sdiv_min_neg1_does_not_trap() {
+    let _serial = serial();
     // sf=0, opcode=0b000011 (SDIV), Rd=0, Rn=1, Rm=2.
     let word_w = crc32_word(0, 2, 0b000011, 1, 0);
     assert!(
@@ -796,6 +811,7 @@ fn sdiv_min_neg1_does_not_trap() {
 /// (scalar and-not), ADDP / UMAXP byte-pairwise (SSE deinterleave + pack).
 #[test]
 fn strchr_loop_neon_ops_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -834,6 +850,7 @@ fn strchr_loop_neon_ops_execute() {
 /// byte→half, half→word, word→dword, executed on the host.
 #[test]
 fn uaddlp_widening_executes() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -872,6 +889,7 @@ fn uaddlp_widening_executes() {
 /// init at mount-time. ADDP Vd, Vn, Vm = [Vn pairwise…, Vm pairwise…].
 #[test]
 fn addp_executes() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -903,6 +921,7 @@ fn addp_executes() {
 /// This block lowered to UD2 → guest SIGILL → init reboot before the fix.
 #[test]
 fn cmtst_executes() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -947,6 +966,7 @@ fn cmtst_executes() {
 /// bionic NEON popcount tail: UZP1 .4s (shufps) + ADDV .4s (lane reduce-add).
 #[test]
 fn uzp1_addv_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -979,6 +999,7 @@ fn uzp1_addv_execute() {
 /// SHRN .2s (`.2d→.2s`) + SHRN2 (high-half narrow) executed on the host.
 #[test]
 fn shrn_2s_and_shrn2_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -1011,6 +1032,7 @@ fn shrn_2s_and_shrn2_execute() {
 /// v2.d[1]`. Pre-fix this returned 0; post-fix it returns the high limb.
 #[test]
 fn scalar_dup_same_reg_high_lane() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -1034,6 +1056,7 @@ fn scalar_dup_same_reg_high_lane() {
 /// v0.2d` (word 0x0ea12800). Lifted to VecShiftNarrow{shift:0,...}.
 #[test]
 fn xtn_narrow_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -1089,6 +1112,7 @@ fn xtn_narrow_execute() {
 /// (arithmetic) and the emulated SSRA .2d arithmetic path. Host-executed.
 #[test]
 fn usra_executes() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -1162,6 +1186,7 @@ fn usra_executes() {
 /// INS (element) — vector lane→lane copy: `mov v0.d[1], v1.d[0]`, host-executed.
 #[test]
 fn ins_element_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let code = translate_straight_line(&[0x6E18_0420u32], 0x1000);
@@ -1180,6 +1205,7 @@ fn ins_element_execute() {
 /// false: -128 < 127). Host-executed.
 #[test]
 fn cmhs_unsigned_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // cmhs v2.16b, v3.16b, v1.16b  (a=v3, b=v1) → per-byte (a >= b unsigned).
@@ -1217,6 +1243,7 @@ fn cmhs_unsigned_execute() {
 /// TRUE. The test also asserts NO UD2 (0F 0B) byte pair is emitted.
 #[test]
 fn cmhi_cmhs_2d_4s_unsigned_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -1325,7 +1352,7 @@ fn cmhi_cmhs_2d_4s_unsigned_execute() {
 /// before silicon. A stack u64 stands in for the hypervisor's M3_OBS static.
 #[test]
 fn m3_multiblock_store_load_dispatch() {
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap(); // serialize global-runtime access
+    let _serial = serial();
     use aether_translator::dbt::{
         aether_dbt_block_host_va, aether_dbt_init, aether_dbt_invalidate_all,
         aether_dbt_translate_block, AetherDbtResult,
@@ -1393,7 +1420,7 @@ fn m3_multiblock_store_load_dispatch() {
 /// CB(N)Z X0, +0xC]; the branch sits at base+4, so taken=base+0x10, fall=base+8.
 #[test]
 fn m3_cbz_cbnz_next_pc() {
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap(); // serialize global-runtime access
+    let _serial = serial();
     use aether_translator::dbt::{
         aether_dbt_block_host_va, aether_dbt_init, aether_dbt_translate_block, AetherDbtResult,
     };
@@ -1455,8 +1482,9 @@ fn m3_cbz_cbnz_next_pc() {
 /// [R15+SPILL_BASE]. Before the fix, spilled values aliased RAX → wrong sum.
 #[test]
 fn m4a_spill_sixteen_live_values() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
-    use aether_translator::ir::{BlockId, IrBlock, IrFunction, IrOp};
+    use aether_translator::ir::{IrBlock, IrFunction, IrOp};
 
     let mut func = IrFunction::new(0x1000);
     {
@@ -1504,6 +1532,7 @@ fn m4a_spill_sixteen_live_values() {
 /// full-width X-write. With the in-place bug, X1 would also be truncated.
 #[test]
 fn write_gpr_w_form_does_not_truncate_live_source() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrBlock, IrFunction, IrOp};
 
@@ -1546,6 +1575,7 @@ fn write_gpr_w_form_does_not_truncate_live_source() {
 /// SP), then write X4 = the SAME value full-width; X4 must keep all 64 bits.
 #[test]
 fn write_sp_w_form_does_not_truncate_live_source() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrBlock, IrFunction, IrOp};
 
@@ -1579,6 +1609,7 @@ fn write_sp_w_form_does_not_truncate_live_source() {
 /// 3-5 (borrow) -> C=0, N=1. Logical/overflow not exercised here.
 #[test]
 fn m4a_nzcv_subs_polarity() {
+    let _serial = serial();
     // MOVZ X0,#imm0 ; MOVZ X1,#imm1 ; CMP X0,X1 (=SUBS XZR,X0,X1 = 0xEB01001F)
     fn run(imm0: u16, imm1: u16) -> u64 {
         let movz_x0 = 0xD2800000u32 | ((imm0 as u32) << 5); // MOVZ X0,#imm0
@@ -1612,6 +1643,7 @@ fn m4a_nzcv_subs_polarity() {
 /// and take iff equal. Proves cross-op flag correctness (the whole point of M4a).
 #[test]
 fn m4a_nzcv_beq_branch() {
+    let _serial = serial();
     // 0x1000 MOVZ X0,#5 ; 0x1004 MOVZ X1,#imm ; 0x1008 CMP X0,X1 ; 0x100C B.EQ +0x10
     // B.EQ at 0x100C with imm19=4 -> target 0x100C+0x10 = 0x101C; fallthrough 0x1010.
     fn run(imm1: u16) -> u64 {
@@ -1635,6 +1667,7 @@ fn m4a_nzcv_beq_branch() {
 /// SYSREG: MSR/MRS round-trip for a RW reg, and a seeded read-only ID reg.
 #[test]
 fn m4a_sysreg_roundtrip() {
+    let _serial = serial();
     use aether_translator::runtime::context::seed_sysregs;
     // 0x1000 MOVZ X0,#0xABC ; MSR SCTLR_EL1,X0 (D5181000) ; MRS X1,SCTLR_EL1 (D5381001)
     //        ; MRS X2,MPIDR_EL1 (D53800A2)
@@ -1662,6 +1695,7 @@ fn m4a_sysreg_roundtrip() {
 /// pc=0x3024 (B.EQ taken since 7==7).
 #[test]
 fn m4a_silicon_proof_program() {
+    let _serial = serial();
     use aether_translator::runtime::context::seed_sysregs;
     let words = [
         0xD2815780u32, // MOVZ X0,#0xABC
@@ -1693,6 +1727,7 @@ fn m4a_silicon_proof_program() {
 /// TEST and CMOVNZ). EQ-false -> X0 = X2+1; EQ-true -> X0 = X1.
 #[test]
 fn m4a_csinc_single_transform_and_flags() {
+    let _serial = serial();
     // MOVZ X1,#10; MOVZ X2,#20; MOVZ X3,#5; MOVZ X4,#<b>; CMP X3,X4; CSINC X0,X1,X2,EQ
     fn run(x4: u16) -> u64 {
         let words = [
@@ -1723,6 +1758,7 @@ fn m4a_csinc_single_transform_and_flags() {
 /// adds the carry so X1 = X3+X5+1. Proves BT-seeds-CF -> ADC works.
 #[test]
 fn m4b_adcs_carry_chain() {
+    let _serial = serial();
     let words = [
         0x92800002u32, // MOVN X2,#0  -> X2 = 0xFFFF_FFFF_FFFF_FFFF
         0xD2800024,    // MOVZ X4,#1
@@ -1746,6 +1782,7 @@ fn m4b_adcs_carry_chain() {
 /// either compares X2,X3 (if EQ held) or loads #0 into NZCV (if not).
 #[test]
 fn m4b_ccmp_branched() {
+    let _serial = serial();
     // MOVZ X0,#a; MOVZ X1,#b; MOVZ X2,#7; MOVZ X3,#7; CMP X0,X1; CCMP X2,X3,#0,EQ
     fn run(a: u16, b: u16) -> u64 {
         let words = [
@@ -1779,6 +1816,7 @@ fn m4b_ccmp_branched() {
 /// The pre-fix code (BT without CMC) computed X1 = 1 — the bit-exact inverse.
 #[test]
 fn m4b_sbcs_borrow_chain() {
+    let _serial = serial();
     let words = [
         0xD2800002u32, // MOVZ X2,#0   (low a)
         0xD2800024,    // MOVZ X4,#1   (low b)
@@ -1803,6 +1841,7 @@ fn m4b_sbcs_borrow_chain() {
 /// pre-fix code lowered CCMN as CCMP (1-1=0 -> Z=1), the worked counter-example.
 #[test]
 fn m4b_ccmn_add_polarity() {
+    let _serial = serial();
     let words = [
         0xD2800020u32, // MOVZ X0,#1
         0xD2800021,    // MOVZ X1,#1
@@ -1829,6 +1868,7 @@ fn m4b_ccmn_add_polarity() {
 /// one-instruction ERET block, and assert pc <- ELR and nzcv <- SPSR&0xF000_0000.
 #[test]
 fn m4b_eret_restores_pc_and_nzcv() {
+    let _serial = serial();
     use aether_translator::runtime::context::SYSREG_SLOT0;
     // sysreg dense-slot indices from lower_int::sysreg_read_idx.
     const ELR_EL1_IDX: usize = 13;
@@ -1879,6 +1919,7 @@ fn m4b_eret_restores_pc_and_nzcv() {
 /// on the Win64 host.
 #[test]
 fn m4b5_msr_pstate_imm_daif_spsel_are_functional() {
+    let _serial = serial();
     use aether_translator::runtime::context::SYSREG_SLOT0;
     const DAIF_IDX: usize = 22; // lower_int::sysreg_read_idx(DaifEl0)
     const SPSEL_IDX: usize = 23; // lower_int::sysreg_read_idx(SpselEl1)
@@ -1919,6 +1960,7 @@ fn m4b5_msr_pstate_imm_daif_spsel_are_functional() {
 /// the NOT/NEG arms on executed x86.
 #[test]
 fn m4a_csinv_csneg_single_transform_and_flags() {
+    let _serial = serial();
     // MOVZ X1,#10; MOVZ X2,#20; MOVZ X3,#5; MOVZ X4,#<b>; CMP X3,X4; <op> X0,X1,X2,EQ
     fn run(op_word: u32, x4: u16) -> u64 {
         let words = [
@@ -1985,10 +2027,6 @@ use aether_translator::runtime::mmu::{
 };
 use aether_translator::runtime::context::SYSREG_SLOT0;
 
-/// The MMU walker uses process-global state (software TLB + pinned window), so
-/// every test that drives it through the JIT must run serially. (Separate from
-/// GLOBAL_RT_LOCK, which guards the DbtRuntime; an MMU test takes BOTH.)
-static MMU_GLOBAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const SCTLR_M: u64 = 1 << 0;
 /// Descriptor / TTBR output-address mask (bits [47:12]).
@@ -2058,7 +2096,7 @@ fn build_mapped_ctx(va: u64, read_only: bool) -> (Vec<u64>, u64) {
 /// host PA: X2 == X1, and the data page at the walked PA holds the value.
 #[test]
 fn m4b_str_ldr_roundtrip_through_mmu() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     // VA inside the low (TTBR0) half, page-aligned at the 4 KiB granule.
     let va = 0x0000_1234_5678_9000u64;
     let (mut ctx, data_pa) = build_mapped_ctx(va, false);
@@ -2091,7 +2129,7 @@ fn m4b_str_ldr_roundtrip_through_mmu() {
 /// flat — STR/LDR to a real host address held in X0 round-trips with no tables.
 #[test]
 fn m4b_flat_access_when_mmu_off() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     aether_mmu_set_window(0, u64::MAX); // window irrelevant when M==0, open it wide
     aether_mmu_flush_all();
     let mut slot: u64 = 0;
@@ -2121,7 +2159,7 @@ fn m4b_flat_access_when_mmu_off() {
 /// dead — ID_AA64ISAR0.Atomic=1 routes to this LL/SC path at 0x831a900).
 #[test]
 fn llsc_ldxp_loads_both_halves() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     aether_mmu_set_window(0, u64::MAX);
     aether_mmu_flush_all();
     let mut buf = [0x1111_2222_3333_4444u64, 0x5555_6666_7777_8888u64];
@@ -2139,7 +2177,7 @@ fn llsc_ldxp_loads_both_halves() {
 
 #[test]
 fn llsc_stxp_stores_both_halves() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     aether_mmu_set_window(0, u64::MAX);
     aether_mmu_flush_all();
     let mut buf = [0u64, 0u64];
@@ -2164,6 +2202,7 @@ fn llsc_stxp_stores_both_halves() {
 /// casp does not get rejected (UD2'd) by register pressure in its real block.
 #[test]
 fn casp_slub_block_lowers_without_ud2() {
+    let _serial = serial();
     use aether_translator::ir::IrOp;
     let words = [
         0xaa0503e0u32, // mov x0, x5
@@ -2216,7 +2255,7 @@ fn casp_slub_block_lowers_without_ud2() {
 /// mismatch here double-allocates a slab object (the Phase-G fork corruption).
 #[test]
 fn casp_pair_match_stores_new_and_returns_old() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     aether_mmu_set_window(0, u64::MAX);
     aether_mmu_flush_all();
     let old_a = 0xAAAA_AAAA_AAAA_1111u64;
@@ -2246,7 +2285,7 @@ fn casp_pair_match_stores_new_and_returns_old() {
 /// left UNCHANGED and the old pair is still returned in {X0,X1}.
 #[test]
 fn casp_pair_mismatch_leaves_memory_unchanged() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     aether_mmu_set_window(0, u64::MAX);
     aether_mmu_flush_all();
     let old_a = 0x1111_2222_3333_4444u64;
@@ -2280,7 +2319,7 @@ fn casp_pair_mismatch_leaves_memory_unchanged() {
 /// Program: `ldr d1,[x0]` ; `movz x1,#0x1234` (clobber x1) ; `str d1,[x2]`.
 #[test]
 fn ldr_str_d_uses_fp_reg_not_gpr() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     aether_mmu_set_window(0, u64::MAX);
     aether_mmu_flush_all();
     let mut src: u64 = 0xFFFF_FFFF_0000_0208; // bionic vsnprintf _flags|_file|_r const
@@ -2338,7 +2377,7 @@ unsafe extern "C" fn test_mmio_handler(addr: u64, size: u32, is_write: u32, valu
 /// A translated STR to a device PA forwards to the MMIO handler (no RAM touch).
 #[test]
 fn m4b5_mmio_store_forwards_to_handler() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     aether_mmu_set_window(0, u64::MAX); // MMU off → flat; window irrelevant
     aether_mmu_flush_all();
     aether_set_mmio_handler(test_mmio_handler);
@@ -2373,7 +2412,7 @@ fn m4b5_mmio_store_forwards_to_handler() {
 /// A translated LDR from a device PA returns the MMIO handler's value into Xt.
 #[test]
 fn m4b5_mmio_load_returns_handler_value() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     aether_mmu_set_window(0, u64::MAX);
     aether_mmu_flush_all();
     aether_set_mmio_handler(test_mmio_handler);
@@ -2405,7 +2444,7 @@ fn m4b5_mmio_load_returns_handler_value() {
 /// written (it keeps its pre-block value) and PEND_PENDING==1, FAR==the VA.
 #[test]
 fn m4b_unmapped_load_faults_and_early_rets() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     let va = 0x0000_2000_0000_0000u64; // some low-half VA we will NOT map
     // Build a valid arena/window but DON'T map this VA (only a different one).
     let (mut ctx, _data) = build_mapped_ctx(0x0000_0040_0000_0000u64, false);
@@ -2440,11 +2479,11 @@ fn m4b_unmapped_load_faults_and_early_rets() {
 /// — if the call clobbered any, the sum is wrong.
 #[test]
 fn m4b_live_regs_survive_mmu_call() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrBlock, IrFunction, IrOp};
     use aether_translator::ir::memory::{LoadTy, MemOrder};
 
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
     let va = 0x0000_0055_0000_0000u64;
     let (mut ctx, data_pa) = build_mapped_ctx(va, false);
     // Pre-place a known value at the data page; the LDR must read exactly it.
@@ -2510,11 +2549,11 @@ fn m4b_live_regs_survive_mmu_call() {
 /// straddle here.
 #[test]
 fn m4b_stp_ldp_pair_roundtrip_through_mmu() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrBlock, IrFunction, IrOp};
     use aether_translator::ir::memory::{LoadTy, StoreTy};
 
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
     let va = 0x0000_0066_0000_0000u64;
     let (mut ctx, data_pa) = build_mapped_ctx(va, false);
 
@@ -2571,12 +2610,12 @@ fn m4b_stp_ldp_pair_roundtrip_through_mmu() {
 /// `aether_timer_set_now` across re-entries of the same block.
 #[test]
 fn m4b4_cntvct_advances_through_sysreg_call() {
+    let _serial = serial();
     use aether_translator::decoder::sysreg::SysReg;
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrBlock, IrFunction, IrOp};
     use aether_translator::runtime::sysreg_rt::{aether_platform_reset, aether_timer_set_now};
 
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
     aether_platform_reset();
 
     // MRS X0, CNTVCT_EL0.
@@ -2607,12 +2646,12 @@ fn m4b4_cntvct_advances_through_sysreg_call() {
 /// round-trips — proving both the write and read call sequences are correct.
 #[test]
 fn m4b4_cval_write_read_roundtrips_through_sysreg_calls() {
+    let _serial = serial();
     use aether_translator::decoder::sysreg::SysReg;
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrBlock, IrFunction, IrOp};
     use aether_translator::runtime::sysreg_rt::aether_platform_reset;
 
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
     aether_platform_reset();
 
     // X1 -> MSR CNTV_CVAL_EL0 ; MRS X2, CNTV_CVAL_EL0.
@@ -2646,12 +2685,12 @@ fn m4b4_cval_write_read_roundtrips_through_sysreg_calls() {
 /// polls. Proves HVC no longer UD2s and the PSCI result lands in the guest x0.
 #[test]
 fn m4b4_hvc_psci_version_and_system_off() {
+    let _serial = serial();
     use aether_translator::ir::{IrBlock, IrFunction, IrOp};
     use aether_translator::runtime::psci::{
         aether_hvc_take_action, HvcPlatformAction, PSCI_SYSTEM_OFF, PSCI_VERSION,
     };
 
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
     let _ = aether_hvc_take_action(); // clear any stray pending action
 
     // A block of just HVC #0. x0 in/out is the ctx slot (the template-JIT
@@ -2694,6 +2733,7 @@ fn m4b4_hvc_psci_version_and_system_off() {
 /// proves `sf` selects the width.
 #[test]
 fn m4b_wform_flags_use_32bit_eflags() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrBlock, IrFunction, IrOp};
 
@@ -2782,8 +2822,8 @@ fn m4b_wform_flags_use_32bit_eflags() {
 /// pc + 64*4 (not stuck at the block start).
 #[test]
 fn m4b_long_straightline_block_has_fallthrough_pc() {
+    let _serial = serial();
     use aether_translator::dbt::{aether_dbt_init, dbt_runtime_with, AetherDbtResult};
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
     let _ = aether_dbt_init(0, 16 * 1024 * 1024, 0, 1024 * 1024);
 
     const ADD_X0_X0_1: u32 = 0x9100_0400; // ADD X0, X0, #1 (no terminator)
@@ -2841,7 +2881,7 @@ fn m4b_long_straightline_block_has_fallthrough_pc() {
 /// traps. `MOVZ X0,#0x41 ; DSB SY ; ISB ; DMB SY ; ADD X1,X0,X0`.
 #[test]
 fn m4b_barriers_execute_no_ud2() {
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
+    let _serial = serial();
     // MOVZ X0,#0x41 = 0xD2800820 ; DSB SY = 0xD5033F9F ; ISB = 0xD5033FDF ;
     // DMB SY = 0xD5033FBF ; ADD X1,X0,X0 = 0x8B000001.
     let words = [0xD280_0820u32, 0xD503_3F9Fu32, 0xD503_3FDFu32, 0xD503_3FBFu32, 0x8B00_0001u32];
@@ -2869,11 +2909,10 @@ fn m4b_barriers_execute_no_ud2() {
 /// (rewritten) leaf and reads the NEW page. Mirrors the MSR-TTBR0 flush proof.
 #[test]
 fn m4b_tlbi_va_flushes_one_page() {
+    let _serial = serial();
     // Executing the TLBI block calls aether_dbt_invalidate_all (mutates the
     // GLOBAL DbtRuntime block cache), so take BOTH locks — MMU state AND the
-    // runtime — to avoid wiping a concurrent GLOBAL_RT_LOCK test's cache.
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    // runtime — to avoid wiping a concurrent EXEC_LOCK test's cache.
     let va = 0x0000_0088_0000_0000u64;
     let (mut ctx, _l0, l3, l3_slot, data_a, data_b) = build_remappable_ctx(va);
     const VAL_A: u64 = 0xA1A1_0000_0000_000Au64;
@@ -2922,10 +2961,9 @@ fn m4b_tlbi_va_flushes_one_page() {
 /// whole software TLB, so a load after a remap re-walks → sees the NEW mapping.
 #[test]
 fn m4b_tlbi_broad_flushes_tlb() {
+    let _serial = serial();
     // Executing the TLBI block calls aether_dbt_invalidate_all (mutates the
     // GLOBAL DbtRuntime block cache) — take BOTH locks (see the VA-form test).
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
     let va = 0x0000_0099_0000_0000u64;
     let (mut ctx, _l0, l3, l3_slot, data_a, data_b) = build_remappable_ctx(va);
     const VAL_A: u64 = 0xC3C3_0000_0000_000Cu64;
@@ -2970,6 +3008,7 @@ fn m4b_tlbi_broad_flushes_tlb() {
 /// This isolates each form's exact side-effect calls at the byte level.
 #[test]
 fn m4b_tlbi_emits_expected_calls() {
+    let _serial = serial();
     use aether_translator::dbt::aether_dbt_invalidate_all;
     use aether_translator::runtime::mmu::aether_mmu_tlbi_va;
     // Pure byte inspection: translate_straight_line builds a local encoder and
@@ -3004,7 +3043,7 @@ fn m4b_tlbi_emits_expected_calls() {
 /// changed) guest tables.
 #[test]
 fn m4b_dbt_invalidate_all_resets_cache() {
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
+    let _serial = serial();
     use aether_translator::dbt::{
         aether_dbt_block_host_va, aether_dbt_init, aether_dbt_invalidate_all,
         aether_dbt_translate_block, AetherDbtResult,
@@ -3082,7 +3121,7 @@ fn build_remappable_ctx(va: u64) -> (Vec<u64>, u64, u64, usize, u64, u64) {
 /// the stale cached PA (page A) — which (f) demonstrates with SCTLR.
 #[test]
 fn m4b_msr_ttbr0_flushes_tlb() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     let va = 0x0000_0066_0000_0000u64;
     let (mut ctx, l0, l3, l3_slot, data_a, data_b) = build_remappable_ctx(va);
     const VAL_A: u64 = 0xAAAA_0000_0000_000Au64;
@@ -3139,7 +3178,7 @@ fn m4b_msr_ttbr0_flushes_tlb() {
 /// from the flush and not from some unconditional re-walk.
 #[test]
 fn m4b_msr_sctlr_does_not_flush_tlb() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     let va = 0x0000_0077_0000_0000u64;
     let (mut ctx, _l0, l3, l3_slot, data_a, data_b) = build_remappable_ctx(va);
     const VAL_A: u64 = 0xCCCC_0000_0000_000Cu64;
@@ -3194,7 +3233,7 @@ fn m4b_msr_sctlr_does_not_flush_tlb() {
 /// emission to the translation-control classification.
 #[test]
 fn m4b_ttbr0_msr_emits_flush_call_sctlr_does_not() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     // Single-MSR blocks (no load) so the only difference is the flush call.
     let ttbr0 = translate_straight_line(&[0xD518_2002u32], 0xF300); // MSR TTBR0_EL1,X2
     let sctlr = translate_straight_line(&[0xD518_1002u32], 0xF310); // MSR SCTLR_EL1,X2
@@ -3295,10 +3334,9 @@ fn build_enable_mmu_arena(va: u64, data_word: u64) -> (u64, u64) {
 /// "survive __enable_mmu".
 #[test]
 fn m4b2_synthetic_enable_mmu_then_load() {
+    let _serial = serial();
     // The block's MSRs call aether_mmu_flush_all + aether_dbt_invalidate_all
     // (mutates the GLOBAL DbtRuntime block cache), so take BOTH locks.
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
 
     // A low-half (TTBR0) VA, page-aligned at the 4 KiB granule.
     let va = 0x0000_1234_ABCD_E000u64;
@@ -3376,10 +3414,9 @@ fn m4b2_synthetic_enable_mmu_then_load() {
 ///        must survive the early-RET because the faulting load never writes it).
 #[test]
 fn m4b2_unmapped_va_after_enable_mmu_faults() {
+    let _serial = serial();
     // The block's MSRs call aether_mmu_flush_all + aether_dbt_invalidate_all
     // (mutates the GLOBAL DbtRuntime block cache), so take BOTH locks.
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
 
     // Map ONE VA (so the arena/window are valid) but fault on a DIFFERENT VA.
     let mapped_va = 0x0000_00AB_CDEF_0000u64;
@@ -3455,12 +3492,13 @@ fn m4b2_unmapped_va_after_enable_mmu_faults() {
 
 /// Phase C debug: dump the emitted x86 for MOVZ+MOVK AND run it + report ctx[10].
 // NOT an assertion — ends in an unconditional panic! to print the bytes, and a
-// panicking test poisons GLOBAL_RT_LOCK, cascade-failing every later test in
+// panicking test poisons EXEC_LOCK, cascade-failing every later test in
 // the binary. Run explicitly via `--ignored` when the dump is needed; the
 // assertion version is phase_c_movk_preserves_low_bits below.
 #[test]
 #[ignore = "debug dump tool — panics by design to print the emitted x86"]
 fn phase_c_dump_movk_emitted_x86() {
+    let _serial = serial();
     const MOVZ_X10: u32 = 0xD291128A;
     const MOVK_X10: u32 = 0xF2AFB3CA;
     let words = [MOVZ_X10, MOVK_X10];
@@ -3481,6 +3519,7 @@ fn phase_c_dump_movk_emitted_x86() {
 /// Phase C bisect 0a: MOVZ X10 alone.
 #[test]
 fn phase_c_movz_x10_alone() {
+    let _serial = serial();
     const MOVZ_X10: u32 = 0xD291128A; // movz x10, #0x8894
     let words = [MOVZ_X10];
     let code = translate_straight_line(&words, 0x15000);
@@ -3494,6 +3533,7 @@ fn phase_c_movz_x10_alone() {
 /// MOVZ X10, #0x8894 ; MOVK X10, #0x7d9e, LSL #16 → expect X10 = 0x7d9e_8894.
 #[test]
 fn phase_c_movk_preserves_low_bits() {
+    let _serial = serial();
     const MOVZ_X10: u32 = 0xD291128A;
     const MOVK_X10: u32 = 0xF2AFB3CA;
     let words = [MOVZ_X10, MOVK_X10];
@@ -3522,6 +3562,7 @@ fn phase_c_movk_preserves_low_bits() {
 /// 64-bit RBIT: RBIT (1) must produce 0x8000_0000_0000_0000.
 #[test]
 fn phase_e_rbit_x_low_bit_to_msb() {
+    let _serial = serial();
     // MOVZ X1, #1       (X1 = 1)
     // RBIT X0, X1       (X0 = bit-reverse(X1))
     const MOVZ_X1_1: u32 = 0xD280_0021;
@@ -3542,6 +3583,7 @@ fn phase_e_rbit_x_low_bit_to_msb() {
 /// 64-bit RBIT round trip: RBIT(RBIT(v)) == v.
 #[test]
 fn phase_e_rbit_x_involution() {
+    let _serial = serial();
     // MOVZ X1, #0xCAFE; MOVK X1, #0xBABE, LSL #16; RBIT X0, X1; RBIT X2, X0
     const MOVZ_X1: u32 = 0xD299_5FC1; // movz x1, #0xcafe
     const MOVK_X1: u32 = 0xF2B7_57C1; // movk x1, #0xbabe, lsl #16
@@ -3565,6 +3607,7 @@ fn phase_e_rbit_x_involution() {
 /// when CONFIG_KALLSYMS or 32-bit cpumask access reaches the W form.
 #[test]
 fn phase_e_rbit_w_low_bit_to_bit31() {
+    let _serial = serial();
     // MOVZ W1, #1
     // RBIT W0, W1
     const MOVZ_W1_1: u32 = 0x5280_0021;
@@ -3596,6 +3639,7 @@ fn phase_e_rbit_w_low_bit_to_bit31() {
 /// UMULH(1, 24) must produce 0 (high 64 of 1*24 = 24 fits in low 64).
 #[test]
 fn phase_e_umulh_no_overflow_is_zero() {
+    let _serial = serial();
     // MOVZ X1, #1 ; MOVZ X2, #24 ; UMULH X0, X1, X2
     const MOVZ_X1_1: u32 = 0xD280_0021;
     const MOVZ_X2_24: u32 = 0xD280_0302;
@@ -3617,6 +3661,7 @@ fn phase_e_umulh_no_overflow_is_zero() {
 /// UMULH high bits: 2^63 * 2 → high=1.
 #[test]
 fn phase_e_umulh_overflow_high_bit() {
+    let _serial = serial();
     // X1 = 2^63 ; X2 = 2 ; UMULH X0, X1, X2 -> 1
     const MOVZ_X1_2P63: u32 = 0xD2F0_0001; // movz x1, #0x8000, lsl #48
     const MOVZ_X2_2:    u32 = 0xD280_0042;
@@ -3637,6 +3682,7 @@ fn phase_e_umulh_overflow_high_bit() {
 /// SMULH: -1 * -1 = 1 → high 64 = 0.
 #[test]
 fn phase_e_smulh_negative_no_overflow_is_zero() {
+    let _serial = serial();
     const MOVN_X1_M1: u32 = 0x9280_0001;
     const MOVN_X2_M1: u32 = 0x9280_0002;
     const SMULH_X0_X1_X2: u32 = 0x9B42_7C20;
@@ -3663,6 +3709,7 @@ fn phase_e_smulh_negative_no_overflow_is_zero() {
 /// LSL W0, W1, W2 with W1=1, W2=33: ARM does W1 << (33 % 32) = 1 << 1 = 2.
 #[test]
 fn phase_g_lsl_w_mod_32() {
+    let _serial = serial();
     // MOVZ W1, #1 ; MOVZ W2, #33 ; LSL W0, W1, W2
     // LSL Wd, Wn, Wm encoding: 0001_1010_110m_mmmm_0010_00nn_nnnd_dddd
     // For Wd=0, Wn=1, Wm=2: 0x1AC22020
@@ -3685,6 +3732,7 @@ fn phase_g_lsl_w_mod_32() {
 /// ASR W0, W1, W2 with W1=0x80000000 (negative), W2=1: ARM ASR-32 = 0xC0000000.
 #[test]
 fn phase_g_asr_w_sign_extend() {
+    let _serial = serial();
     // MOVZ W1, #0x8000, LSL #16 ; MOVZ W2, #1 ; ASR W0, W1, W2
     // ASR Wd, Wn, Wm: 0001_1010_110m_mmmm_0010_10nn_nnnd_dddd
     // 0x1AC22820
@@ -3710,6 +3758,7 @@ fn phase_g_asr_w_sign_extend() {
 /// ROR W0, W1, W2 with W1=0x12345678, W2=4: ARM ROR-32 = 0x81234567.
 #[test]
 fn phase_g_ror_w_wraps_32() {
+    let _serial = serial();
     // MOVZ W1 = 0x12345678; MOVZ W2 = 4; ROR W0, W1, W2
     // 0x52A24681: movz w1, #0x1234, lsl #16
     // 0x72A8ACF1: movk w1, #0x4567 -- wait need w1, #0x5678 first
@@ -3748,6 +3797,7 @@ fn phase_g_ror_w_wraps_32() {
 /// CLZ X0, X1 with X1=1 must produce 63 (bit 0 set → 63 leading zeros).
 #[test]
 fn phase_e_clz_x_low_bit_set() {
+    let _serial = serial();
     // MOVZ X1, #1 ; CLZ X0, X1
     const MOVZ_X1_1: u32 = 0xD280_0021;
     const CLZ_X0_X1:  u32 = 0xDAC0_1020; // clz x0, x1
@@ -3762,6 +3812,7 @@ fn phase_e_clz_x_low_bit_set() {
 /// CLZ X0, X1 with X1=0 must produce 64.
 #[test]
 fn phase_e_clz_x_zero() {
+    let _serial = serial();
     // MOVZ X1, #0 ; CLZ X0, X1
     const MOVZ_X1_0: u32 = 0xD280_0001;
     const CLZ_X0_X1:  u32 = 0xDAC0_1020;
@@ -3777,6 +3828,7 @@ fn phase_e_clz_x_zero() {
 /// This is the failure mode that broke __kmalloc.
 #[test]
 fn phase_e_clz_w_low_bit_set() {
+    let _serial = serial();
     // MOVZ W1, #1 ; CLZ W0, W1
     const MOVZ_W1_1: u32 = 0x5280_0021;
     const CLZ_W0_W1:  u32 = 0x5AC0_1020; // clz w0, w1
@@ -3791,6 +3843,7 @@ fn phase_e_clz_w_low_bit_set() {
 /// CLZ W0, W1 with W1=0 must produce 32 (not 64).
 #[test]
 fn phase_e_clz_w_zero() {
+    let _serial = serial();
     const MOVZ_W1_0: u32 = 0x5280_0001;
     const CLZ_W0_W1:  u32 = 0x5AC0_1020;
     let words = [MOVZ_W1_0, CLZ_W0_W1];
@@ -3804,6 +3857,7 @@ fn phase_e_clz_w_zero() {
 /// CLZ W0, W1 with W1=0x80000000 must produce 0 (MSB set → 0 leading zeros).
 #[test]
 fn phase_e_clz_w_msb_set() {
+    let _serial = serial();
     // MOVZ W1, #0x8000, LSL #16 → w1 = 0x8000_0000  (enc: 0x52B00001)
     const MOVZ_W1_MSB: u32 = 0x52B0_0001;
     const CLZ_W0_W1:   u32 = 0x5AC0_1020;
@@ -3827,6 +3881,7 @@ fn phase_e_clz_w_msb_set() {
 /// the expected values.
 #[test]
 fn phase_e_ldxp_loads_pair() {
+    let _serial = serial();
     // Setup: store known values into a small ctx-resident buffer via a
     // small ARM sequence that initialises x0 = &buffer, then LDXP.
     // For simplicity: prime x0 with a buffer VA that maps to the ctx,
@@ -3889,6 +3944,7 @@ fn phase_e_ldxp_loads_pair() {
 /// STXP w0, x1, x2, [x3]: stores two adjacent 64-bit words, w0 = status.
 #[test]
 fn phase_e_stxp_stores_pair() {
+    let _serial = serial();
     // STXP W0, X1, X2, [X3]: sz=3 / 001000 / L=0 / pair=1 / Rs=W0 /
     // o0=0 / Rt2=X2 / Rn=X3 / Rt=X1
     //   = 1100_1000_0010_0000_0000_1000_0110_0001 = 0xC8200861
@@ -3939,6 +3995,7 @@ fn phase_e_stxp_stores_pair() {
 /// We assert ctx[10] == 0x0AAA (proves b.hs was NOT taken).
 #[test]
 fn phase_g_bhs_after_tbnz_consumes_arm_nzcv() {
+    let _serial = serial();
     const MOVZ_W2_8:   u32 = 0x52800102; // movz w2, #8
     const MOVZ_W9_9:   u32 = 0x52800129; // movz w9, #9
     const CMP_X2_9:    u32 = 0xF100245F; // cmp x2, #9
@@ -3968,6 +4025,7 @@ fn phase_g_bhs_after_tbnz_consumes_arm_nzcv() {
 
 #[test]
 fn phase_c_jump_table_dispatch_shifted_add() {
+    let _serial = serial();
     const MOVZ_X10: u32 = 0xD291128A;
     const MOVK_X10: u32 = 0xF2AFB3CA;
     const MOVZ_X11: u32 = 0xD28001AB;
@@ -3989,6 +4047,7 @@ fn phase_c_jump_table_dispatch_shifted_add() {
 /// Each was UD2/Ument-or-wrong before this landing; these prove the numbers.
 #[test]
 fn b20_b29_b31_simd_fp_ops_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8; // u64 index of V<r>[63:0]
 
@@ -4056,6 +4115,7 @@ fn b20_b29_b31_simd_fp_ops_execute() {
 /// getmntent gate: empty mnt_dir std::strings).
 #[test]
 fn bionic_strlen_compute_dev() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // cmeq v1.16b,v0.16b,#0 ; lsl x4,x0,#2 ; shrn v2.8b,v1.8h,#4 ; fmov x2,d2 ;
@@ -4081,6 +4141,7 @@ fn bionic_strlen_compute_dev() {
 /// v0 with the full aligned 16-byte chunk and sets x0 = offset.
 #[test]
 fn bionic_strlen_unaligned_offsets() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let words = [
@@ -4114,7 +4175,7 @@ fn bionic_strlen_unaligned_offsets() {
 /// rt2=*(addr+4), incl. the negative-offset form, through the MMU-off flat path.
 #[test]
 fn ldpsw_signed_pair_dest_order() {
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
+    let _serial = serial();
     aether_mmu_set_window(0, u64::MAX);
     aether_mmu_flush_all();
     // (1) ldpsw x1,x2,[x0] (offset 0): word0=7 @ +0, word1=8 @ +4.
@@ -4217,6 +4278,7 @@ fn lower_branch_probe(
 /// ReadGpr did a full 64-bit load → X0 kept the dirty upper bits.
 #[test]
 fn readgpr_wform_zext() {
+    let _serial = serial();
     // add w0, w5, wzr  (32-bit ADD shifted-reg, Rm=wzr=31, Rn=5, Rd=0)
     //   sf=0 op=0 S=0: 0x0B000000 | (31<<16) | (5<<5) | 0 = 0x0B1F00A0
     let code = translate_straight_line(&[0x0B1F_00A0u32], 0x1000);
@@ -4238,6 +4300,7 @@ fn readgpr_wform_zext() {
 /// twin verifies sign-extend-from-bit-31 (not bit 63).
 #[test]
 fn wform_shifted_reg() {
+    let _serial = serial();
     // (1) LSR form: orr w0, w3, w2, lsr #16
     //   ORR shifted-reg 32-bit: 0x2A000000 | (shift=01<<22) | (Rm=2<<16)
     //     | (imm6=16<<10) | (Rn=3<<5) | Rd=0 = 0x2A424060
@@ -4276,6 +4339,7 @@ fn wform_shifted_reg() {
 /// spilled operands and the product was garbage.
 #[test]
 fn mul_spilled() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
 
@@ -4328,6 +4392,7 @@ fn mul_spilled() {
 /// CBNZ twin is the mirror.
 #[test]
 fn cbz_spilled_branch() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{BlockId, IrFunction, IrOp};
 
@@ -4397,6 +4462,7 @@ fn cbz_spilled_branch() {
 /// spilled-operand read + source-not-mutated.
 #[test]
 fn tbz_spilled_no_mutate() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{BlockId, IrFunction, IrOp};
 
@@ -4487,6 +4553,7 @@ fn tbz_spilled_no_mutate() {
 /// element the *masked* index selects.
 #[test]
 fn regoffset_uxtw() {
+    let _serial = serial();
     use aether_translator::runtime::mmu::aether_mmu_set_window;
     // Build a host-resident array and load element [4] via uxtw #3 (8-byte stride)
     // with a dirty upper 32 in the index register. The base (x1) points at the
@@ -4498,10 +4565,9 @@ fn regoffset_uxtw() {
     // The Load lowers to an `aether_mmu_xlate` call; with the MMU OFF that path is
     // flat (PA == VA) but confines the VA to the pinned guest window. Point the
     // window at this host array so the flat load reads it. (Window is process-wide
-    // global state; the GLOBAL_RT_LOCK + single-threaded run serialize it, and we
+    // global state; the EXEC_LOCK + single-threaded run serialize it, and we
     // restore it to (0,0) at the end.)
     let array: [u64; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xDEAD_BEEF_CAFE_F00D, 0xA5, 0xA6, 0xA7];
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
     aether_mmu_set_window(array.as_ptr() as u64, core::mem::size_of_val(&array) as u64);
 
     // ldr x0, [x1, w2, uxtw #3]  = 0xF8625820
@@ -4528,7 +4594,7 @@ fn regoffset_uxtw() {
     let got_sxtw = ctx[0];
 
     aether_mmu_set_window(0, 0); // restore: leave no global window pinned
-    drop(_rt);
+    drop(_serial);
 
     assert_eq!(
         got_uxtw, 0xDEAD_BEEF_CAFE_F00D,
@@ -4547,6 +4613,7 @@ fn regoffset_uxtw() {
 /// guest-triggerable; pre-fix it `idiv`/`div`'d a zero divisor and faulted.
 #[test]
 fn sdiv_div_by_zero() {
+    let _serial = serial();
     // sdiv w0, w1, w2  (w2 = 0) → w0 == 0, no #DE.
     let code = translate_straight_line(&[0x1AC2_0C20u32], 0x1000); // sdiv w0,w1,w2
     assert!(!code.windows(2).any(|w| w == [0x0F, 0x0B]), "no UD2");
@@ -4572,6 +4639,7 @@ fn sdiv_div_by_zero() {
 /// W value → wrong sign/magnitude. `-7 / 2 = -3`.
 #[test]
 fn sdiv_wform_negative() {
+    let _serial = serial();
     // sdiv w0, w1, w2 ; w1 = -7 (0xFFFF_FFF9 in low 32, dirty upper), w2 = 2.
     let code = translate_straight_line(&[0x1AC2_0C20u32], 0x1000);
     assert!(!code.windows(2).any(|w| w == [0x0F, 0x0B]), "no UD2");
@@ -4603,11 +4671,11 @@ fn sdiv_wform_negative() {
 /// 64, leaking 1-bits into the upper 32.
 #[test]
 fn ldrsb_wt_zext() {
+    let _serial = serial();
     use aether_translator::runtime::mmu::aether_mmu_set_window;
     // 8-byte buffer so the pinned window covers both the byte and halfword loads.
     // Low byte 0x80 (=-128 signed), next byte 0x80 too so the halfword reads 0x8000.
     let buf: [u8; 8] = [0x80, 0x80, 0, 0, 0, 0, 0, 0];
-    let _rt = GLOBAL_RT_LOCK.lock().unwrap();
     aether_mmu_set_window(buf.as_ptr() as u64, buf.len() as u64);
 
     // ldrsb w0, [x1]  = 0x39C00020 (signed byte, W-form: opc=0b11 → is_64=false)
@@ -4630,7 +4698,7 @@ fn ldrsb_wt_zext() {
     let got_h = ctx[0];
 
     aether_mmu_set_window(0, 0);
-    drop(_rt);
+    drop(_serial);
 
     assert_eq!(
         got_b, 0x0000_0000_FFFF_FF80,
@@ -4650,6 +4718,7 @@ fn ldrsb_wt_zext() {
 /// `rev16 w0, w0` of 0x12345678 → 0x34127856.
 #[test]
 fn rev16_swaps() {
+    let _serial = serial();
     // rev16 w0, w0  = 0x5AC00400
     let code = translate_straight_line(&[0x5AC0_0400u32], 0x1000);
     assert!(!code.windows(2).any(|w| w == [0x0F, 0x0B]), "no UD2");
@@ -4669,6 +4738,7 @@ fn rev16_swaps() {
 /// `rev32 x0, x0` of 0x1122334455667788 → 0x4433221188776655.
 #[test]
 fn rev32_xform() {
+    let _serial = serial();
     // rev32 x0, x0  = 0xDAC00800
     let code = translate_straight_line(&[0xDAC0_0800u32], 0x1000);
     assert!(!code.windows(2).any(|w| w == [0x0F, 0x0B]), "no UD2");
@@ -4688,6 +4758,7 @@ fn rev32_xform() {
 /// the lift special-cases lsb==0.
 #[test]
 fn extr_lsb0() {
+    let _serial = serial();
     // extr x0, x8, x9, #0  = 0x93C90100
     let code = translate_straight_line(&[0x93C9_0100u32], 0x1000);
     assert!(!code.windows(2).any(|w| w == [0x0F, 0x0B]), "no UD2");
@@ -4708,6 +4779,7 @@ fn extr_lsb0() {
 /// result = ((Wn:Wm) >> 4) over the 32-bit lane, independent of Xm[63:32].
 #[test]
 fn extr_wform_dirty_upper() {
+    let _serial = serial();
     // extr w0, w1, w2, #4  = 0x13821020
     let code = translate_straight_line(&[0x1382_1020u32], 0x1000);
     assert!(!code.windows(2).any(|w| w == [0x0F, 0x0B]), "no UD2");
@@ -4731,6 +4803,7 @@ fn extr_wform_dirty_upper() {
 /// spilled values, not the RAX scratch. a=10, b=37, c=5 → 10*37+5 = 375.
 #[test]
 fn madd_spilled() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
 
@@ -4778,6 +4851,7 @@ fn madd_spilled() {
 /// ~0x00FF = 0xFFFF_FFFF_FFFF_FF00.
 #[test]
 fn not_spilled() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
 
@@ -4818,6 +4892,7 @@ fn not_spilled() {
 /// compute the correct count. clz(0x0000_0000_0000_00FF) = 56 (64-bit form).
 #[test]
 fn clz_spilled() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
 
@@ -4867,6 +4942,7 @@ fn clz_spilled() {
 /// identity is `CLZ((x ^ (x<<1)) >> 1) - 1`.
 #[test]
 fn cls_absolute_values() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
 
@@ -4906,6 +4982,7 @@ fn cls_absolute_values() {
 
 #[test]
 fn cls_spilled() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
 
@@ -5001,6 +5078,7 @@ fn run_vecfp_4s(word: u32, v1: (u64, u64), v2: (u64, u64), vd_in: (u64, u64)) ->
 
 #[test]
 fn fadd_4s_executes() {
+    let _serial = serial();
     // fadd v0.4s, v1.4s, v2.4s (0x4E22D420).
     let a = pack4(1.0, 2.5, -3.0, 100.0);
     let b = pack4(0.5, 0.5, 3.0, 0.25);
@@ -5013,6 +5091,7 @@ fn fadd_4s_executes() {
 
 #[test]
 fn fsub_4s_executes() {
+    let _serial = serial();
     // fsub v0.4s, v1.4s, v2.4s (0x4EA2D420).
     let a = pack4(1.0, 2.5, -3.0, 100.0);
     let b = pack4(0.5, 0.5, 3.0, 0.25);
@@ -5025,6 +5104,7 @@ fn fsub_4s_executes() {
 
 #[test]
 fn fmul_4s_executes() {
+    let _serial = serial();
     // fmul v0.4s, v1.4s, v2.4s (0x6E22DC20).
     let a = pack4(2.0, 3.0, -4.0, 1.5);
     let b = pack4(2.5, 3.0, 0.5, 4.0);
@@ -5037,6 +5117,7 @@ fn fmul_4s_executes() {
 
 #[test]
 fn fdiv_4s_executes() {
+    let _serial = serial();
     // fdiv v0.4s, v1.4s, v2.4s (0x6E22FC20).
     let a = pack4(10.0, 9.0, -8.0, 1.0);
     let b = pack4(2.0, 3.0, 4.0, 4.0);
@@ -5049,6 +5130,7 @@ fn fdiv_4s_executes() {
 
 #[test]
 fn fmla_4s_executes() {
+    let _serial = serial();
     // fmla v0.4s, v1.4s, v2.4s (0x4E22CC20): Vd += Vn*Vm (Vd is read+written).
     let a = pack4(2.0, 3.0, 4.0, 5.0);
     let b = pack4(10.0, 10.0, 10.0, 10.0);
@@ -5062,6 +5144,7 @@ fn fmla_4s_executes() {
 
 #[test]
 fn fmls_4s_executes() {
+    let _serial = serial();
     // fmls v0.4s, v1.4s, v2.4s (0x4EA2CC20): Vd -= Vn*Vm.
     let a = pack4(2.0, 3.0, 4.0, 5.0);
     let b = pack4(10.0, 10.0, 10.0, 10.0);
@@ -5075,6 +5158,7 @@ fn fmls_4s_executes() {
 
 #[test]
 fn fmax_fmin_4s_execute() {
+    let _serial = serial();
     // fmax v0.4s (0x4E22F420) — finite operands: lanewise max.
     let a = pack4(1.0, 5.0, -3.0, 2.0);
     let b = pack4(4.0, 2.0, -1.0, 2.0);
@@ -5094,6 +5178,7 @@ fn fmax_fmin_4s_execute() {
 
 #[test]
 fn fmaxnm_fminnm_nan_fixup_execute() {
+    let _serial = serial();
     // FMAXNM/FMINNM (IEEE maxNum/minNum): a NaN lane yields the OTHER operand.
     let nan = f32::NAN;
     // lane0: Vn NaN, Vm 4.0   → maxNum = 4.0
@@ -5120,6 +5205,7 @@ fn fmaxnm_fminnm_nan_fixup_execute() {
 
 #[test]
 fn fabd_4s_executes() {
+    let _serial = serial();
     // fabd v0.4s, v1.4s, v2.4s (0x6EA2D420): |Vn - Vm| per lane.
     let a = pack4(1.0, -5.0, 3.0, 10.0);
     let b = pack4(4.0, 2.0, 3.0, -10.0);
@@ -5132,6 +5218,7 @@ fn fabd_4s_executes() {
 
 #[test]
 fn fcmeq_fcmgt_fcmge_reg_execute() {
+    let _serial = serial();
     // Compare ops produce an all-ones (0xFFFFFFFF) / all-zeros mask per lane.
     let ones = f32::from_bits(0xFFFF_FFFF); // the all-ones mask, viewed as f32
     let a = pack4(1.0, 5.0, 3.0, 2.0);
@@ -5161,6 +5248,7 @@ fn fcmeq_fcmgt_fcmge_reg_execute() {
 
 #[test]
 fn fcmp_vs_zero_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let ones: u32 = 0xFFFF_FFFF;
@@ -5189,6 +5277,7 @@ fn fcmp_vs_zero_execute() {
 
 #[test]
 fn fabs_fneg_fsqrt_4s_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let run_un = |word: u32, v1: (u64, u64)| -> [f32; 4] {
@@ -5227,6 +5316,7 @@ fn fabs_fneg_fsqrt_4s_execute() {
 /// D-form (`.2s`, Q=0) must zero Vd[127:64]. fadd v0.2s, v1.2s, v2.2s.
 #[test]
 fn fadd_2s_dform_zeroes_upper() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // fadd v0.2s, v1.2s, v2.2s — Q=0 form of 0x4E22D420 → clear bit30 → 0x0E22D420.
@@ -5250,6 +5340,7 @@ fn fadd_2s_dform_zeroes_upper() {
 /// Double-precision: fadd v0.2d, v1.2d, v2.2d — proves the `dbl` path (addpd).
 #[test]
 fn fadd_2d_executes() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // fadd v0.2d, v1.2d, v2.2d : U=0,opcode=11010,size=01 (a=0,sz=1),Q=1.
@@ -5294,6 +5385,7 @@ fn run_simd_word(word: u32, v1: (u64, u64), v2: (u64, u64), vd_in: (u64, u64)) -
 
 #[test]
 fn fmul_by_element_4s_executes() {
+    let _serial = serial();
     // fmul v0.4s, v1.4s, v2.s[1] (0x4FA29020): every lane *= Vm.s[1].
     let a = pack4(1.0, 2.0, 3.0, 4.0);
     let b = pack4(9.0, 10.0, 11.0, 12.0); // lane[1] = 10.0
@@ -5307,6 +5399,7 @@ fn fmul_by_element_4s_executes() {
 
 #[test]
 fn fmla_by_element_4s_executes() {
+    let _serial = serial();
     // fmla v0.4s, v1.4s, v2.s[0] (0x4F829020 with H=0,L=0 → idx 0): Vd += Vn*Vm.s[0].
     // Encoding: opcode=0001, idx=0 → 0x4F821020.
     let a = pack4(2.0, 3.0, 4.0, 5.0);
@@ -5322,6 +5415,7 @@ fn fmla_by_element_4s_executes() {
 
 #[test]
 fn scvtf_4s_executes() {
+    let _serial = serial();
     // scvtf v0.4s, v1.4s (0x4E21D820): signed int32 lane → f32.
     // NOTE: the genuine SCVTF.4s encoding has bit23=0 (0x4E21D820). The old test
     // word 0x4EA1D820 (bit23=1) is actually FRECPE — it "passed" only because the
@@ -5341,6 +5435,7 @@ fn scvtf_4s_executes() {
 
 #[test]
 fn fcvtzs_4s_executes() {
+    let _serial = serial();
     // fcvtzs v0.4s, v1.4s (0x4EA1B820): f32 lane → signed int32, round-toward-zero.
     let a = pack4(3.9, -3.9, 7.0, -0.5);
     let (lo, hi) = run_simd_word(0x4EA1_B820, a, (0, 0), (0, 0));
@@ -5355,6 +5450,7 @@ fn fcvtzs_4s_executes() {
 
 #[test]
 fn zip1_zip2_4s_execute() {
+    let _serial = serial();
     // zip1 v0.4s, v1.4s, v2.4s (0x4E823820): [n0, m0, n1, m1].
     let n = (1u64 | (2u64 << 32), 3u64 | (4u64 << 32)); // n = [1,2,3,4]
     let m = (5u64 | (6u64 << 32), 7u64 | (8u64 << 32)); // m = [5,6,7,8]
@@ -5369,6 +5465,7 @@ fn zip1_zip2_4s_execute() {
 
 #[test]
 fn zip1_16b_executes() {
+    let _serial = serial();
     // zip1 v0.16b, v1.16b, v2.16b (0x4E023820): interleave low 8 bytes of each.
     let n = (0x0706_0504_0302_0100u64, 0x0F0E_0D0C_0B0A_0908u64); // bytes 0x00..0x0F
     let m = (0x1716_1514_1312_1110u64, 0x1F1E_1D1C_1B1A_1918u64); // bytes 0x10..0x1F
@@ -5380,6 +5477,7 @@ fn zip1_16b_executes() {
 
 #[test]
 fn sqadd_uqadd_16b_execute() {
+    let _serial = serial();
     // uqadd v0.16b, v1.16b, v2.16b (0x6E220C20): unsigned saturating byte add.
     let a = (0x00FF_FF80_0102_03FEu64, 0); // includes 0xFF + ... saturation
     let b = (0x0001_0210_0101_0103u64, 0);
@@ -5399,6 +5497,7 @@ fn sqadd_uqadd_16b_execute() {
 
 #[test]
 fn uabd_16b_executes() {
+    let _serial = serial();
     // uabd v0.16b, v1.16b, v2.16b (0x6E227420): |Vn - Vm| per byte.
     let a = (0x0A14_1E28_FF00_8040u64, 0);
     let b = (0x0514_3214_0010_2040u64, 0);
@@ -5411,6 +5510,7 @@ fn uabd_16b_executes() {
 
 #[test]
 fn neg_abs_4s_execute() {
+    let _serial = serial();
     // neg v0.4s, v1.4s (0x6EA0B820): 0 - Vn per 32-bit lane.
     let a = (1u64 | (((-2i32) as u32 as u64) << 32), 0x7FFF_FFFFu64 | (0u64 << 32));
     let (lo, hi) = run_simd_word(0x6EA0_B820, a, (0, 0), (0, 0));
@@ -5427,6 +5527,7 @@ fn neg_abs_4s_execute() {
 
 #[test]
 fn frintm_frintp_scalar_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let run_un = |word: u32, s_in: f32| -> f32 {
@@ -5448,6 +5549,7 @@ fn frintm_frintp_scalar_execute() {
 
 #[test]
 fn scalar_addp_2d_executes() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // addp d0, v1.2d (0x5EF1B820): Vd.d[0] = Vn.d[0] + Vn.d[1], rest zeroed.
@@ -5541,6 +5643,7 @@ fn run_mulhigh_spilled(signed: bool, a: u64, b: u64) -> (u64, bool) {
 /// UMULH Xd,Xn,Xm with a,b,dst SPILLED == high-64 of (a as u128 * b as u128).
 #[test]
 fn umulh_spilled() {
+    let _serial = serial();
     let cases: [(u64, u64); 6] = [
         (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF), // → 0xFFFF_FFFF_FFFF_FFFE
         (1u64 << 63, 4),                                // 2^63 * 4 = 2^65 → high = 2
@@ -5563,6 +5666,7 @@ fn umulh_spilled() {
 /// SMULH Xd,Xn,Xm with a,b,dst SPILLED == high-64 of (a as i128 * b as i128).
 #[test]
 fn smulh_spilled() {
+    let _serial = serial();
     let cases: [(i64, i64); 6] = [
         (-3, 0x4000_0000_0000_0000),  // negative * large positive
         (-1, -1),                     // → high = 0
@@ -5590,6 +5694,7 @@ fn smulh_spilled() {
 /// b's RDX before the sum read it, the sum (ctx[1]) would be wrong.
 #[test]
 fn mulhigh_spilled_b_live_across_mul() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
 
@@ -5652,6 +5757,7 @@ fn mulhigh_spilled_b_live_across_mul() {
 /// MADD: a + n*m ; MSUB: a - n*m (low-64, wrapping).
 #[test]
 fn madd_msub_spilled() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
 
@@ -5726,6 +5832,7 @@ fn madd_msub_spilled() {
 /// reference. We verify the result limbs AND the final carry/borrow (ARM C bit).
 #[test]
 fn adcs_sbcs_spilled_chain() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
 
@@ -5870,6 +5977,7 @@ fn adcs_sbcs_spilled_chain() {
 /// upper 32 zero-extended after WriteGpr{sf:false}. Operands spilled.
 #[test]
 fn madd_wform_spilled() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
 
@@ -5940,11 +6048,11 @@ fn madd_wform_spilled() {
 /// load reads the buffer's real contents.
 #[test]
 fn spilled_pointer_load_base_uses_real_pointer_not_rax() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
     use aether_translator::ir::memory::{LoadTy, MemOrder};
 
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
     aether_mmu_set_window(0, u64::MAX); // M==0 flat path: xlate returns VA unchanged
     aether_mmu_flush_all();
 
@@ -6012,6 +6120,7 @@ fn spilled_pointer_load_base_uses_real_pointer_not_rax() {
 /// BoringSSL crypto hot path. Companion to the FP-store test below.
 #[test]
 fn spilled_fp_load_address_materializes_not_ud2() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
     use aether_translator::ir::memory::LoadTy;
@@ -6053,6 +6162,7 @@ fn spilled_fp_load_address_materializes_not_ud2() {
 /// the FP Store arm emits the spill-load + walker call (no UD2) for a spilled base.
 #[test]
 fn spilled_fp_store_address_materializes_not_ud2() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
     use aether_translator::ir::memory::StoreTy;
@@ -6099,11 +6209,11 @@ fn spilled_fp_store_address_materializes_not_ud2() {
 /// host counter, and asserts the memory was atomically incremented.
 #[test]
 fn spilled_atomic_address_does_rmw_on_real_pointer() {
+    let _serial = serial();
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
     use aether_translator::ir::memory::AtomicOp;
 
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
     aether_mmu_set_window(0, u64::MAX); // M==0 flat: xlate returns VA unchanged
     aether_mmu_flush_all();
 
@@ -6186,6 +6296,7 @@ fn spilled_atomic_address_does_rmw_on_real_pointer() {
 ///       cond false picks the CSINC-transformed `b`).
 #[test]
 fn csel_spilled_executes_both_directions() {
+    let _serial = serial();
     use aether_translator::decoder::Cond;
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
@@ -6285,6 +6396,7 @@ fn assert_no_ud2(code: &[u8], what: &str) {
 /// 0x20), 0xFF (−1) >> 2 = 0xFF, 0x7C (124) >> 2 = 0x1F.
 #[test]
 fn sshr_16b_arithmetic_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x4F0E_0420u32; // sshr v0.16b, v1.16b, #2
@@ -6309,6 +6421,7 @@ fn sshr_16b_arithmetic_execute() {
 /// logical PSRLQ would give 0x0800...). lane1 = 0xF0 >> 4 = 0x0F.
 #[test]
 fn sshr_2d_arithmetic_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x4F7C_0420u32; // sshr v0.2d, v1.2d, #4
@@ -6334,6 +6447,7 @@ fn sshr_2d_arithmetic_execute() {
 /// = 0x00 (wraps). Proves both the arithmetic shift AND the add-into-Vd step.
 #[test]
 fn ssra_16b_accumulate_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x4F0E_1420u32; // ssra v0.16b, v1.16b, #2
@@ -6356,6 +6470,7 @@ fn ssra_16b_accumulate_execute() {
 /// Vd 0x01 + (0xFFFF..FF00 >>4 = 0xFFFF..FFF0) = 0xFFFF..FFF1.
 #[test]
 fn ssra_2d_accumulate_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x4F7C_1420u32; // ssra v0.2d, v1.2d, #4
@@ -6384,6 +6499,7 @@ fn ssra_2d_accumulate_execute() {
 /// bit-toggle, not an abs-negate: (-2.0)*3.0 = -6.0 → +6.0.
 #[test]
 fn fnmul_scalar_single_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x1E22_8820u32; // fnmul s0, s1, s2
@@ -6420,6 +6536,7 @@ fn fnmul_scalar_single_execute() {
 /// FNMUL D0, D1, D2 = -(D1*D2). 2.0 * 3.0 → -6.0 (double form; sign bit 63).
 #[test]
 fn fnmul_scalar_double_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x1E62_8820u32; // fnmul d0, d1, d2
@@ -6459,6 +6576,7 @@ fn fnmul_scalar_double_execute() {
 ///   w3 = h6(2) + h7(-2)            = 0
 #[test]
 fn saddlp_4s_signed_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x4E60_2820u32; // saddlp v0.4s, v1.8h
@@ -6489,6 +6607,7 @@ fn saddlp_4s_signed_execute() {
 ///   h7 = 127 + 127    = 254   = 0x00FE
 #[test]
 fn saddlp_8h_signed_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x4E20_2820u32; // saddlp v0.8h, v1.16b
@@ -6513,6 +6632,7 @@ fn saddlp_8h_signed_execute() {
 /// A zero-extending path would give d1 = 0x8000_0000 + 0xFFFF_FFFF = 0x1_7FFF_FFFF.
 #[test]
 fn saddlp_2d_signed_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x4EA0_2820u32; // saddlp v0.2d, v1.4s
@@ -6534,6 +6654,7 @@ fn saddlp_2d_signed_execute() {
 ///   h3 = 2 + -2 = 0.
 #[test]
 fn saddlp_4h_dform_signed_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x0E20_2820u32; // saddlp v0.4h, v1.8b
@@ -6555,6 +6676,7 @@ fn saddlp_4h_dform_signed_execute() {
 /// Result = [max(n0,n1), max(n2,n3), max(n4,n5), max(n6,n7), max(m0,m1), …].
 #[test]
 fn umaxp_8h_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x6E62_A420u32; // umaxp v0.8h, v1.8h, v2.8h
@@ -6587,6 +6709,7 @@ fn umaxp_8h_execute() {
 /// vs 0x0000_0001 → signed min = 0x8000_0000.
 #[test]
 fn sminp_4s_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x4EA2_AC20u32; // sminp v0.4s, v1.4s, v2.4s
@@ -6613,6 +6736,7 @@ fn sminp_4s_execute() {
 /// signed max: max(0x8000=-32768, 0x0001)=0x0001.
 #[test]
 fn smaxp_4h_dform_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x0E62_A420u32; // smaxp v0.4h, v1.4h, v2.4h
@@ -6638,6 +6762,7 @@ fn smaxp_4h_dform_execute() {
 /// per source → 1 result each. unsigned min: umin(0xFFFF_FFFF, 0x0000_0001)=1.
 #[test]
 fn uminp_2s_dform_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x2EA2_AC20u32; // uminp v0.2s, v1.2s, v2.2s
@@ -6661,6 +6786,7 @@ fn uminp_2s_dform_execute() {
 /// byte 3 = 0xAB; result low 64 = 0xABAB_ABAB_ABAB_ABAB, high 64 zeroed.
 #[test]
 fn dup_8b_element_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x0E07_0420u32; // dup v0.8b, v1.b[3]
@@ -6681,6 +6807,7 @@ fn dup_8b_element_execute() {
 /// halfword[2] = 0xBEEF; result low 64 = 0xBEEF_BEEF_BEEF_BEEF, high 64 zeroed.
 #[test]
 fn dup_4h_element_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x0E0A_0420u32; // dup v0.4h, v1.h[2]
@@ -6710,6 +6837,7 @@ fn dup_4h_element_execute() {
 ///   CMLE #0 (<=0): [F, F, 0, F]
 #[test]
 fn cmgt_ge_lt_le_zero_4s_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let seed = |ctx: &mut [u64]| {
@@ -6749,6 +6877,7 @@ fn cmgt_ge_lt_le_zero_4s_execute() {
 /// bytes get 0xFF.
 #[test]
 fn cmgt_16b_zero_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x4E20_8820u32; // cmgt v0.16b, v1.16b, #0
@@ -6771,6 +6900,7 @@ fn cmgt_16b_zero_execute() {
 /// SSE4.2 pcmpgtq path). lane0 = −1 (<0 → all-ones); lane1 = +1 (not <0 → 0).
 #[test]
 fn cmlt_2d_zero_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let word = 0x4EE0_A820u32; // cmlt v0.2d, v1.2d, #0
@@ -6872,7 +7002,6 @@ fn run_casp_live_expected_64(matches: bool) -> (u64, u64, u64, u64, u64, u64) {
         block.push_op(IrOp::WriteGpr { reg: 11, src: v_eb, sf: true });
     }
 
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
     aether_mmu_set_window(0, u64::MAX);
     aether_mmu_flush_all();
 
@@ -6891,6 +7020,7 @@ fn run_casp_live_expected_64(matches: bool) -> (u64, u64, u64, u64, u64, u64) {
 /// with new_a/new_b, so a later read of expected_a/expected_b saw new_*.
 #[test]
 fn casp_match_does_not_clobber_live_expected() {
+    let _serial = serial();
     let exp_a = 0xAAAA_AAAA_1111_2222u64;
     let exp_b = 0xBBBB_BBBB_3333_4444u64;
     let new_a = 0xCCCC_CCCC_5555_6666u64;
@@ -6926,6 +7056,7 @@ fn casp_match_does_not_clobber_live_expected() {
 /// expected_b here).
 #[test]
 fn casp_mismatch_does_not_clobber_live_expected() {
+    let _serial = serial();
     let exp_a = 0xAAAA_AAAA_1111_2222u64;
     let exp_b = 0xBBBB_BBBB_3333_4444u64;
     let mem_a = 0x0DEF_0DEF_0DEF_0DEFu64;
@@ -6946,6 +7077,7 @@ fn casp_mismatch_does_not_clobber_live_expected() {
 /// home regs. Build a hand IR block with 4-byte elements and a live re-read.
 #[test]
 fn caspw_match_does_not_clobber_live_expected() {
+    let _serial = serial();
     use aether_translator::ir::memory::MemOrder;
     use aether_translator::ir::value::IrValueKind;
     use aether_translator::ir::{IrFunction, IrOp};
@@ -6987,7 +7119,6 @@ fn caspw_match_does_not_clobber_live_expected() {
         block.push_op(IrOp::WriteGpr { reg: 11, src: v_eb, sf: true });
     }
 
-    let _mmu = MMU_GLOBAL_LOCK.lock().unwrap();
     aether_mmu_set_window(0, u64::MAX);
     aether_mmu_flush_all();
     let code = lower_built_func(&func);
@@ -7033,6 +7164,7 @@ fn caspw_match_does_not_clobber_live_expected() {
 /// hold the single-precision 2.25 (0x40100000).
 #[test]
 fn fcvt_narrow_zeroes_upper_bits_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -7093,6 +7225,7 @@ fn fcvt_narrow_zeroes_upper_bits_execute() {
 /// The double FMADD case (n=m=1+2^-27, a=-1.0) is likewise fused-distinguishing.
 #[test]
 fn fma_scalar_fused_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -7183,6 +7316,7 @@ fn fma_scalar_fused_execute() {
 /// wrap: |1 - 0xFFFF_FFFF| unsigned = 0xFFFF_FFFE (a SIGNED abs-diff gives 2).
 #[test]
 fn uabd_uaba_4s_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // 4 s32 lanes packed 2-per-u64, little-endian: lo=[lane0|lane1], hi=[lane2|lane3].
@@ -7258,6 +7392,7 @@ fn uabd_uaba_4s_execute() {
 /// same bits (unsigned 4294967295) must give +4294967295.0 (0x4F800000).
 #[test]
 fn scvtf_ucvtf_wform_sign_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -7345,6 +7480,7 @@ fn scvtf_ucvtf_wform_sign_execute() {
 /// maps NaN -> 0. Cover the +overflow / +inf / NaN / -inf directions per width.
 #[test]
 fn fcvtz_scalar_saturate_execute() {
+    let _serial = serial();
     let run = |word: u32, what: &str, src_bits: u64, is_dbl: bool| -> u64 {
         use aether_translator::runtime::context::vec_disp;
         let vd = |r: u8| (vec_disp(r) as usize) / 8;
@@ -7457,6 +7593,7 @@ fn fcvtz_scalar_saturate_execute() {
 /// where the fused result differs bit-for-bit from the unfused one.
 #[test]
 fn vector_fmla_fmls_fused_execute() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let pack = |l0: u32, l1: u32| (l0 as u64) | ((l1 as u64) << 32);
@@ -7544,6 +7681,7 @@ fn vector_fmla_fmls_fused_execute() {
 /// arithmetic-right path (`0x80000000 >> 4`).
 #[test]
 fn sshl_ushl_register_variable_shift() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let pack = |lo: u32, hi: u32| (lo as u64) | ((hi as u64) << 32);
@@ -7611,6 +7749,7 @@ fn sshl_ushl_register_variable_shift() {
 /// bits and replaces the rest with `Vn >>u shift` — per byte for .16b #3.
 #[test]
 fn sri_shift_right_insert() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // Build a byte-lane vector from 8 bytes (low 64).
@@ -7646,6 +7785,7 @@ fn sri_shift_right_insert() {
 /// bits and replaces the rest with `Vn << shift` — per byte for .16b #3.
 #[test]
 fn sli_shift_left_insert() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let b8 = |b: [u8; 8]| u64::from_le_bytes(b);
@@ -7679,6 +7819,7 @@ fn sli_shift_left_insert() {
 /// source & destination ranges.
 #[test]
 fn saturating_narrow_shift() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // Pack 8 signed/unsigned halfwords (16-bit) into a 128-bit reg (lo/hi u64).
@@ -7772,6 +7913,7 @@ fn saturating_narrow_shift() {
 /// ADDP (pairwise add) at the narrow half-register sizes .4H / .2S — the G12 gap.
 #[test]
 fn addp_narrow_sizes() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -7808,6 +7950,7 @@ fn addp_narrow_sizes() {
 /// UZP1/UZP2 at the narrow sizes .8b / .16b / .8h — the G1 gap.
 #[test]
 fn uzp_narrow_sizes() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let b8 = |b: [u8; 8]| u64::from_le_bytes(b);
@@ -7881,6 +8024,7 @@ fn uzp_narrow_sizes() {
 /// TRN1/TRN2 at the narrow sizes .8b / .16b / .8h — the G1 gap.
 #[test]
 fn trn_narrow_sizes() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let b8 = |b: [u8; 8]| u64::from_le_bytes(b);
@@ -7957,6 +8101,7 @@ fn trn_narrow_sizes() {
 /// sat_s8( (src + (1<<2)) >> 3 ).
 #[test]
 fn sqrshrn_rounding_narrow() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let packh = |h: [u16; 8]| -> (u64, u64) {
@@ -7999,6 +8144,7 @@ fn sqrshrn_rounding_narrow() {
 /// takes the low 8 bits of the rounded shift.
 #[test]
 fn rshrn_modular_narrow_no_saturation() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let packh = |h: [u16; 8]| -> (u64, u64) {
@@ -8044,6 +8190,7 @@ fn rshrn_modular_narrow_no_saturation() {
 /// byte gives +127 = 0x7F — NOT the wrong-side 0x80 the overflow used to produce.
 #[test]
 fn sqrshrn2_signed_saturate_no_lane_overflow() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let packh = |h: [u16; 8]| -> (u64, u64) {
@@ -8088,6 +8235,7 @@ fn sqrshrn2_signed_saturate_no_lane_overflow() {
 ///   sqrshrun v0.8b, v1.8h, #7 (0x2F098C20): result = sat_u8((src_s16 + 0x40) >> 7)
 #[test]
 fn sqrshrun_signed_to_unsigned_rounding_narrow() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let packh = |h: [u16; 8]| -> (u64, u64) {
@@ -8138,6 +8286,7 @@ fn sqrshrun_signed_to_unsigned_rounding_narrow() {
 /// the-other rule for both operand positions.
 #[test]
 fn fmaxnm_fminnm_scalar_ignore_nan() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let qnan32: u32 = 0x7FC0_0000;
@@ -8196,6 +8345,7 @@ fn fmaxnm_fminnm_scalar_ignore_nan() {
 /// (2.5→3, -2.5→-3, distinct from N's ties-to-even 2.5→2). Also checks FRINTN .2d.
 #[test]
 fn frint_vector_round_to_integral() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let pack = |lo: u32, hi: u32| (lo as u64) | ((hi as u64) << 32);
@@ -8244,6 +8394,7 @@ fn frint_vector_round_to_integral() {
 /// would overflow the element. Byte (.16b) and word (.4s) widths.
 #[test]
 fn halving_add_no_overflow() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -8315,6 +8466,7 @@ fn halving_add_no_overflow() {
 /// element-width `a-b` would underflow. Byte, halfword, and word widths.
 #[test]
 fn halving_sub_no_overflow() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
 
@@ -8388,6 +8540,7 @@ fn halving_sub_no_overflow() {
 /// finite lanes still get the correct max/min.
 #[test]
 fn fmax_fmin_vector_propagate_nan() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let pack = |lo: u32, hi: u32| (lo as u64) | ((hi as u64) << 32);
@@ -8443,6 +8596,7 @@ fn fmax_fmin_vector_propagate_nan() {
 /// the leak (pre-fix produced 0xFEFEFEFE in bytes 4..7).
 #[test]
 fn addp_8b_dform_uses_vm_not_vn_high_half() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // addp v0.8b, v1.8b, v2.8b
@@ -8474,6 +8628,7 @@ fn addp_8b_dform_uses_vm_not_vn_high_half() {
 /// pre-fix lowering produced 0xFFFFFFFF in bytes [4..7] (from V1.hi = 0xFFFF…).
 #[test]
 fn umaxp_8b_dform_uses_vm_not_vn_high_half() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // umaxp v0.8b, v1.8b, v2.8b
@@ -8502,6 +8657,7 @@ fn umaxp_8b_dform_uses_vm_not_vn_high_half() {
 /// byte range 1..=8. SSHR #8 must give the pure per-byte sign fill.
 #[test]
 fn sshr_16b_by_8_is_pure_sign_fill() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // sshr v0.16b, v1.16b, #8
@@ -8525,6 +8681,7 @@ fn sshr_16b_by_8_is_pure_sign_fill() {
 /// mask `0xFF >> (8 & 7) = 0xFF` leaked the neighbouring byte through psrlw.
 #[test]
 fn ushr_16b_by_8_is_zero() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // ushr v0.16b, v1.16b, #8
@@ -8548,6 +8705,7 @@ fn ushr_16b_by_8_is_zero() {
 /// to 0 so it accumulated 0x01 + 0x80 = 0x81 per byte.
 #[test]
 fn ssra_16b_by_8_accumulates_sign_fill() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // ssra v0.16b, v1.16b, #8
@@ -8573,6 +8731,7 @@ fn ssra_16b_by_8_accumulates_sign_fill() {
 /// body (NO UD2); after, it emits UD2.
 #[test]
 fn integer_mla_by_element_is_fail_loud() {
+    let _serial = serial();
     use aether_translator::ir::ops::VecFpOp;
     use aether_translator::ir::{IrBlock, IrOp};
     let mut func = IrFunction::new(0x1000);
@@ -8602,6 +8761,7 @@ fn integer_mla_by_element_is_fail_loud() {
 /// UD2) after the guard. mul v0.4s, v1.4s, v2.s[0]: each lane = Vn * Vm[0].
 #[test]
 fn integer_mul_by_element_still_lowers() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // mul v0.4s, v1.4s, v2.s[0]
@@ -8642,6 +8802,7 @@ fn fp_run1(word: u32, setup: impl Fn(&mut [u64])) -> [u64; CTX_U64S] {
 /// toward +0 (FMAX) / -0 (FMIN). Bare maxsd/minsd return the 2nd source on both.
 #[test]
 fn fp_scalar_fmax_fmin_nan_and_signed_zero() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     const QNAN: u64 = 0x7FF8_0000_0000_0000;
@@ -8672,6 +8833,7 @@ fn fp_scalar_fmax_fmin_nan_and_signed_zero() {
 /// F7 - FMAXNM/FMINNM: ignore-NaN (return the non-NaN operand) AND +-0 tie-break.
 #[test]
 fn fp_scalar_fmaxnm_fminnm_nan_and_signed_zero() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     const QNAN: u64 = 0x7FF8_0000_0000_0000;
@@ -8692,6 +8854,7 @@ fn fp_scalar_fmaxnm_fminnm_nan_and_signed_zero() {
 /// NaN -> 0). Bare cvttps2dq gives 0x80000000 for NaN and positive overflow.
 #[test]
 fn fp_vector_fcvtzs_saturation() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     let nan = 0x7FC0_0000u64;
@@ -8712,6 +8875,7 @@ fn fp_vector_fcvtzs_saturation() {
 /// cvtdq2ps). It is not implemented, so it must fail loud (translate error or UD2).
 #[test]
 fn fp_frecpe_is_fail_loud_not_int_convert() {
+    let _serial = serial();
     // FRECPE v0.4s, v1.4s = 0x4EA1D820.
     match decode_instruction(0x4EA1_D820u32) {
         Err(_) => { /* fail-loud at decode - correct */ }
@@ -8727,6 +8891,7 @@ fn fp_frecpe_is_fail_loud_not_int_convert() {
 /// execute via cvtdq2ps (previously fell through to Reserved / translate-fail).
 #[test]
 fn fp_vector_scvtf_4s_executes() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     decode_instruction(0x4E21_D820u32).expect("SCVTF v0.4s,v1.4s must decode");
@@ -8744,6 +8909,7 @@ fn fp_vector_scvtf_4s_executes() {
 /// F4 - FCVTAS (round-to-nearest ties-AWAY, FP->int). 2.5f -> 3, 0.5f -> 1, -2.5f -> -3.
 #[test]
 fn fp_fcvtas_ties_away() {
+    let _serial = serial();
     // FCVTAS W0, S1 = 0x1E240020. Result GPR W0 lives at ctx[0].
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
@@ -8763,6 +8929,7 @@ fn fp_fcvtas_ties_away() {
 /// F4 - scalar FRINTA (round-to-integral, ties AWAY, FP result). 2.5 -> 3.0, -0.5 -> -1.0.
 #[test]
 fn fp_scalar_frinta_ties_away() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // FRINTA D0, D1 = 0x1E664020.
@@ -8779,6 +8946,7 @@ fn fp_scalar_frinta_ties_away() {
 /// round to 1.0). Halfway cases still round away.
 #[test]
 fn fp_vector_frinta_no_double_round() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // FRINTA v0.4s, v1.4s = 0x6E218820. lanes [0.49999997, 2.5, -0.5, 2^23+1].
@@ -8800,6 +8968,7 @@ fn fp_vector_frinta_no_double_round() {
 /// acc=2^-24 -> fused 0x3F801001; unfused mul+add rounds to 0x3F801000.
 #[test]
 fn fp_byelem_fmla_fused() {
+    let _serial = serial();
     use aether_translator::runtime::context::vec_disp;
     let vd = |r: u8| (vec_disp(r) as usize) / 8;
     // FMLA v0.4s, v1.4s, v2.s[0] = 0x4F821020.
@@ -8826,6 +8995,7 @@ fn fp_byelem_fmla_fused() {
 /// (0 - 0x10) → borrow → C=0, negative → N=1 (the inverse).
 #[test]
 fn cmp_sp_imm_compares_sp_not_xzr() {
+    let _serial = serial();
     /// SP lives at byte 0xF8 -> u64 slot 31.
     const SP_SLOT: usize = 0x0F8 / 8;
     // CMP SP, #0x10 = SUBS XZR, SP, #16 = 0xF10043FF.

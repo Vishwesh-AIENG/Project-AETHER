@@ -1,7 +1,7 @@
 //! AT-23: Self-Modifying Code Handling — test suite.
 
 use aether_translator::runtime::smc_handler::{
-    init_smc_handler, RxPageRange, SmcConfig, SmcError, SmcPhase, SmcState, SmcWatcher,
+    init_smc_handler, RxPageRange, SmcConfig, SmcError, SmcPhase, SmcWatcher,
 };
 
 // ── RxPageRange ───────────────────────────────────────────────────────────────

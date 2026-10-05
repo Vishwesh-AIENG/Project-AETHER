@@ -2522,7 +2522,7 @@ fn barrier_of(crm: u8) -> BarrierDomain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decoder::{decode_instruction, AccessSize, AddrMode};
+    use crate::decoder::decode_instruction;
     use crate::ir::BlockId;
 
     fn fresh_block() -> IrBlock {
