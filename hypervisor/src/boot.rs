@@ -505,6 +505,83 @@ impl MemoryMap {
             .copied()
             .max_by_key(|r| r.size)
     }
+
+    /// Largest Conventional block lying entirely OUTSIDE `[lo, hi)`.
+    ///
+    /// Hypervisor-private memory (Stage 2 tables, SMMU tables) must never sit
+    /// inside the guest's identity-mapped RAM window: a guest that owns those
+    /// pages can rewrite its own Stage 2 mappings and escape the partition.
+    /// Regions straddling the window are clipped to the parts outside it.
+    pub fn largest_conventional_outside(&self, lo: u64, hi: u64) -> Option<MemoryRegion> {
+        largest_outside(self.iter().copied(), lo, hi)
+    }
+}
+
+/// Pure core of [`MemoryMap::largest_conventional_outside`] (host-tested).
+pub fn largest_outside<I: Iterator<Item = MemoryRegion>>(
+    regions: I,
+    lo: u64,
+    hi: u64,
+) -> Option<MemoryRegion> {
+    let mut best: Option<MemoryRegion> = None;
+    for r in regions.filter(|r| r.kind == MemoryRegionKind::Conventional && r.size > 0) {
+        let (start, end) = (r.base, r.base.saturating_add(r.size));
+        // Piece below the window, then the piece above it.
+        let pieces = [(start, end.min(lo)), (start.max(hi), end)];
+        for (b, e) in pieces {
+            if e > b && best.map_or(true, |x| e - b > x.size) {
+                best = Some(MemoryRegion { base: b, size: e - b, kind: r.kind });
+            }
+        }
+    }
+    best
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    #[test]
+    fn overlap_guard() {
+        // Observed failure: EL2 SP 0x4768_4210 inside the guest window.
+        assert!(overlaps(0x4768_0000, 0x1_0000, WIN_LO, WIN_HI));
+        // Hypervisor image observed at 0x1_3C67_xxxx: outside.
+        assert!(!overlaps(0x1_3C67_0000, 0x1_0000, WIN_LO, WIN_HI));
+        // Touching but not overlapping either edge.
+        assert!(!overlaps(WIN_HI, 0x1000, WIN_LO, WIN_HI));
+        assert!(!overlaps(WIN_LO - 0x1000, 0x1000, WIN_LO, WIN_HI));
+        assert!(overlaps(WIN_LO - 0x1000, 0x1001, WIN_LO, WIN_HI));
+    }
+
+    fn conv(base: u64, size: u64) -> MemoryRegion {
+        MemoryRegion { base, size, kind: MemoryRegionKind::Conventional }
+    }
+
+    const WIN_LO: u64 = 0x4000_0000; // ANDROID_IPA_BASE
+    const WIN_HI: u64 = 0xC000_0000; // + 2 GiB
+
+    #[test]
+    fn observed_qemu_layout_is_clipped_above_the_guest_window() {
+        // QEMU virt -m 4G: largest region 0x4800_0000 + 3910 MiB (observed).
+        let r = largest_outside([conv(0x4800_0000, 3910 << 20)].into_iter(), WIN_LO, WIN_HI).unwrap();
+        assert_eq!(r.base, WIN_HI);
+        assert_eq!(r.base + r.size, 0x4800_0000 + (3910 << 20));
+    }
+
+    #[test]
+    fn region_entirely_inside_window_is_never_chosen() {
+        let r = largest_outside([conv(0x5000_0000, 1 << 30), conv(0x1_0000_0000, 64 << 20)].into_iter(), WIN_LO, WIN_HI).unwrap();
+        assert_eq!((r.base, r.size), (0x1_0000_0000, 64 << 20));
+        assert!(largest_outside([conv(0x5000_0000, 1 << 30)].into_iter(), WIN_LO, WIN_HI).is_none());
+    }
+
+    #[test]
+    fn non_conventional_ignored_and_low_piece_usable() {
+        let mut rt = conv(0x1_0000_0000, 8 << 30);
+        rt.kind = MemoryRegionKind::RuntimeServices;
+        let r = largest_outside([rt, conv(0x3000_0000, 0x2000_0000)].into_iter(), WIN_LO, WIN_HI).unwrap();
+        assert_eq!((r.base, r.size), (0x3000_0000, 0x1000_0000)); // clipped at WIN_LO
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -990,20 +1067,47 @@ impl GuestLaunch {
             // all four interrupt mask bits set.
             write_spsr_el2(spsr_el2::GUEST_ENTRY_EL1H);
 
-            // Load DTB address into x0, zero x1–x3, execute ERET.
-            // noreturn: the processor switches to EL1 and never comes back
-            // to EL2 through this call frame.
+            // Switch SP_EL2 to the hypervisor-owned primary stack, then load
+            // the DTB address into x0, zero x1–x3 and ERET. Every later EL2
+            // exception on this core builds its GuestContext frame on SP_EL2,
+            // so it MUST NOT stay on the firmware stack: UEFI allocates that
+            // in low DRAM the guest owns, and once Linux reuses those pages
+            // (first observed when init starts) the guest overwrites EL2's
+            // live frames and return addresses — a hang and an isolation break.
+            // noreturn: nothing after this uses the old stack.
             asm!(
+                "mov sp, {stack_top}",
                 "mov x0, {dtb}",
                 "mov x1, xzr",
                 "mov x2, xzr",
                 "mov x3, xzr",
                 "eret",
+                stack_top = in(reg) primary_el2_stack_top(),
                 dtb = in(reg) self.dtb_pa,
                 options(noreturn, nostack)
             );
         }
     }
+}
+
+/// Size of the boot core's EL2 exception stack (inside the hypervisor image).
+pub const PRIMARY_EL2_STACK_SIZE: usize = 64 * 1024;
+
+#[repr(C, align(16))]
+struct PrimaryEl2Stack([u8; PRIMARY_EL2_STACK_SIZE]);
+
+static mut PRIMARY_EL2_STACK: PrimaryEl2Stack = PrimaryEl2Stack([0; PRIMARY_EL2_STACK_SIZE]);
+
+/// Top (initial SP, 16-byte aligned) of the boot core's EL2 stack.
+pub fn primary_el2_stack_top() -> u64 {
+    core::ptr::addr_of!(PRIMARY_EL2_STACK) as u64 + PRIMARY_EL2_STACK_SIZE as u64
+}
+
+/// True iff `[base, base+len)` overlaps the guest RAM window `[lo, hi)`.
+/// Used to refuse launching when hypervisor-private memory (the image, its
+/// EL2 stacks) would be guest-writable.
+pub const fn overlaps(base: u64, len: u64, lo: u64, hi: u64) -> bool {
+    base < hi && base.saturating_add(len) > lo
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

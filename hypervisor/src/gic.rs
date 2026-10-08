@@ -94,7 +94,16 @@ mod gicc_offset {
     /// Physical base address of this CPU's Redistributor frame (RD_base).
     /// Offset 60, 8 bytes (u64).
     pub const GICR_PA: usize = 60;
+
+    /// GICC Flags (u32). Bit 0 = Enabled: the PE is usable.
+    pub const FLAGS: usize = 12;
+
+    /// MPIDR of this PE (u64; Aff3 in [39:32], Aff2..Aff0 in [23:0]).
+    pub const MPIDR: usize = 68;
 }
+
+/// Upper bound on PEs recorded from the MADT (matches cpu::MAX_CORES).
+pub const MADT_MAX_CPUS: usize = 16;
 
 /// GIC Distributor MADT structure — field byte offsets.
 /// Source: ACPI 6.4 Table 5.57 (total length = 24 bytes).
@@ -130,6 +139,12 @@ pub struct GicAddrs {
     /// Physical interrupt ID (GSIV) of the VGIC maintenance interrupt.
     /// Typically INTID 25 (a PPI) on most Snapdragon platforms.
     pub maint_intid: u32,
+    /// Number of ENABLED PEs (GICC entries with Flags.Enabled), in MADT order.
+    /// The boot core is listed first by convention. Each PE has one GICR
+    /// frame, so this is also how many Redistributors exist to wake.
+    pub cpu_count: usize,
+    /// MPIDR of each enabled PE (first `cpu_count` entries valid).
+    pub cpu_mpidr: [u64; MADT_MAX_CPUS],
 }
 
 /// Walk the MADT at `madt_pa` and extract all GIC component addresses.
@@ -155,6 +170,8 @@ pub unsafe fn discover_gic_from_madt(madt_pa: u64) -> Option<GicAddrs> {
     let mut gicr_pa: Option<u64> = None;
     let mut gicv_pa: u64 = 0;
     let mut maint_intid: u32 = 25; // Safe default (INTID 25 is the standard maintenance PPI)
+    let mut cpu_count = 0usize;
+    let mut cpu_mpidr = [0u64; MADT_MAX_CPUS];
 
     let entries_end = madt_pa as usize + total_len;
     let mut pos = madt_pa as usize + MADT_IC_ENTRIES_OFFSET;
@@ -183,6 +200,16 @@ pub unsafe fn discover_gic_from_madt(madt_pa: u64) -> Option<GicAddrs> {
                 }
             }
             MADT_TYPE_GICC if ic_len >= gicc_offset::GICR_PA + 8 => {
+                // Record every ENABLED PE (Flags bit 0) with its MPIDR.
+                if ic_len >= gicc_offset::MPIDR + 8 {
+                    let flags = unsafe { ptr::read_unaligned((pos + gicc_offset::FLAGS) as *const u32) };
+                    if flags & 1 != 0 && cpu_count < MADT_MAX_CPUS {
+                        cpu_mpidr[cpu_count] = unsafe {
+                            ptr::read_unaligned((pos + gicc_offset::MPIDR) as *const u64)
+                        };
+                        cpu_count += 1;
+                    }
+                }
                 // First GICC entry gives us GICV PA and maintenance INTID.
                 // GICR_PA here is the per-CPU GICR — we prefer the GICR range
                 // entry (type 0x0D) when present, but fall back to GICC.GICR_PA.
@@ -219,6 +246,8 @@ pub unsafe fn discover_gic_from_madt(madt_pa: u64) -> Option<GicAddrs> {
         gicr_pa: gicr_pa.unwrap_or(0),
         gicv_pa,
         maint_intid,
+        cpu_count,
+        cpu_mpidr,
     })
 }
 
@@ -452,12 +481,25 @@ pub mod icc {
                 "msr icc_pmr_el1, {pmr}",
                 // Binary point: 0 = no preemption group splitting.
                 "msr icc_bpr1_el1, {zero}",
+                // EOImode=1 (ICC_CTLR_EL1 bit 1): split priority-drop (EOIR)
+                // from deactivation (DIR). MANDATORY for HW-linked List
+                // Registers: with EOImode=0, EOIR also DEACTIVATES, so a
+                // still-asserted level interrupt (the guest's virtual timer)
+                // re-pends instantly and is retaken at EL2 before the guest
+                // runs one instruction — an IRQ storm that freezes boot right
+                // after sched_clock. With EOImode=1 the physical IRQ stays
+                // Active until the guest's virtual EOI deactivates it via the
+                // HW link (IHI0069 §4.1.1, §6.2; KVM host runs split mode).
+                "mrs {t}, icc_ctlr_el1",
+                "orr {t}, {t}, #2",
+                "msr icc_ctlr_el1, {t}",
                 // Enable Group 1 NS interrupts on this CPU.
                 "msr icc_igrpen1_el1, {grp1}",
                 "isb",
                 pmr  = in(reg) 0xFFu64,
                 zero = in(reg) 0u64,
                 grp1 = in(reg) 1u64,
+                t    = out(reg) _,
                 options(nomem, nostack, preserves_flags),
             );
         }
@@ -1128,6 +1170,17 @@ pub unsafe fn handle_physical_irq(vgic: &mut VGicState) {
         // needed for PPIs in non-HW-linked mode).
         unsafe { icc::eoir1(intid) };
         unsafe { icc::dir1(intid) };
+        return;
+    }
+
+    // Step 2b: SGIs (INTID 0–15) are guest IPIs re-issued physically by EL2
+    // (see sysreg_trap::SysRegAction::ForwardSgi). SGIs are never HW-linked
+    // (an LR with HW=1 needs a pINTID >= 16; KVM likewise injects SGIs in
+    // software): finish the physical SGI here and inject a HW=0 virtual SGI.
+    if intid < 16 {
+        unsafe { icc::eoir1(intid) };
+        unsafe { icc::dir1(intid) };
+        let _ = unsafe { vgic.inject_sw(intid, DEFAULT_FORWARD_PRIORITY) };
         return;
     }
 

@@ -201,6 +201,14 @@ pub enum ExitReason {
     /// (re-execute the faulting instruction after AETHER resolved the fault).
     RetryInstruction,
 
+    /// The trapped instruction was fully emulated by EL2: resume at the
+    /// NEXT instruction (ELR_EL2 += 4). Required for every trap whose
+    /// preferred return address is the trapped instruction itself — MSR/MRS
+    /// (EC 0x18), WFI/WFE (EC 0x01), SMC under HCR_EL2.TSC (EC 0x17), and
+    /// emulated MMIO data aborts (EC 0x24). Returning without advancing
+    /// re-executes the instruction forever (ARM ARM D1.10.1).
+    Emulated,
+
     /// A fatal condition was encountered. The hypervisor halts.
     /// Used during bring-up when unhandled exceptions must not silently corrupt state.
     Halt,
@@ -235,7 +243,7 @@ pub unsafe extern "C" fn aether_handle_sync(ctx: *mut GuestContext) -> ExitReaso
     let ec = ExceptionClass::from_esr(esr);
     let ctx = unsafe { &mut *ctx };
 
-    match ec {
+    let reason = match ec {
         ExceptionClass::Hvc64 => handle_hvc(ctx, esr),
         ExceptionClass::Smc64 => handle_smc(ctx, esr),
         ExceptionClass::WfxTrap => handle_wfx(ctx, esr),
@@ -243,6 +251,68 @@ pub unsafe extern "C" fn aether_handle_sync(ctx: *mut GuestContext) -> ExitReaso
         ExceptionClass::InstructionAbortLow => handle_inst_abort(ctx, esr),
         ExceptionClass::SystemRegister => handle_sysreg_trap(ctx, esr),
         _ => ExitReason::Halt, // unhandled EC — halt during bring-up
+    };
+    // The vector epilogue unconditionally restores the context and ERETs to
+    // ctx.elr_el2, so every ExitReason must be realised HERE.
+    finish_exit(ctx, reason, esr)
+}
+
+/// Apply an `ExitReason` to the saved context before the vector epilogue
+/// ERETs. `Halt` never returns: it reports and parks this core, instead of
+/// silently re-entering the guest at the faulting PC (which turns any
+/// unhandled trap into an invisible infinite trap loop).
+fn finish_exit(ctx: &mut GuestContext, reason: ExitReason, esr: u64) -> ExitReason {
+    match reason {
+        ExitReason::ReturnToGuest | ExitReason::RetryInstruction => {}
+        ExitReason::Emulated => ctx.elr_el2 = ctx.elr_el2.wrapping_add(4),
+        ExitReason::Halt => halt_with_report(ctx, esr),
+    }
+    reason
+}
+
+/// Report an exception taken AT EL2 (a hypervisor fault) and park this core.
+/// Called from the EL2h sync vector on a dedicated fault stack.
+#[unsafe(no_mangle)]
+pub extern "C" fn aether_el2_fault_report(esr: u64, elr: u64, spsr: u64, far: u64) -> ! {
+    // SAFETY: QEMU virt PL011 identity-mapped by UEFI; core is parked after.
+    let uart = unsafe { Uart::new(0x0900_0000) };
+    unsafe {
+        uart.puts("\r\n[EL2] FAULT AT EL2  ESR=");
+        uart.puthex64(esr);
+        uart.puts(" EC=");
+        uart.puthex64((esr >> 26) & 0x3F);
+        uart.puts(" ELR=");
+        uart.puthex64(elr);
+        uart.puts(" SPSR=");
+        uart.puthex64(spsr);
+        uart.puts(" FAR=");
+        uart.puthex64(far);
+        uart.puts("\r\n");
+    }
+    loop {
+        // SAFETY: parking the core.
+        unsafe { core::arch::asm!("wfe", options(nomem, nostack)) };
+    }
+}
+
+/// Report an unrecoverable guest exit on the UART and park this core forever.
+fn halt_with_report(ctx: &GuestContext, esr: u64) -> ! {
+    // SAFETY: QEMU virt PL011 identity-mapped by UEFI; EL2 exception context.
+    let uart = unsafe { Uart::new(0x0900_0000) };
+    unsafe {
+        uart.puts("\r\n[EL2] HALT: unhandled guest exit  ESR=");
+        uart.puthex64(esr);
+        uart.puts(" EC=");
+        uart.puthex64((esr >> 26) & 0x3F);
+        uart.puts(" ELR=");
+        uart.puthex64(ctx.elr_el2);
+        uart.puts(" SPSR=");
+        uart.puthex64(ctx.spsr_el2);
+        uart.puts("\r\n");
+    }
+    loop {
+        // SAFETY: parking the core; interrupts are masked on EL2 entry.
+        unsafe { core::arch::asm!("wfe", options(nomem, nostack)) };
     }
 }
 
@@ -274,9 +344,14 @@ pub unsafe extern "C" fn aether_handle_irq(_ctx: *mut GuestContext) -> ExitReaso
 /// # Safety
 /// Must be called from EL2.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn aether_handle_serror(_ctx: *mut GuestContext) -> ExitReason {
+pub unsafe extern "C" fn aether_handle_serror(ctx: *mut GuestContext) -> ExitReason {
     // Unrecoverable at this stage.
-    ExitReason::Halt
+    let esr: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, esr_el2", out(reg) esr,
+                         options(nomem, nostack, preserves_flags));
+    }
+    halt_with_report(unsafe { &*ctx }, esr)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -341,7 +416,8 @@ fn handle_smc(ctx: &mut GuestContext, _esr: u64) -> ExitReason {
         func_id, arg1, arg2, arg3, caller_mpidr, partition,
     );
     ctx.regs[0] = result as u64;
-    ExitReason::ReturnToGuest
+    // A TSC-trapped SMC's preferred return address is the SMC itself.
+    ExitReason::Emulated
 }
 
 /// EC = 0x01: WFI/WFE trapped from EL1.
@@ -356,7 +432,9 @@ fn handle_wfx(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
     // state was initialised by init_virtual_sensors_and_modem() before this
     // guest's first ERET; poll_modem_on_wfi() is a no-op until then.
     unsafe { crate::virtual_sensors_modem::poll_modem_on_wfi() };
-    ExitReason::ReturnToGuest
+    // Preferred return address of a trapped WFx is the WFx itself; step past
+    // it so the guest's idle loop re-evaluates (pending vIRQs are taken on ERET).
+    ExitReason::Emulated
 }
 
 /// EC = 0x24: Stage 2 Data Abort.
@@ -456,7 +534,7 @@ fn handle_virtio_mmio_fault(ctx: &mut GuestContext, esr: u64, ipa: u64) -> Optio
         let val = if srt == 31 { 0u32 } else { ctx.regs[srt] as u32 };
         let r = crate::virtio_blk::with_backend_mut(|be| be.handle_mmio_write(offset, val));
         match r {
-            Some(Ok(())) => Some(ExitReason::RetryInstruction),
+            Some(Ok(())) => Some(ExitReason::Emulated),
             _ => None,
         }
     } else {
@@ -464,24 +542,140 @@ fn handle_virtio_mmio_fault(ctx: &mut GuestContext, esr: u64, ipa: u64) -> Optio
         match r {
             Some(Ok(v)) => {
                 if srt != 31 {
-                    // ARM data-abort retry advances the PC past the faulting
-                    // load; we therefore need to populate the register here.
+                    // The load is emulated here; `Emulated` steps ELR past it
+                    // (a data abort's preferred return is the faulting insn).
                     ctx.regs[srt] = v as u64;
                 }
-                Some(ExitReason::RetryInstruction)
+                Some(ExitReason::Emulated)
             }
             _ => None,
         }
     }
 }
 
-/// EC = 0x18: System register access trapped.
+// ─────────────────────────────────────────────────────────────────────────────
+// EC = 0x18: trapped MSR/MRS/SYS (ESR ISS layout, ARM ARM D17.2.37)
+//
+//   [21:20] Op0  [19:17] Op2  [16:14] Op1  [13:10] CRn  [9:5] Rt
+//   [4:1]   CRm  [0]     Direction (1 = read / MRS, 0 = write / MSR)
+//
+// What traps under HCR_EL2 GUEST_FLAGS, and how it is handled:
+//   TID3/TID1  ID registers           → emulate: return the REAL hardware value
+//                                        (hardware authenticity: Android must
+//                                        see the true CPU, never a sanitised one)
+//   TACR       ACTLR_EL1              → RAZ/WI (IMPLEMENTATION DEFINED register)
+//   TSW        DC ISW/CSW/CISW        → perform DC CISW at EL2 (safe superset)
+//   TIDCP/TLOR/anything else          → inject UNDEF into the guest, as KVM does
+// ─────────────────────────────────────────────────────────────────────────────
+
+use crate::sysreg_trap::{classify_sysreg, SysRegAccess, SysRegAction};
+
+/// Read a TID1/TID3 ID register at EL2 (the real hardware value).
+/// MRS needs a static encoding, so expand every (CRm, Op2) of group 3.
+fn read_hardware_id(a: &SysRegAccess) -> u64 {
+    macro_rules! mrs {
+        ($name:literal) => {{
+            let v: u64;
+            // SAFETY: reading an ID register at EL2 has no side effects; the
+            // ID space Op0=3,Op1=0,CRn=0,CRm=1..7 reads as zero where unallocated.
+            unsafe { core::arch::asm!(concat!("mrs {}, ", $name), out(reg) v,
+                                      options(nomem, nostack, preserves_flags)) };
+            v
+        }};
+    }
+    macro_rules! group3 {
+        ($crm:expr, $op2:expr; $($c:literal => [$($o:literal),*]),*) => {
+            match ($crm, $op2) {
+                $($( ($c, $o) => {
+                    let v: u64;
+                    // SAFETY: as in mrs! above — side-effect-free ID read.
+                    unsafe { core::arch::asm!(concat!("mrs {}, S3_0_C0_C", $c, "_", $o),
+                                              out(reg) v, options(nomem, nostack, preserves_flags)) };
+                    v
+                } )*)*
+                _ => 0,
+            }
+        };
+    }
+    match (a.op1, a.crm, a.op2) {
+        (0, 0, 6) => mrs!("revidr_el1"),
+        (1, 0, 7) => mrs!("aidr_el1"),
+        (0, crm, op2) => group3!(crm, op2;
+            1 => [0, 1, 2, 3, 4, 5, 6, 7], 2 => [0, 1, 2, 3, 4, 5, 6, 7],
+            3 => [0, 1, 2, 3, 4, 5, 6, 7], 4 => [0, 1, 2, 3, 4, 5, 6, 7],
+            5 => [0, 1, 2, 3, 4, 5, 6, 7], 6 => [0, 1, 2, 3, 4, 5, 6, 7],
+            7 => [0, 1, 2, 3, 4, 5, 6, 7]),
+        _ => 0,
+    }
+}
+
+/// Inject an UNDEFINED exception into the guest at EL1, as if the trapped
+/// instruction had been UNDEFINED (mirrors KVM `inject_undef64`).
 ///
-/// Guest tried to read/write a system register that AETHER intercepts.
-/// Chapter 6 configures which registers trap; Chapter 7 implements
-/// the emulation.
+/// ESR_EL1 = EC 0 (Unknown) with IL=1; ELR_EL1/SPSR_EL1 = the trapped context;
+/// the guest resumes at its own vector table with DAIF masked in EL1h.
+fn inject_undef(ctx: &mut GuestContext) {
+    const PSR_MODE_MASK: u64 = 0xF;
+    const PSR_MODE_EL1T: u64 = 0b0100;
+    const PSR_MODE_EL1H: u64 = 0b0101;
+    let vbar: u64;
+    // SAFETY: EL2 with HCR_EL2.E2H=0, so *_EL1 accesses reach the guest's
+    // EL1 registers; this is exactly the exception-entry the CPU would do.
+    unsafe {
+        core::arch::asm!("mrs {}, vbar_el1", out(reg) vbar, options(nomem, nostack));
+        core::arch::asm!("msr esr_el1, {}", in(reg) 1u64 << 25, options(nomem, nostack));
+        core::arch::asm!("msr elr_el1, {}", in(reg) ctx.elr_el2, options(nomem, nostack));
+        core::arch::asm!("msr spsr_el1, {}", in(reg) ctx.spsr_el2, options(nomem, nostack));
+    }
+    let offset = match ctx.spsr_el2 & PSR_MODE_MASK {
+        PSR_MODE_EL1T => 0x000, // current EL with SP_EL0
+        PSR_MODE_EL1H => 0x200, // current EL with SP_ELx
+        _ => 0x400,             // lower EL (EL0) using AArch64
+    };
+    ctx.elr_el2 = vbar + offset;
+    // EL1h, D/A/I/F masked (0x3C5).
+    ctx.spsr_el2 = 0x3C0 | PSR_MODE_EL1H;
+}
+
+/// EC = 0x18: System register access trapped.
 #[inline]
-fn handle_sysreg_trap(_ctx: &mut GuestContext, _esr: u64) -> ExitReason {
-    // Chapter 6/7: emulate the trapped system register access.
-    ExitReason::Halt
+fn handle_sysreg_trap(ctx: &mut GuestContext, esr: u64) -> ExitReason {
+    let a = SysRegAccess::decode(esr);
+    let rt_val = if a.rt == 31 { 0 } else { ctx.regs[a.rt] };
+    match classify_sysreg(&a) {
+        SysRegAction::ReadHardwareId => {
+            let v = read_hardware_id(&a);
+            // Real value, minus features EL2 does not host (sysreg_trap::sanitize_id).
+            let v = if a.is_id_group3() { crate::sysreg_trap::sanitize_id(a.crm, a.op2, v) } else { v };
+            if a.rt != 31 { ctx.regs[a.rt] = v; }
+            ExitReason::Emulated
+        }
+        SysRegAction::RazWi => {
+            if a.is_read && a.rt != 31 { ctx.regs[a.rt] = 0; }
+            ExitReason::Emulated
+        }
+        SysRegAction::SetWayClean => {
+            // SAFETY: set/way clean+invalidate is a superset of ISW/CSW and
+            // never loses dirty data; same operand the guest supplied.
+            unsafe { core::arch::asm!("dc cisw, {}", in(reg) rt_val, options(nostack)) };
+            ExitReason::Emulated
+        }
+        SysRegAction::ForwardSgi { alias } => {
+            // SAFETY: EL2 with SRE enabled; re-issues exactly the guest's SGI
+            // (same INTID, IRM, target list, affinity) — vCPU affinity ==
+            // physical affinity under AETHER's 1:1 core partitioning.
+            unsafe {
+                if alias {
+                    core::arch::asm!("msr icc_asgi1r_el1, {}", "isb", in(reg) rt_val, options(nostack));
+                } else {
+                    core::arch::asm!("msr icc_sgi1r_el1, {}", "isb", in(reg) rt_val, options(nostack));
+                }
+            }
+            ExitReason::Emulated
+        }
+        SysRegAction::InjectUndef => {
+            inject_undef(ctx);
+            ExitReason::ReturnToGuest
+        }
+    }
 }

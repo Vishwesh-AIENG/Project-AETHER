@@ -253,6 +253,7 @@ mod tests {
             gicr_size: 0x20000,
             uart_base: 0x0900_0000,
             uart_irq_spi: 33,
+            uart_clock_hz: 0,
             cmdline: [0u8; MAX_KERNEL_CMDLINE_LEN],
             cmdline_len: 0,
             initrd_start: 0,

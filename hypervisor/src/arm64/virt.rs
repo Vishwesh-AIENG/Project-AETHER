@@ -143,6 +143,16 @@ pub mod hcr_el2 {
     /// Source: sysreg line 3910 `Field 35 TLOR`
     pub const TLOR: u64 = 1 << 35;
 
+    /// Bit 40: APK — 1 = EL1 accesses to the pointer-authentication KEY
+    /// registers (APIAKeyLo_EL1, ...) do NOT trap. Bit 41: API — 1 = PAC
+    /// instructions do NOT trap. EL2 itself never uses PAC and AETHER has a
+    /// single guest, so there are no keys to context-switch: the guest owns
+    /// PAuth outright, as on real Snapdragon X (FEAT_PAuth). With both clear,
+    /// the first `MSR APIAKeyLo_EL1` in start_kernel traps and the kernel
+    /// takes an UNDEF. Source: sysreg `Field 40 APK` / `Field 41 API`.
+    pub const APK: u64 = 1 << 40;
+    pub const API: u64 = 1 << 41;
+
     // ── Composite: full guest-mode HCR_EL2 value ──────────────────────────
     //
     // Derived from linux-ref/arch/arm64/include/asm/kvm_arm.h HCR_GUEST_FLAGS
@@ -156,7 +166,8 @@ pub mod hcr_el2 {
     /// Setting this (with VM=1) enables Stage 2 translation and routes all
     /// exception types to EL2.
     pub const GUEST_FLAGS: u64 = VM | SWIO | PTW | FMO | IMO | AMO | FB |
-        BSU_IS | TWI | TWE | TID1 | TID3 | TSC | TIDCP | TACR | TSW | RW | TLOR;
+        BSU_IS | TWI | TWE | TID1 | TID3 | TSC | TIDCP | TACR | TSW | RW | TLOR |
+        APK | API;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

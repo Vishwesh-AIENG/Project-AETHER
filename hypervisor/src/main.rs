@@ -90,7 +90,11 @@ mod arm64_entry {
     const ANDROID_RAM_SIZE: u64 = 2 * 1024 * 1024 * 1024;
     pub const KERNEL1_PA: u64 = 0x4080_0000;
     pub const DTB1_PA: u64 = 0x4400_0000;
-    const SMP_CORE_COUNT: usize = 4;
+    /// Optional initramfs load address (QEMU: -device loader,file=...,addr=0x44100000).
+    /// Its length is recovered by walking the newc archive to TRAILER!!!.
+    pub const INITRD1_PA: u64 = 0x4410_0000;
+    /// Largest initramfs probed at INITRD1_PA (stays below 0x4800_0000).
+    const INITRD_MAX: usize = 0x3F0_0000;
 
     #[allow(dead_code)]
     static mut SMMU_STREAM_TABLE: SmmuStreamTable = SmmuStreamTable::new_aborted();
@@ -128,15 +132,39 @@ mod arm64_entry {
         let boot_result = unsafe { boot_ctx.run() };
         puts(&uart, "  ExitBootServices: OK\r\n");
 
+        // EL2 must stop translating through UEFI's page tables: firmware put
+        // them in low DRAM that the guest will own and overwrite. Switch to an
+        // AETHER-owned identity map (in the hypervisor image) now. RAM GiBs are
+        // taken from the firmware memory map; everything else but MMIO GiB 0
+        // stays unmapped.
+        let fw_sctlr = unsafe {
+            hypervisor::el2_mmu::install_el2_identity_map(|gib| {
+                let (lo, hi) = ((gib as u64) << 30, ((gib as u64) + 1) << 30);
+                boot_result.memory_map.iter().any(|r| {
+                    r.kind != hypervisor::boot::MemoryRegionKind::MmioRegion
+                        && r.base < hi && r.base + r.size > lo
+                })
+            })
+        };
+        puts(&uart, "  EL2 page tables: AETHER-owned at ");
+        puthex64(&uart, hypervisor::el2_mmu::el2_table_pa());
+        puts(&uart, " (firmware SCTLR_EL2=");
+        puthex64(&uart, fw_sctlr);
+        puts(&uart, ")");
+        puts(&uart, "\r\n");
+
         let total_mib = boot_result.memory_map.total_conventional_bytes() / (1024 * 1024);
         puts(&uart, "  Conventional RAM: ");
         putdec(&uart, total_mib as usize);
         puts(&uart, " MiB\r\n");
 
+        // Hypervisor-private allocations (Stage 2 tables) come from RAM OUTSIDE
+        // the guest's identity-mapped window — a guest that can write its own
+        // Stage 2 tables can escape the partition (ch03 Host Opaqueness).
         let largest = boot_result.memory_map
-            .largest_conventional()
+            .largest_conventional_outside(ANDROID_IPA_BASE, ANDROID_IPA_BASE + ANDROID_RAM_SIZE)
             .unwrap_or_else(|| {
-                puts(&uart, "[FATAL] No conventional RAM found.\r\n");
+                puts(&uart, "[FATAL] No conventional RAM outside the guest window.\r\n");
                 hypervisor::boot::halt();
             });
 
@@ -201,8 +229,30 @@ mod arm64_entry {
             hypervisor::boot::halt();
         }
 
-        let (gicd_base, gicr_base, maint_intid) = discover_gic_addresses(&uart, &boot_result);
-        unsafe { init_physical_gic(gicd_base, gicr_base, SMP_CORE_COUNT) };
+        let (gicd_base, gicr_base, maint_intid, madt_cpus, madt_mpidr) =
+            discover_gic_addresses(&uart, &boot_result);
+
+        // CPU topology from the MADT (enabled GICC entries) — never assumed.
+        // Waking a Redistributor that does not exist (e.g. a hardcoded 4 on a
+        // 1-CPU machine) faults at EL2 and hangs boot before 'Hypervisor ready'.
+        // The boot core is placed first; capped by the spin-table/DTB limits.
+        let boot_mpidr = unsafe { Mpidr::read_current() }.affinity_value();
+        let max_cpus = core::cmp::min(MAX_ANDROID_CPUS, smp::MAX_SECONDARY_CORES + 1);
+        let mut cpu_mpidr = [0u64; MAX_ANDROID_CPUS];
+        cpu_mpidr[0] = boot_mpidr;
+        let mut smp_cores = 1usize;
+        for &m in &madt_mpidr[..madt_cpus] {
+            let aff = m & 0x0000_00FF_00FF_FFFF;
+            if aff != boot_mpidr && smp_cores < max_cpus {
+                cpu_mpidr[smp_cores] = aff;
+                smp_cores += 1;
+            }
+        }
+        puts(&uart, "  CPUs: ");
+        putdec(&uart, smp_cores);
+        puts(&uart, " (MADT enabled GICC entries)\r\n");
+
+        unsafe { init_physical_gic(gicd_base, gicr_base, smp_cores) };
         puts(&uart, "  GIC: OK (GICD=");
         puthex64(&uart, gicd_base);
         puts(&uart, " GICR=");
@@ -214,26 +264,25 @@ mod arm64_entry {
         putdec(&uart, maint_intid as usize);
         puts(&uart, ")\r\n");
 
-        unsafe { irq_forward::setup_irq_forwarding(gicd_base, gicr_base, SMP_CORE_COUNT) };
+        unsafe { irq_forward::setup_irq_forwarding(gicd_base, gicr_base, smp_cores) };
         puts(&uart, "  IRQ forwarding: timer PPIs + UART SPI enabled\r\n");
 
         {
             let partition = unsafe { hypervisor::cpu::aether_partition_mut() };
-            for idx in 0..SMP_CORE_COUNT {
-                partition.register_core(Mpidr(idx as u64));
+            for &m in &cpu_mpidr[..smp_cores] {
+                partition.register_core(Mpidr(m));
             }
         }
         puts(&uart, "  SMP: ");
-        putdec(&uart, SMP_CORE_COUNT);
+        putdec(&uart, smp_cores);
         puts(&uart, " cores pre-registered\r\n");
 
         smp::set_s2_root_pa(s2.root_pa());
         smp::set_gicr_base(gicr_base);
 
         let entry_pa = smp::secondary_entry_pa();
-        for idx in 1..SMP_CORE_COUNT {
-            let target_mpidr = idx as u64;
-            let rc = unsafe { smp::psci_cpu_on_hvc(target_mpidr, entry_pa, 0) };
+        for (idx, &target_mpidr) in cpu_mpidr[..smp_cores].iter().enumerate().skip(1) {
+            let rc = unsafe { smp::psci_cpu_on_smc(target_mpidr, entry_pa, 0) };
             puts(&uart, "  SMP: CPU_ON core ");
             putdec(&uart, idx);
             puts(&uart, " -> ");
@@ -246,24 +295,37 @@ mod arm64_entry {
         puts(&uart, "======================================\r\n");
         puts(&uart, "\r\n");
 
+        // ch34: an initramfs placed at INITRD1_PA is handed to the kernel via
+        // /chosen linux,initrd-{start,end}; absent one, initrd stays 0.
+        // SAFETY: INITRD1_PA..+INITRD_MAX is guest RAM, identity-mapped at EL2
+        // by the UEFI page tables still in use; read-only probe.
+        let initrd_window = unsafe {
+            core::slice::from_raw_parts(INITRD1_PA as *const u8, INITRD_MAX)
+        };
+        let initrd_len = match hypervisor::cpio::archive_len(initrd_window) {
+            Ok(n) => {
+                puts(&uart, "  initramfs at ");
+                puthex64(&uart, INITRD1_PA);
+                puts(&uart, ": ");
+                putdec(&uart, n);
+                puts(&uart, " bytes (newc)\r\n");
+                n as u64
+            }
+            Err(_) => 0,
+        };
+
         const CMDLINE: &[u8] = b"console=ttyAMA0 earlycon rdinit=/bin/sh";
         let mut cmdline_buf = [0u8; MAX_KERNEL_CMDLINE_LEN];
         let cmdline_len = CMDLINE.len();
         cmdline_buf[..cmdline_len].copy_from_slice(CMDLINE);
 
         const GICR_SIZE_PER_CORE: u64 = 128 * 1024;
-        let gicr_size_smp = GICR_SIZE_PER_CORE * SMP_CORE_COUNT as u64;
+        let gicr_size_smp = GICR_SIZE_PER_CORE * smp_cores as u64;
         const UART_SPI_INTID: u32 = 33;
 
         let dtb_cfg = AndroidDtbConfig {
-            cpu_count: SMP_CORE_COUNT,
-            cpu_mpidr: {
-                let mut m = [0u64; MAX_ANDROID_CPUS];
-                for i in 0..SMP_CORE_COUNT {
-                    m[i] = i as u64;
-                }
-                m
-            },
+            cpu_count: smp_cores,
+            cpu_mpidr,
             memory_base: ANDROID_IPA_BASE,
             memory_size: ANDROID_RAM_SIZE,
             gicd_base: GICD_PA,
@@ -272,10 +334,13 @@ mod arm64_entry {
             gicr_size: gicr_size_smp,
             uart_base: UART_PA,
             uart_irq_spi: UART_SPI_INTID,
+            // QEMU virt PL011 is fed by a 24 MHz apb-pclk; full AMBA node so the
+            // guest registers ttyAMA0 (else /dev/console = ttynull).
+            uart_clock_hz: 24_000_000,
             cmdline: cmdline_buf,
             cmdline_len,
-            initrd_start: 0,
-            initrd_end:   0,
+            initrd_start: if initrd_len > 0 { INITRD1_PA } else { 0 },
+            initrd_end:   if initrd_len > 0 { INITRD1_PA + initrd_len } else { 0 },
             // ARM tier has no PMEM system image (native Android, real block devs).
             pmem_base:    0,
             pmem_size:    0,
@@ -297,6 +362,30 @@ mod arm64_entry {
         puts(&uart, "  Kernel entry IPA=");
         puthex64(&uart, entry_ipa);
         puts(&uart, "\r\n");
+        // Isolation guard (ch03 Host Opaqueness): everything EL2 keeps using
+        // after the ERET must lie outside guest-owned RAM, or the guest can
+        // rewrite the hypervisor. Firmware chooses where the .efi loads, so
+        // check at runtime and refuse to launch rather than boot insecurely.
+        {
+            use hypervisor::boot::{overlaps, primary_el2_stack_top, PRIMARY_EL2_STACK_SIZE};
+            let (lo, hi) = (ANDROID_IPA_BASE, ANDROID_IPA_BASE + ANDROID_RAM_SIZE);
+            let stack_base = primary_el2_stack_top() - PRIMARY_EL2_STACK_SIZE as u64;
+            let code_pa = efi_main as *const () as u64;
+            let (sec_base, sec_len) = smp::secondary_stacks_range();
+            let ttbr = hypervisor::el2_mmu::current_ttbr0_el2();
+            let bad = overlaps(stack_base, PRIMARY_EL2_STACK_SIZE as u64, lo, hi)
+                || overlaps(code_pa, 1, lo, hi)
+                || overlaps(sec_base, sec_len, lo, hi)
+                || overlaps(ttbr, 4096, lo, hi)
+                || ttbr != hypervisor::el2_mmu::el2_table_pa();
+            puts(&uart, "  EL2 stack/image at ");
+            puthex64(&uart, stack_base);
+            if bad {
+                puts(&uart, " — INSIDE guest RAM. [FATAL] refusing to launch.\r\n");
+                hypervisor::boot::halt();
+            }
+            puts(&uart, " (outside guest RAM)\r\n");
+        }
         puts(&uart, "  ERET to Linux kernel EL1...\r\n");
 
         unsafe {
@@ -307,7 +396,7 @@ mod arm64_entry {
     fn discover_gic_addresses(
         uart: &Uart,
         boot_result: &hypervisor::boot::BootResult,
-    ) -> (u64, u64, u32) {
+    ) -> (u64, u64, u32, usize, [u64; hypervisor::gic::MADT_MAX_CPUS]) {
         if let Some(rsdp_pa) = boot_result.rsdp_pa {
             let xsdt_pa = unsafe {
                 let rsdp = rsdp_pa as *const AcpiRsdp;
@@ -328,12 +417,13 @@ mod arm64_entry {
                         puts(uart, " (GICR fallback to QEMU default)");
                     }
                     puts(uart, "\r\n");
-                    return (gic.gicd_pa, gicr, gic.maint_intid);
+                    return (gic.gicd_pa, gicr, gic.maint_intid, gic.cpu_count, gic.cpu_mpidr);
                 }
             }
         }
         puts(uart, "  GIC: using QEMU virt defaults\r\n");
-        (GICD_PA, GICR_PA, 25)
+        // No MADT: assume only the boot core (safe — never wake absent GICRs).
+        (GICD_PA, GICR_PA, 25, 0, [0; hypervisor::gic::MADT_MAX_CPUS])
     }
 
     #[inline]

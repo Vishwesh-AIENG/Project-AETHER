@@ -67,3 +67,9 @@ __pycache__/
 tools/corpus-extract/disasm/
 tools/corpus-extract/trace_user_raw.txt
 tools/dbt-oracle/corpus/
+
+# ARM-tier proof run artifacts (regenerable: qemu/initrd-src/build.sh, run-arm-auto.py)
+qemu/initrd-proof.cpio
+qemu/arm-regs.txt
+qemu/efi/
+/target-map/

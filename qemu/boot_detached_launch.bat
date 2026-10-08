@@ -20,7 +20,7 @@ set "BAT=%~dp0boot_detached.bat"
 echo [launch] deleting any prior task %TN% ...
 schtasks /delete /tn "%TN%" /f >nul 2>&1
 
-echo [launch] creating task %TN% -> %BAT%
+echo [launch] creating task %TN% for %BAT%
 REM /sc ONCE + a far-future start time; we fire it with /run immediately.
 REM /RL HIGHEST => run elevated (qemu/WHPX + taskkill need it).
 REM /IT keeps it interactive-visible when the current user is logged on, but it
@@ -39,7 +39,7 @@ if errorlevel 1 (
 )
 
 echo [launch] started. Watch with:  bash /d/AETHER/qemu/strong_watch.sh
-echo [launch] boot stdout/stderr -> D:\AETHER\qemu\boot_detached.log
-echo [launch] kernel serial       -> D:\AETHER\qemu\com1.log
+echo [launch] boot stdout/stderr: D:\AETHER\qemu\boot_detached.log
+echo [launch] kernel serial:      D:\AETHER\qemu\com1.log
 endlocal
 exit /b 0

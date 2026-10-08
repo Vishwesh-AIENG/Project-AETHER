@@ -63,6 +63,8 @@ pub enum CpioError {
     UnterminatedName,
     /// `filesize` field claimed more bytes than remain in the input.
     TruncatedData,
+    /// Input ended (or a parse stopped) before a `TRAILER!!!` entry.
+    MissingTrailer,
 }
 
 /// One parsed entry. Fields are stored as `u64` for headroom; `mode` /
@@ -275,6 +277,23 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 
+/// Total length of the newc archive at the start of `buf`, up to and
+/// including the `TRAILER!!!` entry and its 4-byte padding.
+///
+/// Lets EL2 size an initramfs that was placed in guest RAM by a loader that
+/// does not report a length (QEMU `-device loader`): scan from the load
+/// address, and hand the guest `linux,initrd-{start,end}` covering exactly
+/// the archive.
+pub fn archive_len(buf: &[u8]) -> Result<usize, CpioError> {
+    let mut it = iter(buf);
+    while let Some(entry) = it.next() {
+        if entry?.is_trailer() {
+            return Ok(buf.len() - it.rest.len());
+        }
+    }
+    Err(CpioError::MissingTrailer)
+}
+
 /// Walk `archive` and return the first entry whose name matches
 /// `wanted` exactly (no path component handling — Android initramfs's
 /// `/init` lives at the archive root and its cpio name is just "init").
@@ -481,6 +500,21 @@ mod tests {
         // Trailer.
         out.extend_from_slice(&build_entry(b"TRAILER!!!", 0, &[]));
         out
+    }
+
+    #[test]
+    fn archive_len_stops_at_trailer_inside_larger_buffer() {
+        // An initramfs placed in guest RAM is followed by arbitrary bytes;
+        // archive_len must report exactly the archive, not the window.
+        let archive = build_archive(&[(b"bin/sh", C_ISREG | 0o755, b"\x7fELF....")]);
+        let mut window = archive.clone();
+        window.extend_from_slice(&[0xAAu8; 4096]);
+        assert_eq!(archive_len(&window), Ok(archive.len()));
+        assert_eq!(archive.len() % 4, 0);
+        // No trailer before the data runs out -> MissingTrailer, never a guess.
+        let no_trailer = build_entry(b"bin/sh", C_ISREG | 0o755, b"x");
+        assert_eq!(archive_len(&no_trailer), Err(CpioError::MissingTrailer));
+        assert_eq!(archive_len(&[0u8; 200]), Err(CpioError::BadMagic));
     }
 
     #[test]

@@ -1248,6 +1248,7 @@ mod tests {
             gicr_size:    0x0002_0000,
             uart_base:    0x0900_0000,
             uart_irq_spi: 33,
+            uart_clock_hz: 0,
             cmdline:      [0u8; MAX_KERNEL_CMDLINE_LEN],
             cmdline_len:  0,
             initrd_start: 0,
@@ -1262,6 +1263,32 @@ mod tests {
         cfg.cmdline[..cl.len()].copy_from_slice(cl);
         cfg.cmdline_len = cl.len();
         cfg
+    }
+
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// ARM tier: the PL011 must be a full AMBA PrimeCell description, or the
+    /// guest never registers ttyAMA0 and /dev/console falls back to ttynull
+    /// (observed: userspace output silently discarded under QEMU).
+    #[test]
+    fn uart_clock_emits_amba_primecell_description() {
+        let mut cfg = make_base_config();
+        cfg.uart_clock_hz = 24_000_000;
+        let mut out = vec![0u8; 16384];
+        let n = crate::kernel::build_android_dtb(&cfg, &mut out).expect("dtb");
+        let dtb = &out[..n];
+        assert!(contains(dtb, b"arm,pl011\0arm,primecell\0"));
+        assert!(contains(dtb, b"uartclk\0apb_pclk\0"));
+        assert!(contains(dtb, b"fixed-clock\0"));
+        assert!(contains(dtb, &24_000_000u32.to_be_bytes()));
+
+        // x86 tier (uart_clock_hz = 0): minimal node, byte-for-byte unchanged.
+        let mut out0 = vec![0u8; 16384];
+        let n0 = crate::kernel::build_android_dtb(&make_base_config(), &mut out0).expect("dtb");
+        assert!(!contains(&out0[..n0], b"arm,primecell"));
+        assert!(!contains(&out0[..n0], b"apb_pclk"));
     }
 
     #[test]

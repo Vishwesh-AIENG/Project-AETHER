@@ -248,6 +248,10 @@ pub const GIC_PPI: u32 = 1;
 /// tick never fires.
 pub const GIC_PHANDLE: u32 = 1;
 
+/// Phandle of the fixed `apb-pclk` clock node feeding the PL011 (emitted
+/// only when `AndroidDtbConfig::uart_clock_hz` is non-zero).
+pub const UART_CLK_PHANDLE: u32 = 2;
+
 /// Interrupt flags cell value: level-triggered, active high.
 /// Required for GICv3 SPIs on ARM (most devices use level-high).
 pub const IRQ_TYPE_LEVEL_HIGH: u32 = 4;
@@ -722,6 +726,15 @@ pub struct AndroidDtbConfig {
     pub uart_base: u64,
     /// Interrupt number of the PL011 UART (SPI INTID; DT intid = INTID − 32).
     pub uart_irq_spi: u32,
+    /// PL011 reference clock in Hz, or 0. When non-zero the serial node is a
+    /// full AMBA PrimeCell description per the arm,pl011 binding:
+    /// `compatible = "arm,pl011", "arm,primecell"`, a 24 MHz-style
+    /// `fixed-clock` node, `clocks`/`clock-names = "uartclk", "apb_pclk"`.
+    /// Without those Linux never creates an AMBA device, `amba-pl011` never
+    /// binds, ttyAMA0 is never registered, and /dev/console falls back to
+    /// ttynull — userspace output silently vanishes (only earlycon works).
+    /// 0 keeps the minimal node (the x86 tier, whose PL011 is emulated).
+    pub uart_clock_hz: u32,
     /// Kernel command line (passed to the kernel through /chosen bootargs).
     /// Must be a null-terminated byte slice of at most MAX_KERNEL_CMDLINE_LEN.
     pub cmdline: [u8; MAX_KERNEL_CMDLINE_LEN],
@@ -965,7 +978,11 @@ pub fn build_android_dtb(
         b.begin_node(&serial_name[..prefix.len() + n])?;
         // "arm,pl011" is the exact compatible string for the ARM PL011 UART.
         // Source: Documentation/devicetree/bindings/serial/arm,pl011.yaml
-        b.prop_str(b"compatible", b"arm,pl011")?;
+        if cfg.uart_clock_hz != 0 {
+            b.prop_str(b"compatible", b"arm,pl011\0arm,primecell")?;
+        } else {
+            b.prop_str(b"compatible", b"arm,pl011")?;
+        }
         b.prop_cells(b"reg", &[
             (cfg.uart_base >> 32) as u32, cfg.uart_base as u32,
             0u32, 0x1000u32, // PL011 register region is 4KB
@@ -974,7 +991,22 @@ pub fn build_android_dtb(
         let uart_dt_intid = cfg.uart_irq_spi.saturating_sub(32);
         b.prop_cells(b"interrupts", &[GIC_SPI, uart_dt_intid, IRQ_TYPE_LEVEL_HIGH])?;
         b.prop_u32(b"interrupt-parent", GIC_PHANDLE)?; // GICv3 (also inherited from root)
+        if cfg.uart_clock_hz != 0 {
+            b.prop_cells(b"clocks", &[UART_CLK_PHANDLE, UART_CLK_PHANDLE])?;
+            b.prop_str(b"clock-names", b"uartclk\0apb_pclk")?;
+        }
         b.end_node()?; // /serial
+    }
+
+    // ── /apb-pclk (fixed clock for the PL011, arm,pl011 binding) ────────────
+    if cfg.uart_clock_hz != 0 {
+        b.begin_node(b"apb-pclk")?;
+        b.prop_str(b"compatible", b"fixed-clock")?;
+        b.prop_u32(b"#clock-cells", 0)?;
+        b.prop_u32(b"clock-frequency", cfg.uart_clock_hz)?;
+        b.prop_str(b"clock-output-names", b"clk24mhz")?;
+        b.prop_u32(b"phandle", UART_CLK_PHANDLE)?;
+        b.end_node()?; // /apb-pclk
     }
 
     // ── /chosen ───────────────────────────────────────────────────────────────

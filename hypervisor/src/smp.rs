@@ -5,7 +5,7 @@
 // entry points.
 //
 // Two-level wake protocol:
-//   Level 1 — AETHER → QEMU:  psci_cpu_on_hvc() wakes a physical core into
+//   Level 1 — AETHER → QEMU:  psci_cpu_on_smc() wakes a physical core into
 //              aether_secondary_entry at EL2, where it initialises per-PE
 //              registers (VBAR, VTCR, VTTBR, HCR, GIC ICC) and parks in the
 //              spin table WFE loop.
@@ -76,6 +76,15 @@ struct SecondaryStack([u8; SECONDARY_STACK_SIZE]);
 static mut SECONDARY_STACKS: [SecondaryStack; MAX_SECONDARY_CORES] =
     [const { SecondaryStack([0u8; SECONDARY_STACK_SIZE]) }; MAX_SECONDARY_CORES];
 
+/// `(base, len)` of the secondary cores' EL2 stacks, for the boot-time check
+/// that no hypervisor-private memory lies inside guest RAM.
+pub fn secondary_stacks_range() -> (u64, u64) {
+    (
+        core::ptr::addr_of!(SECONDARY_STACKS) as u64,
+        (SECONDARY_STACK_SIZE * MAX_SECONDARY_CORES) as u64,
+    )
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared globals — written by primary before waking any secondary
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,7 +98,7 @@ static GICR_BASE_PA: AtomicU64 = AtomicU64::new(0);
 
 /// Set the Stage 2 root PA that all secondary cores will program into VTTBR_EL2.
 ///
-/// Must be called (with a non-zero value) before `psci_cpu_on_hvc` is issued
+/// Must be called (with a non-zero value) before `psci_cpu_on_smc` is issued
 /// for any secondary core.
 pub fn set_s2_root_pa(pa: u64) {
     S2_ROOT_PA.store(pa, Ordering::Release);
@@ -97,7 +106,7 @@ pub fn set_s2_root_pa(pa: u64) {
 
 /// Set the GICv3 redistributor base PA.
 ///
-/// Must be called before `psci_cpu_on_hvc` is issued for any secondary core.
+/// Must be called before `psci_cpu_on_smc` is issued for any secondary core.
 pub fn set_gicr_base(pa: u64) {
     GICR_BASE_PA.store(pa, Ordering::Release);
 }
@@ -143,26 +152,29 @@ pub fn wake_secondary_core(target_affinity: u64, entry_point: u64, context_id: u
 // Level-1 wake: AETHER → QEMU PSCI CPU_ON (bring secondary core to EL2)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Issue a PSCI CPU_ON_64 HVC to physically start a secondary core in QEMU.
+/// Issue a firmware PSCI CPU_ON_64 (SMC conduit) to physically start a
+/// secondary core at EL2.
 ///
-/// QEMU's virt machine model intercepts PSCI-encoded HVCs at TCG emulation
-/// level, before the ARM64 exception routing logic fires. This is the same
-/// mechanism OVMF uses to start secondary CPUs from EL2. AETHER at EL2 can
-/// therefore issue PSCI HVCs and have QEMU bring the secondary to `entry_pa`
-/// in AArch64 EL2 mode — without requiring EL3 (ATF).
+/// The conduit MUST be SMC. An `hvc` executed AT EL2 is taken by AETHER's own
+/// EL2 vector table — not by firmware — so the old HVC version was silently
+/// "handled" as if the guest had called CPU_ON: the cores were never started
+/// and were left PendingStartup, making Linux's own CPU_ON fail with
+/// ON_PENDING ("psci: failed to boot CPU1 (-22)"). Firmware PSCI is reached
+/// via SMC: QEMU `virt` with virtualization=on uses the SMC conduit, and on
+/// real hardware (Snapdragon X) PSCI lives in EL3 TF-A behind SMC.
 ///
 /// # Safety
 /// - `entry_pa` must be the address of `aether_secondary_entry` (or another
 ///   valid EL2 entry point with a valid stack setup).
 /// - Must not be called for a core that is already executing.
 /// - Must be called from the primary core's EL2 context during boot.
-pub unsafe fn psci_cpu_on_hvc(target_mpidr: u64, entry_pa: u64, ctx: u64) -> i64 {
+pub unsafe fn psci_cpu_on_smc(target_mpidr: u64, entry_pa: u64, ctx: u64) -> i64 {
     #[cfg(target_arch = "aarch64")]
     {
         let result: i64;
         unsafe {
             asm!(
-                "hvc #0",
+                "smc #0",
                 inout("x0") crate::cpu::psci::CPU_ON_64 as u64 => result,
                 in("x1") target_mpidr,
                 in("x2") entry_pa,
@@ -181,7 +193,7 @@ pub unsafe fn psci_cpu_on_hvc(target_mpidr: u64, entry_pa: u64, ctx: u64) -> i64
 
 /// Physical address of the `aether_secondary_entry` assembly trampoline.
 ///
-/// Pass this as `entry_pa` to `psci_cpu_on_hvc`. QEMU jumps here on the
+/// Pass this as `entry_pa` to `psci_cpu_on_smc`. QEMU jumps here on the
 /// secondary core in AArch64 EL2 mode.
 pub fn secondary_entry_pa() -> u64 {
     unsafe extern "C" {
@@ -229,10 +241,12 @@ pub unsafe extern "C" fn aether_secondary_core_main(mpidr_raw: u64) -> ! {
     //    Each secondary just needs to enable its own ICC registers.
     unsafe { crate::gic::init_icc() };
 
-    // 4. Mark this core as Running in the partition table.
-    //    Primary pre-registered all cores in Off state; this transitions to Running.
+    // 4. Do NOT mark the core Running here. Being parked at EL2 is not the
+    //    guest's vCPU being on: the guest's PSCI CPU_ON must still see this
+    //    core as Off, or it gets ALREADY_ON (Linux: "psci: failed to boot
+    //    CPU1 (-22)", leaving Android on one CPU). The Off → Running
+    //    transition happens at the EL1 release below.
     let partition = unsafe { crate::cpu::aether_partition_mut() };
-    partition.set_running(mpidr);
 
     // 5. Compute spin table index (Aff0=1 → index 0, Aff0=2 → index 1, …).
     if aff0 == 0 || aff0 > MAX_SECONDARY_CORES {
@@ -249,6 +263,8 @@ pub unsafe extern "C" fn aether_secondary_core_main(mpidr_raw: u64) -> ! {
         let ep = entry.entry_point.load(Ordering::Acquire);
         if ep != 0 {
             let ctx = entry.context_id.load(Ordering::Acquire);
+            // The guest's CPU_ON (PendingStartup) is now being honoured.
+            partition.set_running(mpidr);
             // SPSR_EL2 = 0x3C5:
             //   M[4:0] = 0b00101 = EL1h (EL1 with SP_EL1)
             //   DAIF   = 1111    (all interrupts masked at EL1 entry)

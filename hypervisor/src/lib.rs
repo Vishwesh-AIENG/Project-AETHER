@@ -229,6 +229,8 @@ pub mod fingerprint; // ch02: fingerprint sources and elimination strategies
 pub mod partition;   // ch03: non-negotiables encoded as types
 
 // Part II — The Silicon (Chapters 4–6)
+pub mod sysreg_trap; // EC 0x18 trapped-sysreg decode + policy (host-testable)
+pub mod el2_mmu;     // AETHER-owned EL2 stage-1 identity map (outside guest RAM)
 #[cfg(target_arch = "aarch64")]
 pub mod arm64; // ch04: ARM64 substrate — regs, barriers, paging constants
 

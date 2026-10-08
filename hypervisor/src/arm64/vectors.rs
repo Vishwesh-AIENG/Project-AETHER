@@ -218,7 +218,9 @@ global_asm!(
     // not arrive at EL2 with AETHER's routing, and SError is fatal.
 
     ".align 7",                       // entry 4: Sync EL2h — AETHER bug
-    "vec_entry_call aether_common_sync",
+    // An exception taken AT EL2 is a hypervisor fault, never a guest exit:
+    // report ESR/ELR/SPSR/FAR on a dedicated stack (SP may be the culprit).
+    "b    aether_el2_self_fault",
     ".org aether_vectors + 0x280",
 
     ".align 7",                       // entry 5: IRQ EL2h — unexpected
@@ -292,6 +294,18 @@ global_asm!(
     "    bl   aether_handle_irq",
     "    restore_guest_context_and_eret",
 
+    "aether_el2_self_fault:",
+    "    mrs  x0, esr_el2",
+    "    mrs  x1, elr_el2",
+    "    mrs  x2, spsr_el2",
+    "    mrs  x3, far_el2",
+    "    adrp x4, {fault_stack}",
+    "    add  x4, x4, :lo12:{fault_stack}",
+    "    add  x4, x4, #{fault_stack_size}",
+    "    mov  sp, x4",
+    "    bl   aether_el2_fault_report",     // never returns
+    "0:  b    0b",
+
     "aether_common_serror:",
     "    save_guest_context",
     "    mov  x0, sp",
@@ -300,4 +314,13 @@ global_asm!(
 
     // Named const operand — must be declared after all string literals.
     ctx_size = const GUEST_CONTEXT_SIZE,
+    fault_stack = sym EL2_FAULT_STACK,
+    fault_stack_size = const EL2_FAULT_STACK_SIZE,
 );
+
+/// Dedicated stack for reporting an exception taken at EL2 itself.
+const EL2_FAULT_STACK_SIZE: usize = 4096;
+#[repr(C, align(16))]
+struct FaultStack([u8; EL2_FAULT_STACK_SIZE]);
+#[unsafe(no_mangle)]
+static mut EL2_FAULT_STACK: FaultStack = FaultStack([0; EL2_FAULT_STACK_SIZE]);
