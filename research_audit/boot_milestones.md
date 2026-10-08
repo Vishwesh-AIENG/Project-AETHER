@@ -6,7 +6,7 @@
 
 | Tier | What actually runs | Guest payload in the evidence | Environment |
 |---|---|---|---|
-| **ARM tier** | `hypervisor.efi` at **EL2** (Stage-2, vGIC, PSCI, trapped sysregs) → ERET → GKI 6.1.79 kernel at EL1 | A **custom static test binary** installed as `/bin/sh` in an initramfs (`qemu/initrd-src/aether_proof.c`). **No Android userspace, no `init`, no system image.** | QEMU `virt`, `-cpu max`, `virtualization=on`, **TCG** (EL2 emulated by QEMU). Never run on ARM hardware. |
+| **ARM tier** | `hypervisor.efi` at **EL2** (Stage-2, vGIC, PSCI, trapped sysregs) → ERET → GKI 6.1.79 kernel at EL1 | A **custom static test binary** installed as `/bin/sh` in an initramfs (`qemu/initrd-src/aether_proof.c`). **No Android userspace, no `init`, no system image.** | QEMU `virt`, `-cpu max`, `virtualization=on`, **TCG** (EL2 emulated by QEMU). Hardware run author-reported (see §3). |
 | **x86 tier** | `hypervisor.efi` as a **UEFI application in host mode** (`whpx_hostmode`: no VMXON, no VMLAUNCH/VMRUN, no EPT) running the ARM64→x86 DBT with a **software MMU**. The translated GKI kernel boots Android from `system.raw`/`vendor.raw` exposed as PMEM. | Locally built AOSP `system.raw` / `vendor.raw` / `boot.img` | QEMU q35 + **WHPX** on the authors' Windows/AMD machine (old logs), and **TCG** in this audit |
 
 The only path that touches Android's own userspace is the x86 host-mode DBT, which **is not a hypervisor in that configuration**. The only path that exercises the EL2 hypervisor boots a test binary, not Android.
@@ -34,7 +34,7 @@ Interpretation:
 - Kernel entry → `PROOF done`: **7.1 s (AETHER, smp4) vs 6.0 s (direct)**, and **5.2 s vs 5.7 s at smp1**. These are not a clean "virtualisation overhead". The direct boot uses QEMU's generated DTB and devices and 2 GiB of RAM, while AETHER uses its own DTB and 4 GiB. Under TCG, EL2 trapping is emulated in software. The defensible statement is narrower: **under emulation, the AETHER EL2 layer does not change time to userspace by more than about 20%**. This says nothing about hardware.
 - All 10 timed AETHER runs (2 configurations × 5), the functional run and the fault-injection control runs reached `PROOF done`. The old proof logs (`raw/old-evidence/arm-proof-smp{4,1}.log`) show the same milestone set.
 
-**ARM-tier final milestone, reproduced:** GKI 6.1.79 boots under AETHER's EL2 to an EL0 test binary with 1 or 4 CPUs online and per-CPU timer interrupts and IPIs delivered. **Not reproduced and never evidenced on the ARM tier:** Android `init`, any Android service, a display, or Snapdragon hardware.
+**ARM-tier final milestone, reproduced:** GKI 6.1.79 boots under AETHER's EL2 to an EL0 test binary with 1 or 4 CPUs online and per-CPU timer interrupts and IPIs delivered. **Not reproduced and never evidenced on the ARM tier:** Android `init`, any Android service, a display. The author reports the same GKI → EL0 milestones on a real ARM laptop (no log in the repository).
 
 ## 2. x86 tier
 
@@ -90,4 +90,5 @@ These notes are detailed, internally consistent, and include exact log lines. Bu
 | Reproduced in this audit | ARM: GKI 6.1 → EL0 test binary, 4 CPUs, IRQ/IPI (EL2, QEMU TCG). x86: OVMF → AETHER host-mode DBT → translated GKI 6.1 early kernel init (TCG). |
 | Old log in the dump (WHPX) | Android `init` running (t=191 s), apexd-bootstrap (3 packages), post-fs/late-fs, `keystore2` starting (t=2177.7 s) |
 | Notes only | apexd 33 APEXes activated, bpfloader exit 0 (t≈8382 s), first-boot reboot |
+| Author-reported (no artifact) | Real ARM laptop: same milestones as the ARM QEMU proof. Real x86 hardware: same milestones as the x86 QEMU runs. See the `claims.md` hardware note (the audited ARM build is QEMU-virt-specific; build identity and logs needed). |
 | Never evidenced | zygote, system_server, SurfaceFlinger, any UI, any app |

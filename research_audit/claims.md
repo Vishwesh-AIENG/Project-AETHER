@@ -8,6 +8,17 @@
 - **T** = unit/integration test
 - **S** = static inspection of code
 - **N** = prose only (memory notes, commit messages, README)
+- **A** = author-reported to the auditor, with no artifact in the repository
+
+**Author-reported hardware reproduction (2026-10-08, not independently verified).** The project author states that every milestone the ARM tier reached in QEMU was also reached on a real ARM laptop, and every milestone the x86 tier reached in QEMU was also reached on real x86 hardware, in runs done independently of this audit. No hardware logs, photos, machine models, firmware versions, EFI hashes or build configurations are in the repository or the AETHER-FILES dump, so these runs are classed **A (author-reported)**: stronger than nothing, weaker than a preserved log.
+
+Caveats that a log would resolve:
+- The audited ARM build (`9f34e2f`) hard-codes QEMU `virt` addresses (PL011 at `0x0900_0000`, GICD/GICR at `0x0800_0000`/`0x080A_0000`). It also expects QEMU's `-device loader` to have pre-placed the kernel at `0x4080_0000` and the initramfs at `0x4410_0000`. A laptop run therefore implies a different build or loading setup; the paper should state which commit and patches were used.
+- CLAUDE.md (2026-10-05) and the `9f34e2f` commit message describe the ARM tier as never run on Snapdragon and as first booting at all on 2026-10-08.
+- On x86, the hardware evidence in the dump is `_claude-memory/m4b5-first-hw-boot-log.md`: a real AMD machine reached ExitBootServices and live DBT dispatch on 2026-06-04, photographed, with no serial log. A hardware run of the current `whpx_hostmode` path would still be **host mode (no VMX/SVM)**. Hardware execution does not by itself make the x86 tier a Type-1 hypervisor.
+
+To upgrade A → L, add for each tier: the full serial log (or photos if there is no serial port), machine model, CPU, firmware version, commit plus diff, EFI SHA-256, and kernel/initramfs/image hashes, under `raw/hardware-<date>/`.
+
 
 ## 1. Claims table
 
@@ -25,7 +36,7 @@
 | 10 | **64 completed chapters** (`sandbox/x86_64-port` CLAUDE.md "58 → 64"; README badge "58/70") | `CLAUDE.md` (dump, rewritten 2026-10-05) | **S** | **False under any runtime definition.** Current self-audit: 13 Live / 17 Partial / 19 Spec-only / 15 Design / 6 Not started. "Complete" used to mean "typed module + gate struct + unit tests". | High | |
 | 11 | Chapters 34/35/36 "Validated" (commits `17d9cd5`, `e2d6cac`, `2098780`, 2026-05-15) | git history | **R/S** | **Were false when committed.** The first boot to userspace was 2026-10-08 (`9f34e2f`: "The ARM tier had never booted on this machine"). The ch35 commit's "PSCI **HVC**" conduit was itself one of the bugs fixed. | High | 146 days between "Validated" and the first runtime proof. |
 | 12 | **~50/86 modules with no live caller** (`_claude-memory/baseline-2026-10-05.md`) | linker-level attribution: `raw/2026-10-08_9f34e2f_image-attribution-*.md` | **R** | **Confirmed and sharpened: 47 of 88 hypervisor source files contribute no code to either shipped EFI image** (aarch64, or x86 `whpx_hostmode`). Translator: 35/64 files absent from the x86 image, including all of `opt/`, `ssa/` and 11 spec `runtime/*` modules. | High | Method: PDB line tables of the LTO release build; every instruction symbolised with its full inline chain; a file is present if it appears in any frame. Presence ≠ execution; absence = unreachable from that image's entry point. |
-| 13 | **GKI 6.1 boot** | ARM: `run-arm-auto.py`; x86: old log | **R** | ARM: GKI 6.1.79 boots under EL2 to EL0 (TCG). x86: translated GKI boots (TCG here, early init; WHPX old log to init and later). | High | |
+| 13 | **GKI 6.1 boot** | ARM: `run-arm-auto.py`; x86: old log; hardware: author report | **R** (QEMU) / **A** (hardware) | ARM: GKI 6.1.79 boots under EL2 to EL0 (TCG). x86: translated GKI boots (TCG here, early init; WHPX old log to init and later). The author reports the same milestones on a real ARM laptop and on real x86 hardware. | High (QEMU) / Low-Medium (hardware, no log) | See the hardware note above. |
 | 14 | **Android `init` runs** | `raw/old-evidence/x86-serial-com1.log.gz` (WHPX) | **L** | True in the old log: `Run /init` at guest t=191 s, init executing `init.rc`. Not re-run (needs WHPX; TCG too slow). | Medium-High | x86 host-mode DBT only. Never on the ARM tier. |
 | 15 | **apexd runs** | same log | **L** | apexd-**bootstrap** ran and exited 0 (`Activated 3 package`) | Medium-High | |
 | 16 | **33 APEXes activated** | memory note only | **N** | **Unverified.** No log in the dump. Relied on image-side edits (converted .capex, SELinux xattrs, `/metadata` + `/data`) that are not in the repository. | Low | |
@@ -35,11 +46,11 @@
 | 20 | **EL2 hypervisor bugs** (9 "runtime rules", 12 fixes) | `9f34e2f` diff, `CLAUDE.md` | **R** (fault injection) | **Real: 7/7 revertible fixes confirmed by fault injection.** Reverting any one of EOImode=1, AMBA PL011 node, SMC conduit, ELR+=4 on emulated traps, ID-register sanitising, HCR.APK/API, or MADT topology breaks the ARM proof with the documented symptom (`bug_taxonomy.md` §B). | High | QEMU only. |
 | 21 | Stage-2 tables / EL2 state outside guest RAM | `main.rs`, `boot.rs`, `el2_mmu.rs` | **R/S** | True on the ARM boot path: allocator `largest_conventional_outside`, a static EL2 stack, an AETHER-owned EL2 page table, and a launch guard. Exercised by every ARM proof run. | High | QEMU only. |
 | 22 | GIC EOImode=1, PSCI via SMC, AMBA PL011 DT node (ttynull fix) | code + fault injection | **R** | True; each reproduced by fault injection (B1, B2, B3). | High | |
-| 23 | **Bare-metal Type-1 hypervisor** (README, CLAUDE.md) | `main.rs`, `boot_x86.rs` | **R/S** | **ARM tier: an EL2 hypervisor that has run only under QEMU TCG** (emulated EL2), never on hardware. **x86 tier: not a hypervisor in its working configuration.** The Android boot runs in UEFI host mode with no VMX/SVM. VMLAUNCH/VMRUN appear only on a "not armed" smoke path that runs a HLT stub. | High | See §3. |
+| 23 | **Bare-metal Type-1 hypervisor** (README, CLAUDE.md) | `main.rs`, `boot_x86.rs` | **R/S** | **ARM tier: an EL2 hypervisor reproduced under QEMU TCG** (emulated EL2); a run on a real ARM laptop is author-reported, with no log and an unidentified build (the audited binary is QEMU-virt-specific). **x86 tier: not a hypervisor in its working configuration.** The Android boot runs in UEFI host mode with no VMX/SVM. VMLAUNCH/VMRUN appear only on a "not armed" smoke path that runs a HLT stub. | High | See §3. |
 | 24 | **FEX-Emu DBT inside the hypervisor** (README) | `hypervisor/third_party/fex/` | **S** | **Obsolete.** The FEX directory is a stub crate; the in-tree `aether-translator` replaced it. The `fex_linked` feature now aliases the in-tree DBT. | High | |
 | 25 | **"250k LOC"** | — | **R** | **Not supported.** All tracked code in all languages is ~100k code lines (~155k raw including comments and blanks). Production Rust is 63.6k. | High | See §4. |
 | 26 | "Production Android", "full app compatibility", "undetectable", Phone Bridge, synthetic IMEI/IMSI, Snapdragon, frame-time targets (README) | README, spec modules | **S** | **Unsupported.** No app ever ran; no UI; GPU/NVMe/USB/network/AVB/OTA/recovery/phone-bridge modules are spec-only (absent from both images); never run on Snapdragon or bare-metal x86. Identity/fingerprint modules are tables with no boot-path caller. | High | Remove from any paper. |
-| 27 | Hardware validation (`HARDWARE_VALIDATION.md`, memory `m4b5-first-hw-boot-log.md`) | notes | **N** | One note records ARM64-on-x86 DBT execution on a real AMD box (early kernel stage). No log in the dump. | Low | |
+| 27 | Hardware validation (`HARDWARE_VALIDATION.md`, memory `m4b5-first-hw-boot-log.md`, author report 2026-10-08) | notes + author statement | **N / A** | Note: real AMD box reached live DBT dispatch on 2026-06-04 (photos). Author: all QEMU milestones reproduced on a real ARM laptop and real x86 hardware. No logs in the dump. | Low-Medium | Needs logs, machine details and build identity (see hardware note). The audited ARM binary is QEMU-virt-specific. |
 
 ## 2. "Passing tests vs working system" (quantified)
 
@@ -78,9 +89,9 @@
 | x86 Android execution | — | — | **UEFI application, ring 0, host mode**: CALLs translated blocks; software MMU for guest memory; UEFI's identity-mapped CR3 plus a host IDT. **No hardware isolation between AETHER and the Android guest.** | `boot_x86.rs::run_android_dispatch_loop` |
 | GDT/IDT | x86 host IDT installed (`host_idt.rs`); firmware GDT reused | — | yes | |
 | Raw memory ownership | ARM: Stage-2 identity map of 2 GiB. x86: a fixed software-MMU window (`aether_mmu_set_window`) | | yes (QEMU) | |
-| Real hardware | Snapdragon: never. Intel/AMD: one note of an early-kernel DBT run on AMD (no log) | | **no evidence** | |
+| Real hardware | ARM laptop and x86: **author-reported** (no artifacts). AMD: one note of DBT dispatch on hardware (photos, 2026-06-04) | | **author-reported, not verified** | The audited ARM build hard-codes QEMU-virt addresses |
 
-**Verdict:** what has been demonstrated is "**an ARM64 EL2 hypervisor that boots GKI to userspace under QEMU's emulated EL2**" and, separately, "**a UEFI-hosted ARM64→x86-64 system-level DBT that boots Android's kernel and early userspace under QEMU (WHPX/TCG)**". Calling either "bare-metal Type-1" for Android is not supported by runtime evidence.
+**Verdict** (the author additionally reports hardware runs of both; see the hardware note): what has been demonstrated **in this audit** is "**an ARM64 EL2 hypervisor that boots GKI to userspace under QEMU's emulated EL2**" and, separately, "**a UEFI-hosted ARM64→x86-64 system-level DBT that boots Android's kernel and early userspace under QEMU (WHPX/TCG)**". Calling either "bare-metal Type-1" for Android is not supported by runtime evidence.
 
 ## 4. Android image / ELF pipeline
 
@@ -143,13 +154,13 @@
 15. apexd **33 APEXes activated**; **bpfloader exit 0** (notes only; logs and image changes not in the repository).
 16. **346K dispatches/s under WHPX** (no method, no log).
 17. "~24 confirmed DBT miscompiles" (number not found anywhere).
-18. Any run on real hardware (one AMD note, no log).
+18. Runs on real hardware. **Author-reported:** the ARM tier reached its QEMU milestones (GKI → EL0, 4 CPUs) on a real ARM laptop, and the x86 tier reached its QEMU milestones on real x86 hardware. One AMD note from 2026-06-04 (photos) is the only artifact. **Publishable once logs and setup details are added.**
 
 ### Unsupported / should be removed
-19. "Bare-metal **Type-1** hypervisor delivering production Android". The x86 Android path is not virtualised; the ARM path has never run on hardware or booted Android.
+19. "Bare-metal **Type-1** hypervisor delivering production Android". The x86 Android path is not virtualised; the ARM path has never booted Android (its hardware run is author-reported and reaches only GKI → EL0 test binary).
 20. "Full app compatibility", "production Android", any UI/frame-time numbers (≤ 17 ms / ≤ 33 ms p99).
 21. "Undetectable / no fingerprint", attestation evasion, synthetic device identifiers (IMEI/IMSI), Phone Bridge Mode: spec tables only.
-22. Snapdragon X Elite support; GPU SR-IOV; NVMe/USB/network passthrough; AVB; OTA; recovery.
+22. "Snapdragon X Elite support" as a product claim (the author reports a laptop boot to the same milestones; even with logs, that supports "boots GKI to userspace on <model>", not support); GPU SR-IOV; NVMe/USB/network passthrough; AVB; OTA; recovery.
 23. "FEX-Emu inside the hypervisor" (replaced by the in-tree DBT).
 24. "1,300+ passing **ARM** tests", "64 completed chapters", "250k LOC".
 25. **zygote / SurfaceFlinger reached.**
@@ -164,11 +175,11 @@
    - (d) Measurements of the live DBT design: per-instruction context round-trip at ~69 B/insn and soft-MMU-dominated memory cost.
 3. **Exact reproducible numbers.** See `README.md`: corpus 105,573; 78,301/422/26,709/141; 18 genuine divergences; 93.7% coverage; 2,177/2,178 tests; 7/7 fault injections; ARM `PROOF done` 13.0 s median (smp4, N=5); 21.8K dispatches/s (TCG); 580K blocks/s; 33 ns cache hit; 63.6k production LOC.
 4. **Furthest runtime milestone.** Reproduced: ARM GKI 6.1 → EL0 test binary with 4 CPUs under emulated EL2; x86 translated GKI early boot under TCG. Preserved log (WHPX): Android `init` → apexd-bootstrap → `keystore2` start at guest t=2177 s. Notes only: apexd-33, bpfloader. Never: zygote.
-5. **Main limitations.** No hardware runs. The x86 tier is not virtualised. The ARM tier never booted Android. No whole-system baseline. Images and logs for the deepest milestones are not reproducible from the repository. Pre-fix code states are squashed. The oracle is single-block, register-only and reference-first.
+5. **Main limitations.** Hardware runs are author-reported only, with no logs or setup details in the repository. The x86 tier is not virtualised. The ARM tier never booted Android. No whole-system baseline. Images and logs for the deepest milestones are not reproducible from the repository. Pre-fix code states are squashed. The oracle is single-block, register-only and reference-first.
 6. **Benchmark gaps.** WHPX dispatch rate and time-to-milestone with host timestamps (runbook); boot-time cache hit rate (counter exists, not printed); memory-heavy workloads with the MMU on; whole-system profile.
 7. **Baseline gaps.** QEMU system-mode TCG booting the same AOSP images; FEX-Emu on user-space workloads (the corpus blocks or a static benchmark); native ARM hardware. Box64 does not apply (wrong direction).
 8. **Reproducibility gaps.** Image manifests and hashes; the apexd/bpfloader logs; kernel and initramfs rebuild; a scripted 346K measurement; per-fix git history for July 2026.
-9. **Recommended framing.** Today: a **workshop paper or experience report**, e.g. "Differential testing of a system-level ARM64→x86 DBT on real Android code: what silent miscompiles look like", with the agent-built-systems lesson as a second theme. Not a full systems paper: there is no hardware result, no whole-system performance comparison, and no Android boot past early userspace on the hypervisor path. A technical report can carry the full taxonomy and artifacts.
+9. **Recommended framing.** Today: a **workshop paper or experience report**, e.g. "Differential testing of a system-level ARM64→x86 DBT on real Android code: what silent miscompiles look like", with the agent-built-systems lesson as a second theme. Not a full systems paper: hardware results are not yet documented (author-reported only), no whole-system performance comparison, and no Android boot past early userspace on the hypervisor path. A technical report can carry the full taxonomy and artifacts.
 10. **Confidence.**
 
 | Claim | Confidence | Why |
@@ -177,10 +188,11 @@
 | 18 genuine divergences today; 404 reference bugs | High | Exact-arithmetic adjudication plus a scratch reference fix |
 | 18 historical silent miscompiles found and fixed | Medium-High | Exact repros documented and regression tests pass; pre-fix states not in git |
 | EL2 bugs real and necessary | High | Fault injection, QEMU only |
-| ARM GKI → userspace under EL2 | High (QEMU) / none (hardware) | Reproduced N=10 under TCG |
+| ARM GKI → userspace under EL2 | High (QEMU) / Low-Medium (hardware) | Reproduced N=10 under TCG; laptop run author-reported, no log; audited build is QEMU-virt-specific |
+| x86 milestones on real hardware | Low-Medium | Author-reported; one AMD photo note (2026-06-04) |
 | Android init under the x86 DBT | Medium | One preserved WHPX log; not re-run |
 | apexd 33 / bpfloader | Low | Notes only |
 | zygote | High that it was *not* reached | No evidence anywhere |
 | 346K dispatches/s | Low | No method or log; TCG measures 21.8K |
 | Dead-code / test-divergence numbers | High | Linker line tables, reproducible script |
-| Type-1 bare-metal Android | Unsupported | x86 path not virtualised; ARM never on hardware |
+| Type-1 bare-metal Android | Unsupported | x86 path not virtualised (also on hardware: host mode); ARM tier never booted Android (hardware run author-reported, kernel → test binary only) |

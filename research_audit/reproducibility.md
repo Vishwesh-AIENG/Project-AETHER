@@ -67,7 +67,7 @@ Run from the AETHER tree root unless noted. `R=research_audit/raw`.
 | Kernel `_kernel_new` build (`qemu/_kbuild_step2.sh`, `qemu/kernel.config`, GKI 6.1.79 + local patch, "-dirty") | kernel provenance only partially reproducible |
 | `qemu/initrd-proof.cpio` prebuilt with a Bootlin toolchain | `qemu/initrd-src/build.sh` rebuilds it (needs root for `mknod`); not re-done here |
 | Checksums for large blobs | `_blobs/restore.sh` verifies non-emptiness only |
-| Real hardware (Snapdragon X, Intel VT-x, AMD-V bare metal) | no hardware claim can be checked |
+| Hardware runs (author reports a real ARM laptop and real x86 reaching the QEMU milestones) | no logs, machine models, firmware, EFI hashes or build diffs; the audited ARM build hard-codes QEMU-virt addresses, so the laptop build must differ. Add them under `raw/hardware-<date>/` |
 
 ## 5. Windows / WHPX runbook (to close the x86 gaps)
 
