@@ -1621,6 +1621,20 @@ fn lower_fpround_ties_away(enc: &mut X86Encoder, d: u8, n: u8, dbl: bool) {
         enc.emit_pand(VS3, VS2);
         enc.emit_addss(VS1, VS3);
     }
+    // The result always carries x's sign. Re-apply it: when the addend is +0.0,
+    // `-0.0 + +0.0` rounds to +0.0, but FRINTA(x in (-0.5, -0]) is -0.0.
+    // x is reloaded from Vn (unchanged until the final store, even when d == n).
+    if dbl {
+        enc.emit_movsd_load(VS2, R15, vd(n));
+        enc.emit_mov_r64_imm64(RAX, 0x8000_0000_0000_0000u64 as i64);
+        enc.emit_movq_xmm_r64(VS3, RAX);
+    } else {
+        enc.emit_movss_load(VS2, R15, vd(n));
+        enc.emit_mov_r64_imm32(RAX, 0x8000_0000u32 as i32);
+        enc.emit_movd_xmm_r32(VS3, RAX);
+    }
+    enc.emit_pand(VS2, VS3); // VS2 = x & signmask
+    enc.emit_por(VS1, VS2);
     enc.emit_movdqa_rr(VS0, VS1);
     enc.emit_movdqu_store(R15, vd(d), VS0);
 }
@@ -1705,6 +1719,13 @@ fn lower_vecfpround(
                 enc.emit_pand(VS3, VS2);         // VS3 = add
                 enc.emit_addps(VS1, VS3);        // VS1 = t + add
             }
+            // Re-apply x's sign per lane: a +0.0 addend turns a -0.0 trunc into +0.0,
+            // but FRINTA(x in (-0.5, -0]) is -0.0. Vn is unchanged until the store.
+            enc.emit_movdqu_load(VS2, R15, vd(n));
+            enc.emit_pcmpeqd(VS3, VS3);
+            if dbl { enc.emit_psllq_imm(VS3, 63) } else { enc.emit_pslld_imm(VS3, 31) } // sign mask
+            enc.emit_pand(VS2, VS3);             // VS2 = x & signmask
+            enc.emit_por(VS1, VS2);
             enc.emit_movdqa_rr(VS0, VS1);
         }
     }

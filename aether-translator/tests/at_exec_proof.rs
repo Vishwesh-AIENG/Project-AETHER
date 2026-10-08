@@ -8964,6 +8964,43 @@ fn fp_vector_frinta_no_double_round() {
     assert_eq!((ctx[vd(0) + 1] >> 32) as u32, 0x4B00_0001, "vFRINTA(2^23+1) unchanged");
 }
 
+/// FRINTA keeps the sign of a zero result: x in (-0.5, -0] rounds to -0.0, not +0.0.
+/// The ties-away emulation adds a masked addend that is +0.0 when |x - trunc(x)| < 0.5,
+/// and -0.0 + +0.0 = +0.0 under round-to-nearest. Found by the 2026-10-08 oracle
+/// re-run (research_audit/oracle_results.md); scalar and vector paths both affected.
+#[test]
+fn fp_frinta_preserves_negative_zero() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    let neg0d = (-0.0f64).to_bits();
+    let neg0s = f32::to_bits(-0.0) as u64;
+    // Scalar double: FRINTA D0, D1 = 0x1E664020.
+    for x in [-0.3f64, -0.0, -0.49999999999999994] {
+        let ctx = fp_run1(0x1E66_4020, |c| { c[vd(1)] = x.to_bits(); });
+        assert_eq!(ctx[vd(0)], neg0d, "FRINTA({x:e}) must be -0.0");
+    }
+    let ctx = fp_run1(0x1E66_4020, |c| { c[vd(1)] = 0.3f64.to_bits(); });
+    assert_eq!(ctx[vd(0)], 0, "FRINTA(0.3) must be +0.0");
+    // Scalar single: FRINTA S0, S1 = 0x1E264020 (upper bits of the low 64 stay zero).
+    let ctx = fp_run1(0x1E26_4020, |c| { c[vd(1)] = f32::to_bits(-0.3) as u64; });
+    assert_eq!(ctx[vd(0)], neg0s, "FRINTA(-0.3f) must be -0.0f");
+    // Vector .4s: FRINTA v0.4s, v1.4s = 0x6E218820. lanes [-0.3, -0.0, 0.3, -0.49999997].
+    let ctx = fp_run1(0x6E21_8820, |c| {
+        c[vd(1)] = f32::to_bits(-0.3) as u64 | ((f32::to_bits(-0.0) as u64) << 32);
+        c[vd(1) + 1] = f32::to_bits(0.3) as u64 | (0xBEFF_FFFFu64 << 32);
+    });
+    assert_eq!(ctx[vd(0)], neg0s | (neg0s << 32), "vFRINTA.4s lanes 0,1 must be -0.0");
+    assert_eq!(ctx[vd(0) + 1], neg0s << 32, "vFRINTA.4s lane 2 = +0.0, lane 3 = -0.0");
+    // Vector .2d: FRINTA v0.2d, v1.2d = 0x6E618820. lanes [-0.3, 0.2].
+    let ctx = fp_run1(0x6E61_8820, |c| {
+        c[vd(1)] = (-0.3f64).to_bits();
+        c[vd(1) + 1] = 0.2f64.to_bits();
+    });
+    assert_eq!(ctx[vd(0)], neg0d, "vFRINTA.2d(-0.3) must be -0.0");
+    assert_eq!(ctx[vd(0) + 1], 0, "vFRINTA.2d(0.2) must be +0.0");
+}
+
 /// F5 - by-element FMLA.4s must be FUSED (single rounding). Vn=Vm[0]=1+2^-12,
 /// acc=2^-24 -> fused 0x3F801001; unfused mul+add rounds to 0x3F801000.
 #[test]
