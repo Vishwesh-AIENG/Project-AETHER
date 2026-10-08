@@ -1,0 +1,17 @@
+[package]
+name = "aether-dbt-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Research-audit measurement harness for the AETHER DBT live translate path (not part of the AETHER build)."
+
+[dependencies]
+# Path is relative to a checkout where research_audit/ sits next to the AETHER
+# tree; override with `--config` or edit if your layout differs.
+aether-translator = { path = "../../../../aether-files/aether-translator" }
+
+[workspace]
+
+[profile.release]
+lto = true
+opt-level = "s"
+panic = "abort"

@@ -1,0 +1,11 @@
+--- /tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/hypervisor/src/arm64/exception.rs.orig	2026-10-08 10:26:39.221648733 +0000
++++ /tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/hypervisor/src/arm64/exception.rs	2026-10-08 10:26:39.235193864 +0000
+@@ -264,7 +264,7 @@
+ fn finish_exit(ctx: &mut GuestContext, reason: ExitReason, esr: u64) -> ExitReason {
+     match reason {
+         ExitReason::ReturnToGuest | ExitReason::RetryInstruction => {}
+-        ExitReason::Emulated => ctx.elr_el2 = ctx.elr_el2.wrapping_add(4),
++        ExitReason::Emulated => {}
+         ExitReason::Halt => halt_with_report(ctx, esr),
+     }
+     reason

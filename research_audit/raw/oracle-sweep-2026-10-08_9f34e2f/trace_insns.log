@@ -1,0 +1,1628 @@
+=== AETHER dbt-oracle — 1617 block(s) ===
+    reference engine: hand-written ARM64 interpreter (independent of DBT)
+
+[PASS  ] t_0a08012a_c0                (45 bytes x86)
+[PASS  ] t_0a08012a_c1                (45 bytes x86)
+[PASS  ] t_0a08012a_c2                (45 bytes x86)
+[PASS  ] t_0a160108_c0                (48 bytes x86)
+[PASS  ] t_0a160108_c1                (48 bytes x86)
+[PASS  ] t_0a160108_c2                (48 bytes x86)
+[PASS  ] t_0b05010a_c0                (45 bytes x86)
+[PASS  ] t_0b05010a_c1                (45 bytes x86)
+[PASS  ] t_0b05010a_c2                (45 bytes x86)
+[SKIP  ] t_0e2008a3_c0                reference: unsupported insn 0x0e2008a3
+[SKIP  ] t_0e2008a3_c1                reference: unsupported insn 0x0e2008a3
+[SKIP  ] t_0e2008a3_c2                reference: unsupported insn 0x0e2008a3
+[SKIP  ] t_1000008a_c0                reference: unsupported insn 0x1000008a
+[SKIP  ] t_1000008a_c1                reference: unsupported insn 0x1000008a
+[SKIP  ] t_1000008a_c2                reference: unsupported insn 0x1000008a
+[SKIP  ] t_100000ab_c0                reference: unsupported insn 0x100000ab
+[SKIP  ] t_100000ab_c1                reference: unsupported insn 0x100000ab
+[SKIP  ] t_100000ab_c2                reference: unsupported insn 0x100000ab
+[SKIP  ] t_100000c9_c0                reference: unsupported insn 0x100000c9
+[SKIP  ] t_100000c9_c1                reference: unsupported insn 0x100000c9
+[SKIP  ] t_100000c9_c2                reference: unsupported insn 0x100000c9
+[SKIP  ] t_10fffec9_c0                reference: unsupported insn 0x10fffec9
+[SKIP  ] t_10fffec9_c1                reference: unsupported insn 0x10fffec9
+[SKIP  ] t_10fffec9_c2                reference: unsupported insn 0x10fffec9
+[SKIP  ] t_10ffff2c_c0                reference: unsupported insn 0x10ffff2c
+[SKIP  ] t_10ffff2c_c1                reference: unsupported insn 0x10ffff2c
+[SKIP  ] t_10ffff2c_c2                reference: unsupported insn 0x10ffff2c
+[PASS  ] t_11000508_c0                (47 bytes x86)
+[PASS  ] t_11000508_c1                (47 bytes x86)
+[PASS  ] t_11000508_c2                (47 bytes x86)
+[PASS  ] t_1100054a_c0                (47 bytes x86)
+[PASS  ] t_1100054a_c1                (47 bytes x86)
+[PASS  ] t_1100054a_c2                (47 bytes x86)
+[PASS  ] t_11000676_c0                (53 bytes x86)
+[PASS  ] t_11000676_c1                (53 bytes x86)
+[PASS  ] t_11000676_c2                (53 bytes x86)
+[PASS  ] t_110006c9_c0                (50 bytes x86)
+[PASS  ] t_110006c9_c1                (50 bytes x86)
+[PASS  ] t_110006c9_c2                (50 bytes x86)
+[PASS  ] t_110006f9_c0                (53 bytes x86)
+[PASS  ] t_110006f9_c1                (53 bytes x86)
+[PASS  ] t_110006f9_c2                (53 bytes x86)
+[PASS  ] t_1100077b_c0                (53 bytes x86)
+[PASS  ] t_1100077b_c1                (53 bytes x86)
+[PASS  ] t_1100077b_c2                (53 bytes x86)
+[PASS  ] t_11000cc6_c0                (47 bytes x86)
+[PASS  ] t_11000cc6_c1                (47 bytes x86)
+[PASS  ] t_11000cc6_c2                (47 bytes x86)
+[PASS  ] t_11002109_c0                (47 bytes x86)
+[PASS  ] t_11002109_c1                (47 bytes x86)
+[PASS  ] t_11002109_c2                (47 bytes x86)
+[PASS  ] t_120002a0_c0                (50 bytes x86)
+[PASS  ] t_120002a0_c1                (50 bytes x86)
+[PASS  ] t_120002a0_c2                (50 bytes x86)
+[PASS  ] t_12001c21_c0                (48 bytes x86)
+[PASS  ] t_12001c21_c1                (48 bytes x86)
+[PASS  ] t_12001c21_c2                (48 bytes x86)
+[PASS  ] t_12001f25_c0                (51 bytes x86)
+[PASS  ] t_12001f25_c1                (51 bytes x86)
+[PASS  ] t_12001f25_c2                (51 bytes x86)
+[PASS  ] t_12001f60_c0                (50 bytes x86)
+[PASS  ] t_12001f60_c1                (50 bytes x86)
+[PASS  ] t_12001f60_c2                (50 bytes x86)
+[PASS  ] t_12001f68_c0                (51 bytes x86)
+[PASS  ] t_12001f68_c1                (51 bytes x86)
+[PASS  ] t_12001f68_c2                (51 bytes x86)
+[PASS  ] t_12007808_c0                (47 bytes x86)
+[PASS  ] t_12007808_c1                (47 bytes x86)
+[PASS  ] t_12007808_c2                (47 bytes x86)
+[PASS  ] t_12130108_c0                (48 bytes x86)
+[PASS  ] t_12130108_c1                (48 bytes x86)
+[PASS  ] t_12130108_c2                (48 bytes x86)
+[PASS  ] t_12130929_c0                (48 bytes x86)
+[PASS  ] t_12130929_c1                (48 bytes x86)
+[PASS  ] t_12130929_c2                (48 bytes x86)
+[PASS  ] t_121a7929_c0                (51 bytes x86)
+[PASS  ] t_121a7929_c1                (51 bytes x86)
+[PASS  ] t_121a7929_c2                (51 bytes x86)
+[PASS  ] t_121e7688_c0                (54 bytes x86)
+[PASS  ] t_121e7688_c1                (54 bytes x86)
+[PASS  ] t_121e7688_c2                (54 bytes x86)
+[PASS  ] t_121e7748_c0                (54 bytes x86)
+[PASS  ] t_121e7748_c1                (54 bytes x86)
+[PASS  ] t_121e7748_c2                (54 bytes x86)
+[PASS  ] t_12800000_c0                (37 bytes x86)
+[PASS  ] t_12800000_c1                (37 bytes x86)
+[PASS  ] t_12800000_c2                (37 bytes x86)
+[PASS  ] t_12800008_c0                (38 bytes x86)
+[PASS  ] t_12800008_c1                (38 bytes x86)
+[PASS  ] t_12800008_c2                (38 bytes x86)
+[PASS  ] t_12800018_c0                (41 bytes x86)
+[PASS  ] t_12800018_c1                (41 bytes x86)
+[PASS  ] t_12800018_c2                (41 bytes x86)
+[PASS  ] t_12b007e8_c0                (41 bytes x86)
+[PASS  ] t_12b007e8_c1                (41 bytes x86)
+[PASS  ] t_12b007e8_c2                (41 bytes x86)
+[SKIP  ] t_14000002_c0                reference: unsupported insn 0x14000002
+[SKIP  ] t_14000002_c1                reference: unsupported insn 0x14000002
+[SKIP  ] t_14000002_c2                reference: unsupported insn 0x14000002
+[SKIP  ] t_14000011_c0                reference: unsupported insn 0x14000011
+[SKIP  ] t_14000011_c1                reference: unsupported insn 0x14000011
+[SKIP  ] t_14000011_c2                reference: unsupported insn 0x14000011
+[SKIP  ] t_140000da_c0                reference: unsupported insn 0x140000da
+[SKIP  ] t_140000da_c1                reference: unsupported insn 0x140000da
+[SKIP  ] t_140000da_c2                reference: unsupported insn 0x140000da
+[SKIP  ] t_14000953_c0                reference: unsupported insn 0x14000953
+[SKIP  ] t_14000953_c1                reference: unsupported insn 0x14000953
+[SKIP  ] t_14000953_c2                reference: unsupported insn 0x14000953
+[SKIP  ] t_14001952_c0                reference: unsupported insn 0x14001952
+[SKIP  ] t_14001952_c1                reference: unsupported insn 0x14001952
+[SKIP  ] t_14001952_c2                reference: unsupported insn 0x14001952
+[SKIP  ] t_14002f77_c0                reference: unsupported insn 0x14002f77
+[SKIP  ] t_14002f77_c1                reference: unsupported insn 0x14002f77
+[SKIP  ] t_14002f77_c2                reference: unsupported insn 0x14002f77
+[SKIP  ] t_1400e06e_c0                reference: unsupported insn 0x1400e06e
+[SKIP  ] t_1400e06e_c1                reference: unsupported insn 0x1400e06e
+[SKIP  ] t_1400e06e_c2                reference: unsupported insn 0x1400e06e
+[SKIP  ] t_14012ea3_c0                reference: unsupported insn 0x14012ea3
+[SKIP  ] t_14012ea3_c1                reference: unsupported insn 0x14012ea3
+[SKIP  ] t_14012ea3_c2                reference: unsupported insn 0x14012ea3
+[SKIP  ] t_17e861e6_c0                reference: unsupported insn 0x17e861e6
+[SKIP  ] t_17e861e6_c1                reference: unsupported insn 0x17e861e6
+[SKIP  ] t_17e861e6_c2                reference: unsupported insn 0x17e861e6
+[SKIP  ] t_17ffffa7_c0                reference: unsupported insn 0x17ffffa7
+[SKIP  ] t_17ffffa7_c1                reference: unsupported insn 0x17ffffa7
+[SKIP  ] t_17ffffa7_c2                reference: unsupported insn 0x17ffffa7
+[SKIP  ] t_17ffffbd_c0                reference: unsupported insn 0x17ffffbd
+[SKIP  ] t_17ffffbd_c1                reference: unsupported insn 0x17ffffbd
+[SKIP  ] t_17ffffbd_c2                reference: unsupported insn 0x17ffffbd
+[SKIP  ] t_17ffffe6_c0                reference: unsupported insn 0x17ffffe6
+[SKIP  ] t_17ffffe6_c1                reference: unsupported insn 0x17ffffe6
+[SKIP  ] t_17ffffe6_c2                reference: unsupported insn 0x17ffffe6
+[PASS  ] t_1a890149_c0                (78 bytes x86)
+[PASS  ] t_1a890149_c1                (78 bytes x86)
+[PASS  ] t_1a890149_c2                (78 bytes x86)
+[PASS  ] t_1b0ba9c9_c0                (56 bytes x86)
+[PASS  ] t_1b0ba9c9_c1                (56 bytes x86)
+[PASS  ] t_1b0ba9c9_c2                (56 bytes x86)
+[PASS  ] t_2a0003e1_c0                (43 bytes x86)
+[PASS  ] t_2a0003e1_c1                (43 bytes x86)
+[PASS  ] t_2a0003e1_c2                (43 bytes x86)
+[PASS  ] t_2a0003e4_c0                (43 bytes x86)
+[PASS  ] t_2a0003e4_c1                (43 bytes x86)
+[PASS  ] t_2a0003e4_c2                (43 bytes x86)
+[PASS  ] t_2a0003e7_c0                (43 bytes x86)
+[PASS  ] t_2a0003e7_c1                (43 bytes x86)
+[PASS  ] t_2a0003e7_c2                (43 bytes x86)
+[PASS  ] t_2a0003e8_c0                (43 bytes x86)
+[PASS  ] t_2a0003e8_c1                (43 bytes x86)
+[PASS  ] t_2a0003e8_c2                (43 bytes x86)
+[PASS  ] t_2a0003f3_c0                (46 bytes x86)
+[PASS  ] t_2a0003f3_c1                (46 bytes x86)
+[PASS  ] t_2a0003f3_c2                (46 bytes x86)
+[PASS  ] t_2a0003f4_c0                (46 bytes x86)
+[PASS  ] t_2a0003f4_c1                (46 bytes x86)
+[PASS  ] t_2a0003f4_c2                (46 bytes x86)
+[PASS  ] t_2a0103e2_c0                (44 bytes x86)
+[PASS  ] t_2a0103e2_c1                (44 bytes x86)
+[PASS  ] t_2a0103e2_c2                (44 bytes x86)
+[PASS  ] t_2a0603e1_c0                (44 bytes x86)
+[PASS  ] t_2a0603e1_c1                (44 bytes x86)
+[PASS  ] t_2a0603e1_c2                (44 bytes x86)
+[PASS  ] t_2a0703e0_c0                (43 bytes x86)
+[PASS  ] t_2a0703e0_c1                (43 bytes x86)
+[PASS  ] t_2a0703e0_c2                (43 bytes x86)
+[PASS  ] t_2a0803e0_c0                (43 bytes x86)
+[PASS  ] t_2a0803e0_c1                (43 bytes x86)
+[PASS  ] t_2a0803e0_c2                (43 bytes x86)
+[PASS  ] t_2a0903e8_c0                (44 bytes x86)
+[PASS  ] t_2a0903e8_c1                (44 bytes x86)
+[PASS  ] t_2a0903e8_c2                (44 bytes x86)
+[PASS  ] t_2a0a03f3_c0                (47 bytes x86)
+[PASS  ] t_2a0a03f3_c1                (47 bytes x86)
+[PASS  ] t_2a0a03f3_c2                (47 bytes x86)
+[PASS  ] t_2a1303e1_c0                (47 bytes x86)
+[PASS  ] t_2a1303e1_c1                (47 bytes x86)
+[PASS  ] t_2a1303e1_c2                (47 bytes x86)
+[PASS  ] t_2a1403e9_c0                (47 bytes x86)
+[PASS  ] t_2a1403e9_c1                (47 bytes x86)
+[PASS  ] t_2a1403e9_c2                (47 bytes x86)
+[PASS  ] t_2a1403f3_c0                (50 bytes x86)
+[PASS  ] t_2a1403f3_c1                (50 bytes x86)
+[PASS  ] t_2a1403f3_c2                (50 bytes x86)
+[PASS  ] t_2a160188_c0                (48 bytes x86)
+[PASS  ] t_2a160188_c1                (48 bytes x86)
+[PASS  ] t_2a160188_c2                (48 bytes x86)
+[PASS  ] t_2a1b03e8_c0                (47 bytes x86)
+[PASS  ] t_2a1b03e8_c1                (47 bytes x86)
+[PASS  ] t_2a1b03e8_c2                (47 bytes x86)
+[PASS  ] t_2a1f03e0_c0                (42 bytes x86)
+[PASS  ] t_2a1f03e0_c1                (42 bytes x86)
+[PASS  ] t_2a1f03e0_c2                (42 bytes x86)
+[PASS  ] t_2a1f03e8_c0                (43 bytes x86)
+[PASS  ] t_2a1f03e8_c1                (43 bytes x86)
+[PASS  ] t_2a1f03e8_c2                (43 bytes x86)
+[PASS  ] t_2a1f03e9_c0                (43 bytes x86)
+[PASS  ] t_2a1f03e9_c1                (43 bytes x86)
+[PASS  ] t_2a1f03e9_c2                (43 bytes x86)
+[PASS  ] t_2a1f03f5_c0                (46 bytes x86)
+[PASS  ] t_2a1f03f5_c1                (46 bytes x86)
+[PASS  ] t_2a1f03f5_c2                (46 bytes x86)
+[PASS  ] t_2a1f03f6_c0                (46 bytes x86)
+[PASS  ] t_2a1f03f6_c1                (46 bytes x86)
+[PASS  ] t_2a1f03f6_c2                (46 bytes x86)
+[PASS  ] t_2a1f03f7_c0                (46 bytes x86)
+[PASS  ] t_2a1f03f7_c1                (46 bytes x86)
+[PASS  ] t_2a1f03f7_c2                (46 bytes x86)
+[PASS  ] t_2b020005_c0                (108 bytes x86)
+[PASS  ] t_2b020005_c1                (108 bytes x86)
+[PASS  ] t_2b020005_c2                (108 bytes x86)
+[PASS  ] t_2b020022_c0                (109 bytes x86)
+[PASS  ] t_2b020022_c1                (109 bytes x86)
+[PASS  ] t_2b020022_c2                (109 bytes x86)
+[PASS  ] t_2b1a0275_c0                (118 bytes x86)
+[PASS  ] t_2b1a0275_c1                (118 bytes x86)
+[PASS  ] t_2b1a0275_c2                (118 bytes x86)
+[PASS  ] t_3100067f_c0                (107 bytes x86)
+[PASS  ] t_3100067f_c1                (107 bytes x86)
+[PASS  ] t_3100067f_c2                (107 bytes x86)
+[PASS  ] t_310f841f_c0                (103 bytes x86)
+[PASS  ] t_310f841f_c1                (103 bytes x86)
+[PASS  ] t_310f841f_c2                (103 bytes x86)
+[PASS  ] t_321f77e0_c0                (46 bytes x86)
+[PASS  ] t_321f77e0_c1                (46 bytes x86)
+[PASS  ] t_321f77e0_c2                (46 bytes x86)
+[SKIP  ] t_34000060_c0                reference: unsupported insn 0x34000060
+[SKIP  ] t_34000060_c1                reference: unsupported insn 0x34000060
+[SKIP  ] t_34000060_c2                reference: unsupported insn 0x34000060
+[SKIP  ] t_340000ba_c0                reference: unsupported insn 0x340000ba
+[SKIP  ] t_340000ba_c1                reference: unsupported insn 0x340000ba
+[SKIP  ] t_340000ba_c2                reference: unsupported insn 0x340000ba
+[SKIP  ] t_340000e9_c0                reference: unsupported insn 0x340000e9
+[SKIP  ] t_340000e9_c1                reference: unsupported insn 0x340000e9
+[SKIP  ] t_340000e9_c2                reference: unsupported insn 0x340000e9
+[SKIP  ] t_34000100_c0                reference: unsupported insn 0x34000100
+[SKIP  ] t_34000100_c1                reference: unsupported insn 0x34000100
+[SKIP  ] t_34000100_c2                reference: unsupported insn 0x34000100
+[SKIP  ] t_34000180_c0                reference: unsupported insn 0x34000180
+[SKIP  ] t_34000180_c1                reference: unsupported insn 0x34000180
+[SKIP  ] t_34000180_c2                reference: unsupported insn 0x34000180
+[SKIP  ] t_34000199_c0                reference: unsupported insn 0x34000199
+[SKIP  ] t_34000199_c1                reference: unsupported insn 0x34000199
+[SKIP  ] t_34000199_c2                reference: unsupported insn 0x34000199
+[SKIP  ] t_34000239_c0                reference: unsupported insn 0x34000239
+[SKIP  ] t_34000239_c1                reference: unsupported insn 0x34000239
+[SKIP  ] t_34000239_c2                reference: unsupported insn 0x34000239
+[SKIP  ] t_34000248_c0                reference: unsupported insn 0x34000248
+[SKIP  ] t_34000248_c1                reference: unsupported insn 0x34000248
+[SKIP  ] t_34000248_c2                reference: unsupported insn 0x34000248
+[SKIP  ] t_340002c2_c0                reference: unsupported insn 0x340002c2
+[SKIP  ] t_340002c2_c1                reference: unsupported insn 0x340002c2
+[SKIP  ] t_340002c2_c2                reference: unsupported insn 0x340002c2
+[SKIP  ] t_34000360_c0                reference: unsupported insn 0x34000360
+[SKIP  ] t_34000360_c1                reference: unsupported insn 0x34000360
+[SKIP  ] t_34000360_c2                reference: unsupported insn 0x34000360
+[SKIP  ] t_34000637_c0                reference: unsupported insn 0x34000637
+[SKIP  ] t_34000637_c1                reference: unsupported insn 0x34000637
+[SKIP  ] t_34000637_c2                reference: unsupported insn 0x34000637
+[SKIP  ] t_34000a88_c0                reference: unsupported insn 0x34000a88
+[SKIP  ] t_34000a88_c1                reference: unsupported insn 0x34000a88
+[SKIP  ] t_34000a88_c2                reference: unsupported insn 0x34000a88
+[SKIP  ] t_34001155_c0                reference: unsupported insn 0x34001155
+[SKIP  ] t_34001155_c1                reference: unsupported insn 0x34001155
+[SKIP  ] t_34001155_c2                reference: unsupported insn 0x34001155
+[SKIP  ] t_3400b6a7_c0                reference: unsupported insn 0x3400b6a7
+[SKIP  ] t_3400b6a7_c1                reference: unsupported insn 0x3400b6a7
+[SKIP  ] t_3400b6a7_c2                reference: unsupported insn 0x3400b6a7
+[SKIP  ] t_34fff948_c0                reference: unsupported insn 0x34fff948
+[SKIP  ] t_34fff948_c1                reference: unsupported insn 0x34fff948
+[SKIP  ] t_34fff948_c2                reference: unsupported insn 0x34fff948
+[SKIP  ] t_34fffb18_c0                reference: unsupported insn 0x34fffb18
+[SKIP  ] t_34fffb18_c1                reference: unsupported insn 0x34fffb18
+[SKIP  ] t_34fffb18_c2                reference: unsupported insn 0x34fffb18
+[SKIP  ] t_34fffbc8_c0                reference: unsupported insn 0x34fffbc8
+[SKIP  ] t_34fffbc8_c1                reference: unsupported insn 0x34fffbc8
+[SKIP  ] t_34fffbc8_c2                reference: unsupported insn 0x34fffbc8
+[SKIP  ] t_34fffe80_c0                reference: unsupported insn 0x34fffe80
+[SKIP  ] t_34fffe80_c1                reference: unsupported insn 0x34fffe80
+[SKIP  ] t_34fffe80_c2                reference: unsupported insn 0x34fffe80
+[SKIP  ] t_350000a0_c0                reference: unsupported insn 0x350000a0
+[SKIP  ] t_350000a0_c1                reference: unsupported insn 0x350000a0
+[SKIP  ] t_350000a0_c2                reference: unsupported insn 0x350000a0
+[SKIP  ] t_350000c0_c0                reference: unsupported insn 0x350000c0
+[SKIP  ] t_350000c0_c1                reference: unsupported insn 0x350000c0
+[SKIP  ] t_350000c0_c2                reference: unsupported insn 0x350000c0
+[SKIP  ] t_350000d3_c0                reference: unsupported insn 0x350000d3
+[SKIP  ] t_350000d3_c1                reference: unsupported insn 0x350000d3
+[SKIP  ] t_350000d3_c2                reference: unsupported insn 0x350000d3
+[SKIP  ] t_350000e5_c0                reference: unsupported insn 0x350000e5
+[SKIP  ] t_350000e5_c1                reference: unsupported insn 0x350000e5
+[SKIP  ] t_350000e5_c2                reference: unsupported insn 0x350000e5
+[SKIP  ] t_35000317_c0                reference: unsupported insn 0x35000317
+[SKIP  ] t_35000317_c1                reference: unsupported insn 0x35000317
+[SKIP  ] t_35000317_c2                reference: unsupported insn 0x35000317
+[SKIP  ] t_350003a0_c0                reference: unsupported insn 0x350003a0
+[SKIP  ] t_350003a0_c1                reference: unsupported insn 0x350003a0
+[SKIP  ] t_350003a0_c2                reference: unsupported insn 0x350003a0
+[SKIP  ] t_35000800_c0                reference: unsupported insn 0x35000800
+[SKIP  ] t_35000800_c1                reference: unsupported insn 0x35000800
+[SKIP  ] t_35000800_c2                reference: unsupported insn 0x35000800
+[SKIP  ] t_35000fa0_c0                reference: unsupported insn 0x35000fa0
+[SKIP  ] t_35000fa0_c1                reference: unsupported insn 0x35000fa0
+[SKIP  ] t_35000fa0_c2                reference: unsupported insn 0x35000fa0
+[SKIP  ] t_35001869_c0                reference: unsupported insn 0x35001869
+[SKIP  ] t_35001869_c1                reference: unsupported insn 0x35001869
+[SKIP  ] t_35001869_c2                reference: unsupported insn 0x35001869
+[SKIP  ] t_35ffdb60_c0                reference: unsupported insn 0x35ffdb60
+[SKIP  ] t_35ffdb60_c1                reference: unsupported insn 0x35ffdb60
+[SKIP  ] t_35ffdb60_c2                reference: unsupported insn 0x35ffdb60
+[SKIP  ] t_35fff620_c0                reference: unsupported insn 0x35fff620
+[SKIP  ] t_35fff620_c1                reference: unsupported insn 0x35fff620
+[SKIP  ] t_35fff620_c2                reference: unsupported insn 0x35fff620
+[SKIP  ] t_35fffce0_c0                reference: unsupported insn 0x35fffce0
+[SKIP  ] t_35fffce0_c1                reference: unsupported insn 0x35fffce0
+[SKIP  ] t_35fffce0_c2                reference: unsupported insn 0x35fffce0
+[SKIP  ] t_35fffd80_c0                reference: unsupported insn 0x35fffd80
+[SKIP  ] t_35fffd80_c1                reference: unsupported insn 0x35fffd80
+[SKIP  ] t_35fffd80_c2                reference: unsupported insn 0x35fffd80
+[SKIP  ] t_35ffff00_c0                reference: unsupported insn 0x35ffff00
+[SKIP  ] t_35ffff00_c1                reference: unsupported insn 0x35ffff00
+[SKIP  ] t_35ffff00_c2                reference: unsupported insn 0x35ffff00
+[SKIP  ] t_360000a0_c0                reference: unsupported insn 0x360000a0
+[SKIP  ] t_360000a0_c1                reference: unsupported insn 0x360000a0
+[SKIP  ] t_360000a0_c2                reference: unsupported insn 0x360000a0
+[SKIP  ] t_36000329_c0                reference: unsupported insn 0x36000329
+[SKIP  ] t_36000329_c1                reference: unsupported insn 0x36000329
+[SKIP  ] t_36000329_c2                reference: unsupported insn 0x36000329
+[SKIP  ] t_360006a0_c0                reference: unsupported insn 0x360006a0
+[SKIP  ] t_360006a0_c1                reference: unsupported insn 0x360006a0
+[SKIP  ] t_360006a0_c2                reference: unsupported insn 0x360006a0
+[SKIP  ] t_36000800_c0                reference: unsupported insn 0x36000800
+[SKIP  ] t_36000800_c1                reference: unsupported insn 0x36000800
+[SKIP  ] t_36000800_c2                reference: unsupported insn 0x36000800
+[SKIP  ] t_3607ff49_c0                reference: unsupported insn 0x3607ff49
+[SKIP  ] t_3607ff49_c1                reference: unsupported insn 0x3607ff49
+[SKIP  ] t_3607ff49_c2                reference: unsupported insn 0x3607ff49
+[SKIP  ] t_36080133_c0                reference: unsupported insn 0x36080133
+[SKIP  ] t_36080133_c1                reference: unsupported insn 0x36080133
+[SKIP  ] t_36080133_c2                reference: unsupported insn 0x36080133
+[SKIP  ] t_360fff6b_c0                reference: unsupported insn 0x360fff6b
+[SKIP  ] t_360fff6b_c1                reference: unsupported insn 0x360fff6b
+[SKIP  ] t_360fff6b_c2                reference: unsupported insn 0x360fff6b
+[SKIP  ] t_36100082_c0                reference: unsupported insn 0x36100082
+[SKIP  ] t_36100082_c1                reference: unsupported insn 0x36100082
+[SKIP  ] t_36100082_c2                reference: unsupported insn 0x36100082
+[SKIP  ] t_361000c2_c0                reference: unsupported insn 0x361000c2
+[SKIP  ] t_361000c2_c1                reference: unsupported insn 0x361000c2
+[SKIP  ] t_361000c2_c2                reference: unsupported insn 0x361000c2
+[SKIP  ] t_361800c2_c0                reference: unsupported insn 0x361800c2
+[SKIP  ] t_361800c2_c1                reference: unsupported insn 0x361800c2
+[SKIP  ] t_361800c2_c2                reference: unsupported insn 0x361800c2
+[SKIP  ] t_36f806e0_c0                reference: unsupported insn 0x36f806e0
+[SKIP  ] t_36f806e0_c1                reference: unsupported insn 0x36f806e0
+[SKIP  ] t_36f806e0_c2                reference: unsupported insn 0x36f806e0
+[SKIP  ] t_36fffe00_c0                reference: unsupported insn 0x36fffe00
+[SKIP  ] t_36fffe00_c1                reference: unsupported insn 0x36fffe00
+[SKIP  ] t_36fffe00_c2                reference: unsupported insn 0x36fffe00
+[SKIP  ] t_37000094_c0                reference: unsupported insn 0x37000094
+[SKIP  ] t_37000094_c1                reference: unsupported insn 0x37000094
+[SKIP  ] t_37000094_c2                reference: unsupported insn 0x37000094
+[SKIP  ] t_370000d6_c0                reference: unsupported insn 0x370000d6
+[SKIP  ] t_370000d6_c1                reference: unsupported insn 0x370000d6
+[SKIP  ] t_370000d6_c2                reference: unsupported insn 0x370000d6
+[SKIP  ] t_370000e0_c0                reference: unsupported insn 0x370000e0
+[SKIP  ] t_370000e0_c1                reference: unsupported insn 0x370000e0
+[SKIP  ] t_370000e0_c2                reference: unsupported insn 0x370000e0
+[SKIP  ] t_37000fe8_c0                reference: unsupported insn 0x37000fe8
+[SKIP  ] t_37000fe8_c1                reference: unsupported insn 0x37000fe8
+[SKIP  ] t_37000fe8_c2                reference: unsupported insn 0x37000fe8
+[SKIP  ] t_3707fe00_c0                reference: unsupported insn 0x3707fe00
+[SKIP  ] t_3707fe00_c1                reference: unsupported insn 0x3707fe00
+[SKIP  ] t_3707fe00_c2                reference: unsupported insn 0x3707fe00
+[SKIP  ] t_3707ff00_c0                reference: unsupported insn 0x3707ff00
+[SKIP  ] t_3707ff00_c1                reference: unsupported insn 0x3707ff00
+[SKIP  ] t_3707ff00_c2                reference: unsupported insn 0x3707ff00
+[SKIP  ] t_37380208_c0                reference: unsupported insn 0x37380208
+[SKIP  ] t_37380208_c1                reference: unsupported insn 0x37380208
+[SKIP  ] t_37380208_c2                reference: unsupported insn 0x37380208
+[SKIP  ] t_373fffc9_c0                reference: unsupported insn 0x373fffc9
+[SKIP  ] t_373fffc9_c1                reference: unsupported insn 0x373fffc9
+[SKIP  ] t_373fffc9_c2                reference: unsupported insn 0x373fffc9
+[SKIP  ] t_37580070_c0                reference: unsupported insn 0x37580070
+[SKIP  ] t_37580070_c1                reference: unsupported insn 0x37580070
+[SKIP  ] t_37580070_c2                reference: unsupported insn 0x37580070
+[SKIP  ] t_37681409_c0                reference: unsupported insn 0x37681409
+[SKIP  ] t_37681409_c1                reference: unsupported insn 0x37681409
+[SKIP  ] t_37681409_c2                reference: unsupported insn 0x37681409
+[SKIP  ] t_37f800b3_c0                reference: unsupported insn 0x37f800b3
+[SKIP  ] t_37f800b3_c1                reference: unsupported insn 0x37f800b3
+[SKIP  ] t_37f800b3_c2                reference: unsupported insn 0x37f800b3
+[SKIP  ] t_37f80100_c0                reference: unsupported insn 0x37f80100
+[SKIP  ] t_37f80100_c1                reference: unsupported insn 0x37f80100
+[SKIP  ] t_37f80100_c2                reference: unsupported insn 0x37f80100
+[SKIP  ] t_37f80316_c0                reference: unsupported insn 0x37f80316
+[SKIP  ] t_37f80316_c1                reference: unsupported insn 0x37f80316
+[SKIP  ] t_37f80316_c2                reference: unsupported insn 0x37f80316
+[SKIP  ] t_37f803a0_c0                reference: unsupported insn 0x37f803a0
+[SKIP  ] t_37f803a0_c1                reference: unsupported insn 0x37f803a0
+[SKIP  ] t_37f803a0_c2                reference: unsupported insn 0x37f803a0
+[PASS  ] t_4b0900c2_c0                (45 bytes x86)
+[PASS  ] t_4b0900c2_c1                (45 bytes x86)
+[PASS  ] t_4b0900c2_c2                (45 bytes x86)
+[PASS  ] t_4e083c01_c0                (35 bytes x86)
+[PASS  ] t_4e083c01_c1                (35 bytes x86)
+[PASS  ] t_4e083c01_c2                (35 bytes x86)
+[PASS  ] t_4e209840_c0                (50 bytes x86)
+[PASS  ] t_4e209840_c1                (50 bytes x86)
+[PASS  ] t_4e209840_c2                (50 bytes x86)
+[PASS  ] t_4e251c63_c0                (55 bytes x86)
+[PASS  ] t_4e251c63_c1                (55 bytes x86)
+[PASS  ] t_4e251c63_c2                (55 bytes x86)
+[PASS  ] t_4ea41c66_c0                (55 bytes x86)
+[PASS  ] t_4ea41c66_c1                (55 bytes x86)
+[PASS  ] t_4ea41c66_c2                (55 bytes x86)
+[PASS  ] t_4ea49c42_c0                (56 bytes x86)
+[PASS  ] t_4ea49c42_c1                (56 bytes x86)
+[PASS  ] t_4ea49c42_c2                (56 bytes x86)
+[PASS  ] t_5100045c_c0                (50 bytes x86)
+[PASS  ] t_5100045c_c1                (50 bytes x86)
+[PASS  ] t_5100045c_c2                (50 bytes x86)
+[PASS  ] t_51000508_c0                (47 bytes x86)
+[PASS  ] t_51000508_c1                (47 bytes x86)
+[PASS  ] t_51000508_c2                (47 bytes x86)
+[PASS  ] t_51000708_c0                (50 bytes x86)
+[PASS  ] t_51000708_c1                (50 bytes x86)
+[PASS  ] t_51000708_c2                (50 bytes x86)
+[PASS  ] t_5100079c_c0                (53 bytes x86)
+[PASS  ] t_5100079c_c1                (53 bytes x86)
+[PASS  ] t_5100079c_c2                (53 bytes x86)
+[PASS  ] t_51001288_c0                (50 bytes x86)
+[PASS  ] t_51001288_c1                (50 bytes x86)
+[PASS  ] t_51001288_c2                (50 bytes x86)
+[PASS  ] t_51002509_c0                (47 bytes x86)
+[PASS  ] t_51002509_c1                (47 bytes x86)
+[PASS  ] t_51002509_c2                (47 bytes x86)
+[PASS  ] t_51002ec8_c0                (50 bytes x86)
+[PASS  ] t_51002ec8_c1                (50 bytes x86)
+[PASS  ] t_51002ec8_c2                (50 bytes x86)
+[PASS  ] t_5100394a_c0                (47 bytes x86)
+[PASS  ] t_5100394a_c1                (47 bytes x86)
+[PASS  ] t_5100394a_c2                (47 bytes x86)
+[PASS  ] t_51003aa8_c0                (50 bytes x86)
+[PASS  ] t_51003aa8_c1                (50 bytes x86)
+[PASS  ] t_51003aa8_c2                (50 bytes x86)
+[PASS  ] t_51008768_c0                (50 bytes x86)
+[PASS  ] t_51008768_c1                (50 bytes x86)
+[PASS  ] t_51008768_c2                (50 bytes x86)
+[PASS  ] t_51009288_c0                (50 bytes x86)
+[PASS  ] t_51009288_c1                (50 bytes x86)
+[PASS  ] t_51009288_c2                (50 bytes x86)
+[PASS  ] t_52800014_c0                (37 bytes x86)
+[PASS  ] t_52800014_c1                (37 bytes x86)
+[PASS  ] t_52800014_c2                (37 bytes x86)
+[PASS  ] t_52800020_c0                (37 bytes x86)
+[PASS  ] t_52800020_c1                (37 bytes x86)
+[PASS  ] t_52800020_c2                (37 bytes x86)
+[PASS  ] t_52800029_c0                (38 bytes x86)
+[PASS  ] t_52800029_c1                (38 bytes x86)
+[PASS  ] t_52800029_c2                (38 bytes x86)
+[PASS  ] t_5280002a_c0                (38 bytes x86)
+[PASS  ] t_5280002a_c1                (38 bytes x86)
+[PASS  ] t_5280002a_c2                (38 bytes x86)
+[PASS  ] t_52800033_c0                (41 bytes x86)
+[PASS  ] t_52800033_c1                (41 bytes x86)
+[PASS  ] t_52800033_c2                (41 bytes x86)
+[PASS  ] t_52800038_c0                (41 bytes x86)
+[PASS  ] t_52800038_c1                (41 bytes x86)
+[PASS  ] t_52800038_c2                (41 bytes x86)
+[PASS  ] t_52800048_c0                (38 bytes x86)
+[PASS  ] t_52800048_c1                (38 bytes x86)
+[PASS  ] t_52800048_c2                (38 bytes x86)
+[PASS  ] t_52800060_c0                (37 bytes x86)
+[PASS  ] t_52800060_c1                (37 bytes x86)
+[PASS  ] t_52800060_c2                (37 bytes x86)
+[PASS  ] t_52800208_c0                (38 bytes x86)
+[PASS  ] t_52800208_c1                (38 bytes x86)
+[PASS  ] t_52800208_c2                (38 bytes x86)
+[PASS  ] t_52800308_c0                (38 bytes x86)
+[PASS  ] t_52800308_c1                (38 bytes x86)
+[PASS  ] t_52800308_c2                (38 bytes x86)
+[PASS  ] t_52800309_c0                (38 bytes x86)
+[PASS  ] t_52800309_c1                (38 bytes x86)
+[PASS  ] t_52800309_c2                (38 bytes x86)
+[PASS  ] t_52800508_c0                (38 bytes x86)
+[PASS  ] t_52800508_c1                (38 bytes x86)
+[PASS  ] t_52800508_c2                (38 bytes x86)
+[PASS  ] t_5280100d_c0                (38 bytes x86)
+[PASS  ] t_5280100d_c1                (38 bytes x86)
+[PASS  ] t_5280100d_c2                (38 bytes x86)
+[PASS  ] t_52801028_c0                (38 bytes x86)
+[PASS  ] t_52801028_c1                (38 bytes x86)
+[PASS  ] t_52801028_c2                (38 bytes x86)
+[PASS  ] t_5288401a_c0                (41 bytes x86)
+[PASS  ] t_5288401a_c1                (41 bytes x86)
+[PASS  ] t_5288401a_c2                (41 bytes x86)
+[PASS  ] t_528e202a_c0                (38 bytes x86)
+[PASS  ] t_528e202a_c1                (38 bytes x86)
+[PASS  ] t_528e202a_c2                (38 bytes x86)
+[PASS  ] t_52900008_c0                (38 bytes x86)
+[PASS  ] t_52900008_c1                (38 bytes x86)
+[PASS  ] t_52900008_c2                (38 bytes x86)
+[PASS  ] t_5292c888_c0                (38 bytes x86)
+[PASS  ] t_5292c888_c1                (38 bytes x86)
+[PASS  ] t_5292c888_c2                (38 bytes x86)
+[PASS  ] t_53010918_c0                (67 bytes x86)
+[PASS  ] t_53010918_c1                (67 bytes x86)
+[PASS  ] t_53010918_c2                (67 bytes x86)
+[SKIP  ] t_54000128_c0                reference: unsupported insn 0x54000128
+[SKIP  ] t_54000128_c1                reference: unsupported insn 0x54000128
+[SKIP  ] t_54000128_c2                reference: unsupported insn 0x54000128
+[FAIL  ] t_5ac00800_c0                  x0  DBT=0x0000000001000000  REF=0x0000000000000001
+             x0  DBT=0x0000000001000000  REF=0x0000000000000001
+[FAIL  ] t_5ac00800_c1                  x0  DBT=0x0000000001000000  REF=0x0000000000000001
+             x0  DBT=0x0000000001000000  REF=0x0000000000000001
+[FAIL  ] t_5ac00800_c2                  x0  DBT=0x00000000ffffffff  REF=0x0000000000000001
+             x0  DBT=0x00000000ffffffff  REF=0x0000000000000001
+[PASS  ] t_6b00005f_c0                (101 bytes x86)
+[PASS  ] t_6b00005f_c1                (101 bytes x86)
+[PASS  ] t_6b00005f_c2                (101 bytes x86)
+[PASS  ] t_6b0000bf_c0                (101 bytes x86)
+[PASS  ] t_6b0000bf_c1                (101 bytes x86)
+[PASS  ] t_6b0000bf_c2                (101 bytes x86)
+[PASS  ] t_6b03001f_c0                (101 bytes x86)
+[PASS  ] t_6b03001f_c1                (101 bytes x86)
+[PASS  ] t_6b03001f_c2                (101 bytes x86)
+[PASS  ] t_6b0c01ff_c0                (102 bytes x86)
+[PASS  ] t_6b0c01ff_c1                (102 bytes x86)
+[PASS  ] t_6b0c01ff_c2                (102 bytes x86)
+[PASS  ] t_6b0d013f_c0                (102 bytes x86)
+[PASS  ] t_6b0d013f_c1                (102 bytes x86)
+[PASS  ] t_6b0d013f_c2                (102 bytes x86)
+[PASS  ] t_6b13035f_c0                (108 bytes x86)
+[PASS  ] t_6b13035f_c1                (108 bytes x86)
+[PASS  ] t_6b13035f_c2                (108 bytes x86)
+[PASS  ] t_6b19031f_c0                (108 bytes x86)
+[PASS  ] t_6b19031f_c1                (108 bytes x86)
+[PASS  ] t_6b19031f_c2                (108 bytes x86)
+[PASS  ] t_6b1b011f_c0                (105 bytes x86)
+[PASS  ] t_6b1b011f_c1                (105 bytes x86)
+[PASS  ] t_6b1b011f_c2                (105 bytes x86)
+[SKIP  ] t_6f00e400_c0                reference: unsupported insn 0x6f00e400
+[SKIP  ] t_6f00e400_c1                reference: unsupported insn 0x6f00e400
+[SKIP  ] t_6f00e400_c2                reference: unsupported insn 0x6f00e400
+[PASS  ] t_7100011f_c0                (101 bytes x86)
+[PASS  ] t_7100011f_c1                (101 bytes x86)
+[PASS  ] t_7100011f_c2                (101 bytes x86)
+[PASS  ] t_7100029f_c0                (104 bytes x86)
+[PASS  ] t_7100029f_c1                (104 bytes x86)
+[PASS  ] t_7100029f_c2                (104 bytes x86)
+[PASS  ] t_7100041f_c0                (103 bytes x86)
+[PASS  ] t_7100041f_c1                (103 bytes x86)
+[PASS  ] t_7100041f_c2                (103 bytes x86)
+[PASS  ] t_7100045f_c0                (104 bytes x86)
+[PASS  ] t_7100045f_c1                (104 bytes x86)
+[PASS  ] t_7100045f_c2                (104 bytes x86)
+[PASS  ] t_710004ff_c0                (104 bytes x86)
+[PASS  ] t_710004ff_c1                (104 bytes x86)
+[PASS  ] t_710004ff_c2                (104 bytes x86)
+[PASS  ] t_7100067f_c0                (107 bytes x86)
+[PASS  ] t_7100067f_c1                (107 bytes x86)
+[PASS  ] t_7100067f_c2                (107 bytes x86)
+[PASS  ] t_7100075f_c0                (107 bytes x86)
+[PASS  ] t_7100075f_c1                (107 bytes x86)
+[PASS  ] t_7100075f_c2                (107 bytes x86)
+[PASS  ] t_7100081f_c0                (103 bytes x86)
+[PASS  ] t_7100081f_c1                (103 bytes x86)
+[PASS  ] t_7100081f_c2                (103 bytes x86)
+[PASS  ] t_7100093f_c0                (104 bytes x86)
+[PASS  ] t_7100093f_c1                (104 bytes x86)
+[PASS  ] t_7100093f_c2                (104 bytes x86)
+[PASS  ] t_71000d3f_c0                (104 bytes x86)
+[PASS  ] t_71000d3f_c1                (104 bytes x86)
+[PASS  ] t_71000d3f_c2                (104 bytes x86)
+[PASS  ] t_71000d7f_c0                (104 bytes x86)
+[PASS  ] t_71000d7f_c1                (104 bytes x86)
+[PASS  ] t_71000d7f_c2                (104 bytes x86)
+[PASS  ] t_7100117f_c0                (104 bytes x86)
+[PASS  ] t_7100117f_c1                (104 bytes x86)
+[PASS  ] t_7100117f_c2                (104 bytes x86)
+[PASS  ] t_7100199f_c0                (104 bytes x86)
+[PASS  ] t_7100199f_c1                (104 bytes x86)
+[PASS  ] t_7100199f_c2                (104 bytes x86)
+[PASS  ] t_7100241f_c0                (103 bytes x86)
+[PASS  ] t_7100241f_c1                (103 bytes x86)
+[PASS  ] t_7100241f_c2                (103 bytes x86)
+[PASS  ] t_7100291f_c0                (104 bytes x86)
+[PASS  ] t_7100291f_c1                (104 bytes x86)
+[PASS  ] t_7100291f_c2                (104 bytes x86)
+[PASS  ] t_7100295f_c0                (104 bytes x86)
+[PASS  ] t_7100295f_c1                (104 bytes x86)
+[PASS  ] t_7100295f_c2                (104 bytes x86)
+[PASS  ] t_71003c1f_c0                (103 bytes x86)
+[PASS  ] t_71003c1f_c1                (103 bytes x86)
+[PASS  ] t_71003c1f_c2                (103 bytes x86)
+[PASS  ] t_7100401f_c0                (103 bytes x86)
+[PASS  ] t_7100401f_c1                (103 bytes x86)
+[PASS  ] t_7100401f_c2                (103 bytes x86)
+[PASS  ] t_7100441f_c0                (103 bytes x86)
+[PASS  ] t_7100441f_c1                (103 bytes x86)
+[PASS  ] t_7100441f_c2                (103 bytes x86)
+[PASS  ] t_7100953f_c0                (104 bytes x86)
+[PASS  ] t_7100953f_c1                (104 bytes x86)
+[PASS  ] t_7100953f_c2                (104 bytes x86)
+[PASS  ] t_7100997f_c0                (104 bytes x86)
+[PASS  ] t_7100997f_c1                (104 bytes x86)
+[PASS  ] t_7100997f_c2                (104 bytes x86)
+[PASS  ] t_7100a11f_c0                (104 bytes x86)
+[PASS  ] t_7100a11f_c1                (104 bytes x86)
+[PASS  ] t_7100a11f_c2                (104 bytes x86)
+[PASS  ] t_7100c13f_c0                (104 bytes x86)
+[PASS  ] t_7100c13f_c1                (104 bytes x86)
+[PASS  ] t_7100c13f_c2                (104 bytes x86)
+[PASS  ] t_7100f13f_c0                (104 bytes x86)
+[PASS  ] t_7100f13f_c1                (104 bytes x86)
+[PASS  ] t_7100f13f_c2                (104 bytes x86)
+[PASS  ] t_7100f93f_c0                (104 bytes x86)
+[PASS  ] t_7100f93f_c1                (104 bytes x86)
+[PASS  ] t_7100f93f_c2                (104 bytes x86)
+[PASS  ] t_7100fd3f_c0                (104 bytes x86)
+[PASS  ] t_7100fd3f_c1                (104 bytes x86)
+[PASS  ] t_7100fd3f_c2                (104 bytes x86)
+[PASS  ] t_71017d3f_c0                (104 bytes x86)
+[PASS  ] t_71017d3f_c1                (104 bytes x86)
+[PASS  ] t_71017d3f_c2                (104 bytes x86)
+[PASS  ] t_7101c11f_c0                (104 bytes x86)
+[PASS  ] t_7101c11f_c1                (104 bytes x86)
+[PASS  ] t_7101c11f_c2                (104 bytes x86)
+[PASS  ] t_7101e11f_c0                (104 bytes x86)
+[PASS  ] t_7101e11f_c1                (104 bytes x86)
+[PASS  ] t_7101e11f_c2                (104 bytes x86)
+[PASS  ] t_7101ed3f_c0                (104 bytes x86)
+[PASS  ] t_7101ed3f_c1                (104 bytes x86)
+[PASS  ] t_7101ed3f_c2                (104 bytes x86)
+[PASS  ] t_7104069f_c0                (107 bytes x86)
+[PASS  ] t_7104069f_c1                (107 bytes x86)
+[PASS  ] t_7104069f_c2                (107 bytes x86)
+[PASS  ] t_71040adf_c0                (107 bytes x86)
+[PASS  ] t_71040adf_c1                (107 bytes x86)
+[PASS  ] t_71040adf_c2                (107 bytes x86)
+[PASS  ] t_7108001f_c0                (103 bytes x86)
+[PASS  ] t_7108001f_c1                (103 bytes x86)
+[PASS  ] t_7108001f_c2                (103 bytes x86)
+[PASS  ] t_7110069f_c0                (107 bytes x86)
+[PASS  ] t_7110069f_c1                (107 bytes x86)
+[PASS  ] t_7110069f_c2                (107 bytes x86)
+[PASS  ] t_71100b5f_c0                (107 bytes x86)
+[PASS  ] t_71100b5f_c1                (107 bytes x86)
+[PASS  ] t_71100b5f_c2                (107 bytes x86)
+[PASS  ] t_7140313f_c0                (104 bytes x86)
+[PASS  ] t_7140313f_c1                (104 bytes x86)
+[PASS  ] t_7140313f_c2                (104 bytes x86)
+[PASS  ] t_721a019f_c0                (77 bytes x86)
+[PASS  ] t_721a019f_c1                (77 bytes x86)
+[PASS  ] t_721a019f_c2                (77 bytes x86)
+[PASS  ] t_8a294020_c0                (63 bytes x86)
+[PASS  ] t_8a294020_c1                (63 bytes x86)
+[PASS  ] t_8a294020_c2                (63 bytes x86)
+[PASS  ] t_8b000348_c0                (44 bytes x86)
+[PASS  ] t_8b000348_c1                (44 bytes x86)
+[PASS  ] t_8b000348_c2                (44 bytes x86)
+[PASS  ] t_8b00035a_c0                (47 bytes x86)
+[PASS  ] t_8b00035a_c1                (47 bytes x86)
+[PASS  ] t_8b00035a_c2                (47 bytes x86)
+[PASS  ] t_8b00037b_c0                (47 bytes x86)
+[PASS  ] t_8b00037b_c1                (47 bytes x86)
+[PASS  ] t_8b00037b_c2                (47 bytes x86)
+[PASS  ] t_8b010049_c0                (42 bytes x86)
+[PASS  ] t_8b010049_c1                (42 bytes x86)
+[PASS  ] t_8b010049_c2                (42 bytes x86)
+[PASS  ] t_8b020007_c0                (41 bytes x86)
+[PASS  ] t_8b020007_c1                (41 bytes x86)
+[PASS  ] t_8b020007_c2                (41 bytes x86)
+[PASS  ] t_8b0802e8_c0                (45 bytes x86)
+[PASS  ] t_8b0802e8_c1                (45 bytes x86)
+[PASS  ] t_8b0802e8_c2                (45 bytes x86)
+[PASS  ] t_8b081128_c0                (58 bytes x86)
+[PASS  ] t_8b081128_c1                (58 bytes x86)
+[PASS  ] t_8b081128_c2                (58 bytes x86)
+[PASS  ] t_8b09010a_c0                (42 bytes x86)
+[PASS  ] t_8b09010a_c1                (42 bytes x86)
+[PASS  ] t_8b09010a_c2                (42 bytes x86)
+[PASS  ] t_8b09028a_c0                (45 bytes x86)
+[PASS  ] t_8b09028a_c1                (45 bytes x86)
+[PASS  ] t_8b09028a_c2                (45 bytes x86)
+[PASS  ] t_8b09037b_c0                (48 bytes x86)
+[PASS  ] t_8b09037b_c1                (48 bytes x86)
+[PASS  ] t_8b09037b_c2                (48 bytes x86)
+[PASS  ] t_8b0a0288_c0                (45 bytes x86)
+[PASS  ] t_8b0a0288_c1                (45 bytes x86)
+[PASS  ] t_8b0a0288_c2                (45 bytes x86)
+[PASS  ] t_8b0b014a_c0                (42 bytes x86)
+[PASS  ] t_8b0b014a_c1                (42 bytes x86)
+[PASS  ] t_8b0b014a_c2                (42 bytes x86)
+[PASS  ] t_8b0c014a_c0                (42 bytes x86)
+[PASS  ] t_8b0c014a_c1                (42 bytes x86)
+[PASS  ] t_8b0c014a_c2                (42 bytes x86)
+[PASS  ] t_8b130109_c0                (45 bytes x86)
+[PASS  ] t_8b130109_c1                (45 bytes x86)
+[PASS  ] t_8b130109_c2                (45 bytes x86)
+[PASS  ] t_8b150117_c0                (48 bytes x86)
+[PASS  ] t_8b150117_c1                (48 bytes x86)
+[PASS  ] t_8b150117_c2                (48 bytes x86)
+[PASS  ] t_8b1502e8_c0                (48 bytes x86)
+[PASS  ] t_8b1502e8_c1                (48 bytes x86)
+[PASS  ] t_8b1502e8_c2                (48 bytes x86)
+[PASS  ] t_8b16033a_c0                (51 bytes x86)
+[PASS  ] t_8b16033a_c1                (51 bytes x86)
+[PASS  ] t_8b16033a_c2                (51 bytes x86)
+[PASS  ] t_8b1701ce_c0                (45 bytes x86)
+[PASS  ] t_8b1701ce_c1                (45 bytes x86)
+[PASS  ] t_8b1701ce_c2                (45 bytes x86)
+[PASS  ] t_8b1802c8_c0                (48 bytes x86)
+[PASS  ] t_8b1802c8_c1                (48 bytes x86)
+[PASS  ] t_8b1802c8_c2                (48 bytes x86)
+[PASS  ] t_8b1b0339_c0                (51 bytes x86)
+[PASS  ] t_8b1b0339_c1                (51 bytes x86)
+[PASS  ] t_8b1b0339_c2                (51 bytes x86)
+[SKIP  ] t_90000070_c0                reference: unsupported insn 0x90000070
+[SKIP  ] t_90000070_c1                reference: unsupported insn 0x90000070
+[SKIP  ] t_90000070_c2                reference: unsupported insn 0x90000070
+[SKIP  ] t_90000090_c0                reference: unsupported insn 0x90000090
+[SKIP  ] t_90000090_c1                reference: unsupported insn 0x90000090
+[SKIP  ] t_90000090_c2                reference: unsupported insn 0x90000090
+[SKIP  ] t_900000a0_c0                reference: unsupported insn 0x900000a0
+[SKIP  ] t_900000a0_c1                reference: unsupported insn 0x900000a0
+[SKIP  ] t_900000a0_c2                reference: unsupported insn 0x900000a0
+[SKIP  ] t_900000a8_c0                reference: unsupported insn 0x900000a8
+[SKIP  ] t_900000a8_c1                reference: unsupported insn 0x900000a8
+[SKIP  ] t_900000a8_c2                reference: unsupported insn 0x900000a8
+[SKIP  ] t_90ff57c1_c0                reference: unsupported insn 0x90ff57c1
+[SKIP  ] t_90ff57c1_c1                reference: unsupported insn 0x90ff57c1
+[SKIP  ] t_90ff57c1_c2                reference: unsupported insn 0x90ff57c1
+[PASS  ] t_910003e0_c0                (43 bytes x86)
+[PASS  ] t_910003e0_c1                (43 bytes x86)
+[PASS  ] t_910003e0_c2                (43 bytes x86)
+[PASS  ] t_910003e9_c0                (44 bytes x86)
+[PASS  ] t_910003e9_c1                (44 bytes x86)
+[PASS  ] t_910003e9_c2                (44 bytes x86)
+[PASS  ] t_91000400_c0                (43 bytes x86)
+[PASS  ] t_91000400_c1                (43 bytes x86)
+[PASS  ] t_91000400_c2                (43 bytes x86)
+[PASS  ] t_91000508_c0                (45 bytes x86)
+[PASS  ] t_91000508_c1                (45 bytes x86)
+[PASS  ] t_91000508_c2                (45 bytes x86)
+[PASS  ] t_91000509_c0                (45 bytes x86)
+[PASS  ] t_91000509_c1                (45 bytes x86)
+[PASS  ] t_91000509_c2                (45 bytes x86)
+[PASS  ] t_91000520_c0                (44 bytes x86)
+[PASS  ] t_91000520_c1                (44 bytes x86)
+[PASS  ] t_91000520_c2                (44 bytes x86)
+[PASS  ] t_91000529_c0                (45 bytes x86)
+[PASS  ] t_91000529_c1                (45 bytes x86)
+[PASS  ] t_91000529_c2                (45 bytes x86)
+[PASS  ] t_91000548_c0                (45 bytes x86)
+[PASS  ] t_91000548_c1                (45 bytes x86)
+[PASS  ] t_91000548_c2                (45 bytes x86)
+[PASS  ] t_9100056d_c0                (45 bytes x86)
+[PASS  ] t_9100056d_c1                (45 bytes x86)
+[PASS  ] t_9100056d_c2                (45 bytes x86)
+[PASS  ] t_9100058c_c0                (45 bytes x86)
+[PASS  ] t_9100058c_c1                (45 bytes x86)
+[PASS  ] t_9100058c_c2                (45 bytes x86)
+[PASS  ] t_910005ef_c0                (45 bytes x86)
+[PASS  ] t_910005ef_c1                (45 bytes x86)
+[PASS  ] t_910005ef_c2                (45 bytes x86)
+[PASS  ] t_91000673_c0                (51 bytes x86)
+[PASS  ] t_91000673_c1                (51 bytes x86)
+[PASS  ] t_91000673_c2                (51 bytes x86)
+[PASS  ] t_91000694_c0                (51 bytes x86)
+[PASS  ] t_91000694_c1                (51 bytes x86)
+[PASS  ] t_91000694_c2                (51 bytes x86)
+[PASS  ] t_910006d6_c0                (51 bytes x86)
+[PASS  ] t_910006d6_c1                (51 bytes x86)
+[PASS  ] t_910006d6_c2                (51 bytes x86)
+[PASS  ] t_910006f7_c0                (51 bytes x86)
+[PASS  ] t_910006f7_c1                (51 bytes x86)
+[PASS  ] t_910006f7_c2                (51 bytes x86)
+[PASS  ] t_91000736_c0                (51 bytes x86)
+[PASS  ] t_91000736_c1                (51 bytes x86)
+[PASS  ] t_91000736_c2                (51 bytes x86)
+[PASS  ] t_91000739_c0                (51 bytes x86)
+[PASS  ] t_91000739_c1                (51 bytes x86)
+[PASS  ] t_91000739_c2                (51 bytes x86)
+[PASS  ] t_9100075b_c0                (51 bytes x86)
+[PASS  ] t_9100075b_c1                (51 bytes x86)
+[PASS  ] t_9100075b_c2                (51 bytes x86)
+[PASS  ] t_9100079a_c0                (51 bytes x86)
+[PASS  ] t_9100079a_c1                (51 bytes x86)
+[PASS  ] t_9100079a_c2                (51 bytes x86)
+[PASS  ] t_91000948_c0                (45 bytes x86)
+[PASS  ] t_91000948_c1                (45 bytes x86)
+[PASS  ] t_91000948_c2                (45 bytes x86)
+[PASS  ] t_91001060_c0                (44 bytes x86)
+[PASS  ] t_91001060_c1                (44 bytes x86)
+[PASS  ] t_91001060_c2                (44 bytes x86)
+[PASS  ] t_91001380_c0                (47 bytes x86)
+[PASS  ] t_91001380_c1                (47 bytes x86)
+[PASS  ] t_91001380_c2                (47 bytes x86)
+[PASS  ] t_910013e1_c0                (48 bytes x86)
+[PASS  ] t_910013e1_c1                (48 bytes x86)
+[PASS  ] t_910013e1_c2                (48 bytes x86)
+[PASS  ] t_91002008_c0                (44 bytes x86)
+[PASS  ] t_91002008_c1                (44 bytes x86)
+[PASS  ] t_91002008_c2                (44 bytes x86)
+[PASS  ] t_91002108_c0                (45 bytes x86)
+[PASS  ] t_91002108_c1                (45 bytes x86)
+[PASS  ] t_91002108_c2                (45 bytes x86)
+[PASS  ] t_910022b5_c0                (51 bytes x86)
+[PASS  ] t_910022b5_c1                (51 bytes x86)
+[PASS  ] t_910022b5_c2                (51 bytes x86)
+[PASS  ] t_910023e0_c0                (47 bytes x86)
+[PASS  ] t_910023e0_c1                (47 bytes x86)
+[PASS  ] t_910023e0_c2                (47 bytes x86)
+[PASS  ] t_91003e89_c0                (48 bytes x86)
+[PASS  ] t_91003e89_c1                (48 bytes x86)
+[PASS  ] t_91003e89_c2                (48 bytes x86)
+[PASS  ] t_91004042_c0                (45 bytes x86)
+[PASS  ] t_91004042_c1                (45 bytes x86)
+[PASS  ] t_91004042_c2                (45 bytes x86)
+[PASS  ] t_9100437b_c0                (51 bytes x86)
+[PASS  ] t_9100437b_c1                (51 bytes x86)
+[PASS  ] t_9100437b_c2                (51 bytes x86)
+[PASS  ] t_910043e9_c0                (48 bytes x86)
+[PASS  ] t_910043e9_c1                (48 bytes x86)
+[PASS  ] t_910043e9_c2                (48 bytes x86)
+[PASS  ] t_91005040_c0                (44 bytes x86)
+[PASS  ] t_91005040_c1                (44 bytes x86)
+[PASS  ] t_91005040_c2                (44 bytes x86)
+[PASS  ] t_91005060_c0                (44 bytes x86)
+[PASS  ] t_91005060_c1                (44 bytes x86)
+[PASS  ] t_91005060_c2                (44 bytes x86)
+[PASS  ] t_91006040_c0                (44 bytes x86)
+[PASS  ] t_91006040_c1                (44 bytes x86)
+[PASS  ] t_91006040_c2                (44 bytes x86)
+[PASS  ] t_910073e2_c0                (48 bytes x86)
+[PASS  ] t_910073e2_c1                (48 bytes x86)
+[PASS  ] t_910073e2_c2                (48 bytes x86)
+[PASS  ] t_910073ee_c0                (48 bytes x86)
+[PASS  ] t_910073ee_c1                (48 bytes x86)
+[PASS  ] t_910073ee_c2                (48 bytes x86)
+[PASS  ] t_91008000_c0                (43 bytes x86)
+[PASS  ] t_91008000_c1                (43 bytes x86)
+[PASS  ] t_91008000_c2                (43 bytes x86)
+[PASS  ] t_91008273_c0                (51 bytes x86)
+[PASS  ] t_91008273_c1                (51 bytes x86)
+[PASS  ] t_91008273_c2                (51 bytes x86)
+[PASS  ] t_910083e0_c0                (47 bytes x86)
+[PASS  ] t_910083e0_c1                (47 bytes x86)
+[PASS  ] t_910083e0_c2                (47 bytes x86)
+[PASS  ] t_91009060_c0                (44 bytes x86)
+[PASS  ] t_91009060_c1                (44 bytes x86)
+[PASS  ] t_91009060_c2                (44 bytes x86)
+[PASS  ] t_9100c3e9_c0                (48 bytes x86)
+[PASS  ] t_9100c3e9_c1                (48 bytes x86)
+[PASS  ] t_9100c3e9_c2                (48 bytes x86)
+[PASS  ] t_9100e294_c0                (51 bytes x86)
+[PASS  ] t_9100e294_c1                (51 bytes x86)
+[PASS  ] t_9100e294_c2                (51 bytes x86)
+[PASS  ] t_910102c0_c0                (47 bytes x86)
+[PASS  ] t_910102c0_c1                (47 bytes x86)
+[PASS  ] t_910102c0_c2                (47 bytes x86)
+[PASS  ] t_910102d6_c0                (51 bytes x86)
+[PASS  ] t_910102d6_c1                (51 bytes x86)
+[PASS  ] t_910102d6_c2                (51 bytes x86)
+[PASS  ] t_910103e0_c0                (47 bytes x86)
+[PASS  ] t_910103e0_c1                (47 bytes x86)
+[PASS  ] t_910103e0_c2                (47 bytes x86)
+[PASS  ] t_91014320_c0                (47 bytes x86)
+[PASS  ] t_91014320_c1                (47 bytes x86)
+[PASS  ] t_91014320_c2                (47 bytes x86)
+[PASS  ] t_910183e0_c0                (47 bytes x86)
+[PASS  ] t_910183e0_c1                (47 bytes x86)
+[PASS  ] t_910183e0_c2                (47 bytes x86)
+[PASS  ] t_9101c294_c0                (51 bytes x86)
+[PASS  ] t_9101c294_c1                (51 bytes x86)
+[PASS  ] t_9101c294_c2                (51 bytes x86)
+[PASS  ] t_910843ff_c0                (51 bytes x86)
+[PASS  ] t_910843ff_c1                (51 bytes x86)
+[PASS  ] t_910843ff_c2                (51 bytes x86)
+[PASS  ] t_9109c3ff_c0                (51 bytes x86)
+[PASS  ] t_9109c3ff_c1                (51 bytes x86)
+[PASS  ] t_9109c3ff_c2                (51 bytes x86)
+[PASS  ] t_910e03e8_c0                (48 bytes x86)
+[PASS  ] t_910e03e8_c1                (48 bytes x86)
+[PASS  ] t_910e03e8_c2                (48 bytes x86)
+[PASS  ] t_914007ff_c0                (51 bytes x86)
+[PASS  ] t_914007ff_c1                (51 bytes x86)
+[PASS  ] t_914007ff_c2                (51 bytes x86)
+[PASS  ] t_92400809_c0                (44 bytes x86)
+[PASS  ] t_92400809_c1                (44 bytes x86)
+[PASS  ] t_92400809_c2                (44 bytes x86)
+[PASS  ] t_92401f68_c0                (48 bytes x86)
+[PASS  ] t_92401f68_c1                (48 bytes x86)
+[PASS  ] t_92401f68_c2                (48 bytes x86)
+[PASS  ] t_92403d08_c0                (45 bytes x86)
+[PASS  ] t_92403d08_c1                (45 bytes x86)
+[PASS  ] t_92403d08_c2                (45 bytes x86)
+[PASS  ] t_92403d28_c0                (45 bytes x86)
+[PASS  ] t_92403d28_c1                (45 bytes x86)
+[PASS  ] t_92403d28_c2                (45 bytes x86)
+[PASS  ] t_9240de68_c0                (51 bytes x86)
+[PASS  ] t_9240de68_c1                (51 bytes x86)
+[PASS  ] t_9240de68_c2                (51 bytes x86)
+[PASS  ] t_9274f508_c0                (45 bytes x86)
+[PASS  ] t_9274f508_c1                (45 bytes x86)
+[PASS  ] t_9274f508_c2                (45 bytes x86)
+[PASS  ] t_92780509_c0                (45 bytes x86)
+[PASS  ] t_92780509_c1                (45 bytes x86)
+[PASS  ] t_92780509_c2                (45 bytes x86)
+[PASS  ] t_927ced08_c0                (45 bytes x86)
+[PASS  ] t_927ced08_c1                (45 bytes x86)
+[PASS  ] t_927ced08_c2                (45 bytes x86)
+[PASS  ] t_927cee96_c0                (51 bytes x86)
+[PASS  ] t_927cee96_c1                (51 bytes x86)
+[PASS  ] t_927cee96_c2                (51 bytes x86)
+[PASS  ] t_927df000_c0                (43 bytes x86)
+[PASS  ] t_927df000_c1                (43 bytes x86)
+[PASS  ] t_927df000_c2                (43 bytes x86)
+[PASS  ] t_93407c1a_c0                (65 bytes x86)
+[PASS  ] t_93407c1a_c1                (65 bytes x86)
+[PASS  ] t_93407c1a_c2                (65 bytes x86)
+[PASS  ] t_93407c21_c0                (63 bytes x86)
+[PASS  ] t_93407c21_c1                (63 bytes x86)
+[PASS  ] t_93407c21_c2                (63 bytes x86)
+[PASS  ] t_9343fd09_c0                (75 bytes x86)
+[PASS  ] t_9343fd09_c1                (75 bytes x86)
+[PASS  ] t_9343fd09_c2                (75 bytes x86)
+[SKIP  ] t_94000006_c0                reference: unsupported insn 0x94000006
+[SKIP  ] t_94000006_c1                reference: unsupported insn 0x94000006
+[SKIP  ] t_94000006_c2                reference: unsupported insn 0x94000006
+[SKIP  ] t_94001024_c0                reference: unsupported insn 0x94001024
+[SKIP  ] t_94001024_c1                reference: unsupported insn 0x94001024
+[SKIP  ] t_94001024_c2                reference: unsupported insn 0x94001024
+[SKIP  ] t_97e860df_c0                reference: unsupported insn 0x97e860df
+[SKIP  ] t_97e860df_c1                reference: unsupported insn 0x97e860df
+[SKIP  ] t_97e860df_c2                reference: unsupported insn 0x97e860df
+[SKIP  ] t_97e862b8_c0                reference: unsupported insn 0x97e862b8
+[SKIP  ] t_97e862b8_c1                reference: unsupported insn 0x97e862b8
+[SKIP  ] t_97e862b8_c2                reference: unsupported insn 0x97e862b8
+[SKIP  ] t_97ffffc9_c0                reference: unsupported insn 0x97ffffc9
+[SKIP  ] t_97ffffc9_c1                reference: unsupported insn 0x97ffffc9
+[SKIP  ] t_97ffffc9_c2                reference: unsupported insn 0x97ffffc9
+[PASS  ] t_9a1f0000_c0                (126 bytes x86)
+[PASS  ] t_9a1f0000_c1                (126 bytes x86)
+[PASS  ] t_9a1f0000_c2                (126 bytes x86)
+[PASS  ] t_9a853084_c0                (79 bytes x86)
+[PASS  ] t_9a853084_c1                (79 bytes x86)
+[PASS  ] t_9a853084_c2                (79 bytes x86)
+[PASS  ] t_9ac92506_c0                (45 bytes x86)
+[PASS  ] t_9ac92506_c1                (45 bytes x86)
+[PASS  ] t_9ac92506_c2                (45 bytes x86)
+[PASS  ] t_9adb2728_c0                (51 bytes x86)
+[PASS  ] t_9adb2728_c1                (51 bytes x86)
+[PASS  ] t_9adb2728_c2                (51 bytes x86)
+[PASS  ] t_9b047cce_c0                (49 bytes x86)
+[PASS  ] t_9b047cce_c1                (49 bytes x86)
+[PASS  ] t_9b047cce_c2                (49 bytes x86)
+[PASS  ] t_9b087e68_c0                (52 bytes x86)
+[PASS  ] t_9b087e68_c1                (52 bytes x86)
+[PASS  ] t_9b087e68_c2                (52 bytes x86)
+[PASS  ] t_9b187cca_c0                (52 bytes x86)
+[PASS  ] t_9b187cca_c1                (52 bytes x86)
+[PASS  ] t_9b187cca_c2                (52 bytes x86)
+[PASS  ] t_9b1c7cef_c0                (52 bytes x86)
+[PASS  ] t_9b1c7cef_c1                (52 bytes x86)
+[PASS  ] t_9b1c7cef_c2                (52 bytes x86)
+[SKIP  ] t_9e6702c0_c0                reference: unsupported insn 0x9e6702c0
+[SKIP  ] t_9e6702c0_c1                reference: unsupported insn 0x9e6702c0
+[SKIP  ] t_9e6702c0_c2                reference: unsupported insn 0x9e6702c0
+[SKIP  ] t_9e6702e0_c0                reference: unsupported insn 0x9e6702e0
+[SKIP  ] t_9e6702e0_c1                reference: unsupported insn 0x9e6702e0
+[SKIP  ] t_9e6702e0_c2                reference: unsupported insn 0x9e6702e0
+[PASS  ] t_aa0003e1_c0                (40 bytes x86)
+[PASS  ] t_aa0003e1_c1                (40 bytes x86)
+[PASS  ] t_aa0003e1_c2                (40 bytes x86)
+[PASS  ] t_aa0003e2_c0                (40 bytes x86)
+[PASS  ] t_aa0003e2_c1                (40 bytes x86)
+[PASS  ] t_aa0003e2_c2                (40 bytes x86)
+[PASS  ] t_aa0003e8_c0                (40 bytes x86)
+[PASS  ] t_aa0003e8_c1                (40 bytes x86)
+[PASS  ] t_aa0003e8_c2                (40 bytes x86)
+[PASS  ] t_aa0003eb_c0                (40 bytes x86)
+[PASS  ] t_aa0003eb_c1                (40 bytes x86)
+[PASS  ] t_aa0003eb_c2                (40 bytes x86)
+[PASS  ] t_aa0003f3_c0                (43 bytes x86)
+[PASS  ] t_aa0003f3_c1                (43 bytes x86)
+[PASS  ] t_aa0003f3_c2                (43 bytes x86)
+[PASS  ] t_aa0003f4_c0                (43 bytes x86)
+[PASS  ] t_aa0003f4_c1                (43 bytes x86)
+[PASS  ] t_aa0003f4_c2                (43 bytes x86)
+[PASS  ] t_aa0003f5_c0                (43 bytes x86)
+[PASS  ] t_aa0003f5_c1                (43 bytes x86)
+[PASS  ] t_aa0003f5_c2                (43 bytes x86)
+[PASS  ] t_aa0003f6_c0                (43 bytes x86)
+[PASS  ] t_aa0003f6_c1                (43 bytes x86)
+[PASS  ] t_aa0003f6_c2                (43 bytes x86)
+[PASS  ] t_aa0003f7_c0                (43 bytes x86)
+[PASS  ] t_aa0003f7_c1                (43 bytes x86)
+[PASS  ] t_aa0003f7_c2                (43 bytes x86)
+[PASS  ] t_aa0103e0_c0                (40 bytes x86)
+[PASS  ] t_aa0103e0_c1                (40 bytes x86)
+[PASS  ] t_aa0103e0_c2                (40 bytes x86)
+[PASS  ] t_aa0103ec_c0                (41 bytes x86)
+[PASS  ] t_aa0103ec_c1                (41 bytes x86)
+[PASS  ] t_aa0103ec_c2                (41 bytes x86)
+[PASS  ] t_aa0103f5_c0                (44 bytes x86)
+[PASS  ] t_aa0103f5_c1                (44 bytes x86)
+[PASS  ] t_aa0103f5_c2                (44 bytes x86)
+[PASS  ] t_aa0203e2_c0                (41 bytes x86)
+[PASS  ] t_aa0203e2_c1                (41 bytes x86)
+[PASS  ] t_aa0203e2_c2                (41 bytes x86)
+[PASS  ] t_aa0203f3_c0                (44 bytes x86)
+[PASS  ] t_aa0203f3_c1                (44 bytes x86)
+[PASS  ] t_aa0203f3_c2                (44 bytes x86)
+[PASS  ] t_aa0203f4_c0                (44 bytes x86)
+[PASS  ] t_aa0203f4_c1                (44 bytes x86)
+[PASS  ] t_aa0203f4_c2                (44 bytes x86)
+[PASS  ] t_aa0203f7_c0                (44 bytes x86)
+[PASS  ] t_aa0203f7_c1                (44 bytes x86)
+[PASS  ] t_aa0203f7_c2                (44 bytes x86)
+[PASS  ] t_aa0403e7_c0                (41 bytes x86)
+[PASS  ] t_aa0403e7_c1                (41 bytes x86)
+[PASS  ] t_aa0403e7_c2                (41 bytes x86)
+[PASS  ] t_aa0503f3_c0                (44 bytes x86)
+[PASS  ] t_aa0503f3_c1                (44 bytes x86)
+[PASS  ] t_aa0503f3_c2                (44 bytes x86)
+[PASS  ] t_aa0603fa_c0                (44 bytes x86)
+[PASS  ] t_aa0603fa_c1                (44 bytes x86)
+[PASS  ] t_aa0603fa_c2                (44 bytes x86)
+[PASS  ] t_aa0803f7_c0                (44 bytes x86)
+[PASS  ] t_aa0803f7_c1                (44 bytes x86)
+[PASS  ] t_aa0803f7_c2                (44 bytes x86)
+[PASS  ] t_aa090149_c0                (42 bytes x86)
+[PASS  ] t_aa090149_c1                (42 bytes x86)
+[PASS  ] t_aa090149_c2                (42 bytes x86)
+[PASS  ] t_aa0a03e8_c0                (41 bytes x86)
+[PASS  ] t_aa0a03e8_c1                (41 bytes x86)
+[PASS  ] t_aa0a03e8_c2                (41 bytes x86)
+[PASS  ] t_aa0b03ee_c0                (41 bytes x86)
+[PASS  ] t_aa0b03ee_c1                (41 bytes x86)
+[PASS  ] t_aa0b03ee_c2                (41 bytes x86)
+[PASS  ] t_aa0e03e0_c0                (40 bytes x86)
+[PASS  ] t_aa0e03e0_c1                (40 bytes x86)
+[PASS  ] t_aa0e03e0_c2                (40 bytes x86)
+[PASS  ] t_aa1303e0_c0                (43 bytes x86)
+[PASS  ] t_aa1303e0_c1                (43 bytes x86)
+[PASS  ] t_aa1303e0_c2                (43 bytes x86)
+[PASS  ] t_aa1303e1_c0                (44 bytes x86)
+[PASS  ] t_aa1303e1_c1                (44 bytes x86)
+[PASS  ] t_aa1303e1_c2                (44 bytes x86)
+[PASS  ] t_aa1303e8_c0                (44 bytes x86)
+[PASS  ] t_aa1303e8_c1                (44 bytes x86)
+[PASS  ] t_aa1303e8_c2                (44 bytes x86)
+[PASS  ] t_aa1303eb_c0                (44 bytes x86)
+[PASS  ] t_aa1303eb_c1                (44 bytes x86)
+[PASS  ] t_aa1303eb_c2                (44 bytes x86)
+[PASS  ] t_aa1303f6_c0                (47 bytes x86)
+[PASS  ] t_aa1303f6_c1                (47 bytes x86)
+[PASS  ] t_aa1303f6_c2                (47 bytes x86)
+[PASS  ] t_aa1403e0_c0                (43 bytes x86)
+[PASS  ] t_aa1403e0_c1                (43 bytes x86)
+[PASS  ] t_aa1403e0_c2                (43 bytes x86)
+[PASS  ] t_aa1403e8_c0                (44 bytes x86)
+[PASS  ] t_aa1403e8_c1                (44 bytes x86)
+[PASS  ] t_aa1403e8_c2                (44 bytes x86)
+[PASS  ] t_aa1403f6_c0                (47 bytes x86)
+[PASS  ] t_aa1403f6_c1                (47 bytes x86)
+[PASS  ] t_aa1403f6_c2                (47 bytes x86)
+[PASS  ] t_aa1503e0_c0                (43 bytes x86)
+[PASS  ] t_aa1503e0_c1                (43 bytes x86)
+[PASS  ] t_aa1503e0_c2                (43 bytes x86)
+[PASS  ] t_aa1603e0_c0                (43 bytes x86)
+[PASS  ] t_aa1603e0_c1                (43 bytes x86)
+[PASS  ] t_aa1603e0_c2                (43 bytes x86)
+[PASS  ] t_aa1703e0_c0                (43 bytes x86)
+[PASS  ] t_aa1703e0_c1                (43 bytes x86)
+[PASS  ] t_aa1703e0_c2                (43 bytes x86)
+[PASS  ] t_aa1803e0_c0                (43 bytes x86)
+[PASS  ] t_aa1803e0_c1                (43 bytes x86)
+[PASS  ] t_aa1803e0_c2                (43 bytes x86)
+[PASS  ] t_aa1803fa_c0                (47 bytes x86)
+[PASS  ] t_aa1803fa_c1                (47 bytes x86)
+[PASS  ] t_aa1803fa_c2                (47 bytes x86)
+[PASS  ] t_aa1903e0_c0                (43 bytes x86)
+[PASS  ] t_aa1903e0_c1                (43 bytes x86)
+[PASS  ] t_aa1903e0_c2                (43 bytes x86)
+[PASS  ] t_aa1903e9_c0                (44 bytes x86)
+[PASS  ] t_aa1903e9_c1                (44 bytes x86)
+[PASS  ] t_aa1903e9_c2                (44 bytes x86)
+[PASS  ] t_aa1a03e0_c0                (43 bytes x86)
+[PASS  ] t_aa1a03e0_c1                (43 bytes x86)
+[PASS  ] t_aa1a03e0_c2                (43 bytes x86)
+[PASS  ] t_aa1b03ee_c0                (44 bytes x86)
+[PASS  ] t_aa1b03ee_c1                (44 bytes x86)
+[PASS  ] t_aa1b03ee_c2                (44 bytes x86)
+[PASS  ] t_aa1b03f7_c0                (47 bytes x86)
+[PASS  ] t_aa1b03f7_c1                (47 bytes x86)
+[PASS  ] t_aa1b03f7_c2                (47 bytes x86)
+[PASS  ] t_aa1b03fc_c0                (47 bytes x86)
+[PASS  ] t_aa1b03fc_c1                (47 bytes x86)
+[PASS  ] t_aa1b03fc_c2                (47 bytes x86)
+[PASS  ] t_aa1c03e0_c0                (43 bytes x86)
+[PASS  ] t_aa1c03e0_c1                (43 bytes x86)
+[PASS  ] t_aa1c03e0_c2                (43 bytes x86)
+[PASS  ] t_aa1e03fc_c0                (47 bytes x86)
+[PASS  ] t_aa1e03fc_c1                (47 bytes x86)
+[PASS  ] t_aa1e03fc_c2                (47 bytes x86)
+[PASS  ] t_aa1f03e0_c0                (39 bytes x86)
+[PASS  ] t_aa1f03e0_c1                (39 bytes x86)
+[PASS  ] t_aa1f03e0_c2                (39 bytes x86)
+[PASS  ] t_aa1f03e1_c0                (40 bytes x86)
+[PASS  ] t_aa1f03e1_c1                (40 bytes x86)
+[PASS  ] t_aa1f03e1_c2                (40 bytes x86)
+[PASS  ] t_aa1f03e8_c0                (40 bytes x86)
+[PASS  ] t_aa1f03e8_c1                (40 bytes x86)
+[PASS  ] t_aa1f03e8_c2                (40 bytes x86)
+[PASS  ] t_aa1f03e9_c0                (40 bytes x86)
+[PASS  ] t_aa1f03e9_c1                (40 bytes x86)
+[PASS  ] t_aa1f03e9_c2                (40 bytes x86)
+[PASS  ] t_aa1f03ea_c0                (40 bytes x86)
+[PASS  ] t_aa1f03ea_c1                (40 bytes x86)
+[PASS  ] t_aa1f03ea_c2                (40 bytes x86)
+[PASS  ] t_aa1f03f3_c0                (43 bytes x86)
+[PASS  ] t_aa1f03f3_c1                (43 bytes x86)
+[PASS  ] t_aa1f03f3_c2                (43 bytes x86)
+[PASS  ] t_aa1f03f5_c0                (43 bytes x86)
+[PASS  ] t_aa1f03f5_c1                (43 bytes x86)
+[PASS  ] t_aa1f03f5_c2                (43 bytes x86)
+[PASS  ] t_aa1f03f6_c0                (43 bytes x86)
+[PASS  ] t_aa1f03f6_c1                (43 bytes x86)
+[PASS  ] t_aa1f03f6_c2                (43 bytes x86)
+[PASS  ] t_aa1f03f8_c0                (43 bytes x86)
+[PASS  ] t_aa1f03f8_c1                (43 bytes x86)
+[PASS  ] t_aa1f03f8_c2                (43 bytes x86)
+[PASS  ] t_aa1f03fc_c0                (43 bytes x86)
+[PASS  ] t_aa1f03fc_c1                (43 bytes x86)
+[PASS  ] t_aa1f03fc_c2                (43 bytes x86)
+[SKIP  ] t_b0000030_c0                reference: unsupported insn 0xb0000030
+[SKIP  ] t_b0000030_c1                reference: unsupported insn 0xb0000030
+[SKIP  ] t_b0000030_c2                reference: unsupported insn 0xb0000030
+[SKIP  ] t_b0000070_c0                reference: unsupported insn 0xb0000070
+[SKIP  ] t_b0000070_c1                reference: unsupported insn 0xb0000070
+[SKIP  ] t_b0000070_c2                reference: unsupported insn 0xb0000070
+[SKIP  ] t_b0000090_c0                reference: unsupported insn 0xb0000090
+[SKIP  ] t_b0000090_c1                reference: unsupported insn 0xb0000090
+[SKIP  ] t_b0000090_c2                reference: unsupported insn 0xb0000090
+[SKIP  ] t_b00000f0_c0                reference: unsupported insn 0xb00000f0
+[SKIP  ] t_b00000f0_c1                reference: unsupported insn 0xb00000f0
+[SKIP  ] t_b00000f0_c2                reference: unsupported insn 0xb00000f0
+[SKIP  ] t_b0000128_c0                reference: unsupported insn 0xb0000128
+[SKIP  ] t_b0000128_c1                reference: unsupported insn 0xb0000128
+[SKIP  ] t_b0000128_c2                reference: unsupported insn 0xb0000128
+[SKIP  ] t_b00002e8_c0                reference: unsupported insn 0xb00002e8
+[SKIP  ] t_b00002e8_c1                reference: unsupported insn 0xb00002e8
+[SKIP  ] t_b00002e8_c2                reference: unsupported insn 0xb00002e8
+[SKIP  ] t_b0000628_c0                reference: unsupported insn 0xb0000628
+[SKIP  ] t_b0000628_c1                reference: unsupported insn 0xb0000628
+[SKIP  ] t_b0000628_c2                reference: unsupported insn 0xb0000628
+[SKIP  ] t_b0000629_c0                reference: unsupported insn 0xb0000629
+[SKIP  ] t_b0000629_c1                reference: unsupported insn 0xb0000629
+[SKIP  ] t_b0000629_c2                reference: unsupported insn 0xb0000629
+[PASS  ] t_b100041f_c0                (104 bytes x86)
+[PASS  ] t_b100041f_c1                (104 bytes x86)
+[PASS  ] t_b100041f_c2                (104 bytes x86)
+[PASS  ] t_b10006ff_c0                (108 bytes x86)
+[PASS  ] t_b10006ff_c1                (108 bytes x86)
+[PASS  ] t_b10006ff_c2                (108 bytes x86)
+[PASS  ] t_b140041f_c0                (104 bytes x86)
+[PASS  ] t_b140041f_c1                (104 bytes x86)
+[PASS  ] t_b140041f_c2                (104 bytes x86)
+[PASS  ] t_b201f3e9_c0                (47 bytes x86)
+[PASS  ] t_b201f3e9_c1                (47 bytes x86)
+[PASS  ] t_b201f3e9_c2                (47 bytes x86)
+[PASS  ] t_b24002e8_c0                (48 bytes x86)
+[PASS  ] t_b24002e8_c1                (48 bytes x86)
+[PASS  ] t_b24002e8_c2                (48 bytes x86)
+[PASS  ] t_b2400eb7_c0                (51 bytes x86)
+[PASS  ] t_b2400eb7_c1                (51 bytes x86)
+[PASS  ] t_b2400eb7_c2                (51 bytes x86)
+[PASS  ] t_b24702d5_c0                (54 bytes x86)
+[PASS  ] t_b24702d5_c1                (54 bytes x86)
+[PASS  ] t_b24702d5_c2                (54 bytes x86)
+[PASS  ] t_b2750210_c0                (51 bytes x86)
+[PASS  ] t_b2750210_c1                (51 bytes x86)
+[PASS  ] t_b2750210_c2                (51 bytes x86)
+[PASS  ] t_b3481d01_c0                (87 bytes x86)
+[PASS  ] t_b3481d01_c1                (87 bytes x86)
+[PASS  ] t_b3481d01_c2                (87 bytes x86)
+[SKIP  ] t_b4000076_c0                reference: unsupported insn 0xb4000076
+[SKIP  ] t_b4000076_c1                reference: unsupported insn 0xb4000076
+[SKIP  ] t_b4000076_c2                reference: unsupported insn 0xb4000076
+[SKIP  ] t_b4000080_c0                reference: unsupported insn 0xb4000080
+[SKIP  ] t_b4000080_c1                reference: unsupported insn 0xb4000080
+[SKIP  ] t_b4000080_c2                reference: unsupported insn 0xb4000080
+[SKIP  ] t_b4000082_c0                reference: unsupported insn 0xb4000082
+[SKIP  ] t_b4000082_c1                reference: unsupported insn 0xb4000082
+[SKIP  ] t_b4000082_c2                reference: unsupported insn 0xb4000082
+[SKIP  ] t_b4000095_c0                reference: unsupported insn 0xb4000095
+[SKIP  ] t_b4000095_c1                reference: unsupported insn 0xb4000095
+[SKIP  ] t_b4000095_c2                reference: unsupported insn 0xb4000095
+[SKIP  ] t_b40000ea_c0                reference: unsupported insn 0xb40000ea
+[SKIP  ] t_b40000ea_c1                reference: unsupported insn 0xb40000ea
+[SKIP  ] t_b40000ea_c2                reference: unsupported insn 0xb40000ea
+[SKIP  ] t_b4000102_c0                reference: unsupported insn 0xb4000102
+[SKIP  ] t_b4000102_c1                reference: unsupported insn 0xb4000102
+[SKIP  ] t_b4000102_c2                reference: unsupported insn 0xb4000102
+[SKIP  ] t_b4000106_c0                reference: unsupported insn 0xb4000106
+[SKIP  ] t_b4000106_c1                reference: unsupported insn 0xb4000106
+[SKIP  ] t_b4000106_c2                reference: unsupported insn 0xb4000106
+[SKIP  ] t_b4000135_c0                reference: unsupported insn 0xb4000135
+[SKIP  ] t_b4000135_c1                reference: unsupported insn 0xb4000135
+[SKIP  ] t_b4000135_c2                reference: unsupported insn 0xb4000135
+[SKIP  ] t_b4000160_c0                reference: unsupported insn 0xb4000160
+[SKIP  ] t_b4000160_c1                reference: unsupported insn 0xb4000160
+[SKIP  ] t_b4000160_c2                reference: unsupported insn 0xb4000160
+[SKIP  ] t_b400017a_c0                reference: unsupported insn 0xb400017a
+[SKIP  ] t_b400017a_c1                reference: unsupported insn 0xb400017a
+[SKIP  ] t_b400017a_c2                reference: unsupported insn 0xb400017a
+[SKIP  ] t_b4000182_c0                reference: unsupported insn 0xb4000182
+[SKIP  ] t_b4000182_c1                reference: unsupported insn 0xb4000182
+[SKIP  ] t_b4000182_c2                reference: unsupported insn 0xb4000182
+[SKIP  ] t_b40001c0_c0                reference: unsupported insn 0xb40001c0
+[SKIP  ] t_b40001c0_c1                reference: unsupported insn 0xb40001c0
+[SKIP  ] t_b40001c0_c2                reference: unsupported insn 0xb40001c0
+[SKIP  ] t_b40001e8_c0                reference: unsupported insn 0xb40001e8
+[SKIP  ] t_b40001e8_c1                reference: unsupported insn 0xb40001e8
+[SKIP  ] t_b40001e8_c2                reference: unsupported insn 0xb40001e8
+[SKIP  ] t_b40001f4_c0                reference: unsupported insn 0xb40001f4
+[SKIP  ] t_b40001f4_c1                reference: unsupported insn 0xb40001f4
+[SKIP  ] t_b40001f4_c2                reference: unsupported insn 0xb40001f4
+[SKIP  ] t_b4000300_c0                reference: unsupported insn 0xb4000300
+[SKIP  ] t_b4000300_c1                reference: unsupported insn 0xb4000300
+[SKIP  ] t_b4000300_c2                reference: unsupported insn 0xb4000300
+[SKIP  ] t_b40003c0_c0                reference: unsupported insn 0xb40003c0
+[SKIP  ] t_b40003c0_c1                reference: unsupported insn 0xb40003c0
+[SKIP  ] t_b40003c0_c2                reference: unsupported insn 0xb40003c0
+[SKIP  ] t_b4000520_c0                reference: unsupported insn 0xb4000520
+[SKIP  ] t_b4000520_c1                reference: unsupported insn 0xb4000520
+[SKIP  ] t_b4000520_c2                reference: unsupported insn 0xb4000520
+[SKIP  ] t_b4000560_c0                reference: unsupported insn 0xb4000560
+[SKIP  ] t_b4000560_c1                reference: unsupported insn 0xb4000560
+[SKIP  ] t_b4000560_c2                reference: unsupported insn 0xb4000560
+[SKIP  ] t_b40005a0_c0                reference: unsupported insn 0xb40005a0
+[SKIP  ] t_b40005a0_c1                reference: unsupported insn 0xb40005a0
+[SKIP  ] t_b40005a0_c2                reference: unsupported insn 0xb40005a0
+[SKIP  ] t_b40009f6_c0                reference: unsupported insn 0xb40009f6
+[SKIP  ] t_b40009f6_c1                reference: unsupported insn 0xb40009f6
+[SKIP  ] t_b40009f6_c2                reference: unsupported insn 0xb40009f6
+[SKIP  ] t_b4000c60_c0                reference: unsupported insn 0xb4000c60
+[SKIP  ] t_b4000c60_c1                reference: unsupported insn 0xb4000c60
+[SKIP  ] t_b4000c60_c2                reference: unsupported insn 0xb4000c60
+[SKIP  ] t_b400213b_c0                reference: unsupported insn 0xb400213b
+[SKIP  ] t_b400213b_c1                reference: unsupported insn 0xb400213b
+[SKIP  ] t_b400213b_c2                reference: unsupported insn 0xb400213b
+[SKIP  ] t_b4fffc60_c0                reference: unsupported insn 0xb4fffc60
+[SKIP  ] t_b4fffc60_c1                reference: unsupported insn 0xb4fffc60
+[SKIP  ] t_b4fffc60_c2                reference: unsupported insn 0xb4fffc60
+[SKIP  ] t_b4fffd80_c0                reference: unsupported insn 0xb4fffd80
+[SKIP  ] t_b4fffd80_c1                reference: unsupported insn 0xb4fffd80
+[SKIP  ] t_b4fffd80_c2                reference: unsupported insn 0xb4fffd80
+[SKIP  ] t_b4fffe17_c0                reference: unsupported insn 0xb4fffe17
+[SKIP  ] t_b4fffe17_c1                reference: unsupported insn 0xb4fffe17
+[SKIP  ] t_b4fffe17_c2                reference: unsupported insn 0xb4fffe17
+[SKIP  ] t_b4fffe60_c0                reference: unsupported insn 0xb4fffe60
+[SKIP  ] t_b4fffe60_c1                reference: unsupported insn 0xb4fffe60
+[SKIP  ] t_b4fffe60_c2                reference: unsupported insn 0xb4fffe60
+[SKIP  ] t_b50000a0_c0                reference: unsupported insn 0xb50000a0
+[SKIP  ] t_b50000a0_c1                reference: unsupported insn 0xb50000a0
+[SKIP  ] t_b50000a0_c2                reference: unsupported insn 0xb50000a0
+[SKIP  ] t_b50000e9_c0                reference: unsupported insn 0xb50000e9
+[SKIP  ] t_b50000e9_c1                reference: unsupported insn 0xb50000e9
+[SKIP  ] t_b50000e9_c2                reference: unsupported insn 0xb50000e9
+[SKIP  ] t_b50002c6_c0                reference: unsupported insn 0xb50002c6
+[SKIP  ] t_b50002c6_c1                reference: unsupported insn 0xb50002c6
+[SKIP  ] t_b50002c6_c2                reference: unsupported insn 0xb50002c6
+[SKIP  ] t_b500030d_c0                reference: unsupported insn 0xb500030d
+[SKIP  ] t_b500030d_c1                reference: unsupported insn 0xb500030d
+[SKIP  ] t_b500030d_c2                reference: unsupported insn 0xb500030d
+[SKIP  ] t_b7f93a08_c0                reference: unsupported insn 0xb7f93a08
+[SKIP  ] t_b7f93a08_c1                reference: unsupported insn 0xb7f93a08
+[SKIP  ] t_b7f93a08_c2                reference: unsupported insn 0xb7f93a08
+[PASS  ] t_ca010008_c0                (41 bytes x86)
+[PASS  ] t_ca010008_c1                (41 bytes x86)
+[PASS  ] t_ca010008_c2                (41 bytes x86)
+[PASS  ] t_ca030045_c0                (42 bytes x86)
+[PASS  ] t_ca030045_c1                (42 bytes x86)
+[PASS  ] t_ca030045_c2                (42 bytes x86)
+[PASS  ] t_cb000025_c0                (41 bytes x86)
+[PASS  ] t_cb000025_c1                (41 bytes x86)
+[PASS  ] t_cb000025_c2                (41 bytes x86)
+[PASS  ] t_cb000108_c0                (41 bytes x86)
+[PASS  ] t_cb000108_c1                (41 bytes x86)
+[PASS  ] t_cb000108_c2                (41 bytes x86)
+[PASS  ] t_cb000128_c0                (41 bytes x86)
+[PASS  ] t_cb000128_c1                (41 bytes x86)
+[PASS  ] t_cb000128_c2                (41 bytes x86)
+[PASS  ] t_cb010fe9_c0                (57 bytes x86)
+[PASS  ] t_cb010fe9_c1                (57 bytes x86)
+[PASS  ] t_cb010fe9_c2                (57 bytes x86)
+[PASS  ] t_cb030040_c0                (41 bytes x86)
+[PASS  ] t_cb030040_c1                (41 bytes x86)
+[PASS  ] t_cb030040_c2                (41 bytes x86)
+[PASS  ] t_cb040060_c0                (41 bytes x86)
+[PASS  ] t_cb040060_c1                (41 bytes x86)
+[PASS  ] t_cb040060_c2                (41 bytes x86)
+[PASS  ] t_cb080044_c0                (42 bytes x86)
+[PASS  ] t_cb080044_c1                (42 bytes x86)
+[PASS  ] t_cb080044_c2                (42 bytes x86)
+[PASS  ] t_cb150342_c0                (48 bytes x86)
+[PASS  ] t_cb150342_c1                (48 bytes x86)
+[PASS  ] t_cb150342_c2                (48 bytes x86)
+[PASS  ] t_cb16012a_c0                (45 bytes x86)
+[PASS  ] t_cb16012a_c1                (45 bytes x86)
+[PASS  ] t_cb16012a_c2                (45 bytes x86)
+[PASS  ] t_cb1602a2_c0                (48 bytes x86)
+[PASS  ] t_cb1602a2_c1                (48 bytes x86)
+[PASS  ] t_cb1602a2_c2                (48 bytes x86)
+[PASS  ] t_cb19028a_c0                (48 bytes x86)
+[PASS  ] t_cb19028a_c1                (48 bytes x86)
+[PASS  ] t_cb19028a_c2                (48 bytes x86)
+[SKIP  ] t_d0000090_c0                reference: unsupported insn 0xd0000090
+[SKIP  ] t_d0000090_c1                reference: unsupported insn 0xd0000090
+[SKIP  ] t_d0000090_c2                reference: unsupported insn 0xd0000090
+[SKIP  ] t_d00000b0_c0                reference: unsupported insn 0xd00000b0
+[SKIP  ] t_d00000b0_c1                reference: unsupported insn 0xd00000b0
+[SKIP  ] t_d00000b0_c2                reference: unsupported insn 0xd00000b0
+[SKIP  ] t_d0fffd8a_c0                reference: unsupported insn 0xd0fffd8a
+[SKIP  ] t_d0fffd8a_c1                reference: unsupported insn 0xd0fffd8a
+[SKIP  ] t_d0fffd8a_c2                reference: unsupported insn 0xd0fffd8a
+[PASS  ] t_d1000468_c0                (45 bytes x86)
+[PASS  ] t_d1000468_c1                (45 bytes x86)
+[PASS  ] t_d1000468_c2                (45 bytes x86)
+[PASS  ] t_d1000509_c0                (45 bytes x86)
+[PASS  ] t_d1000509_c1                (45 bytes x86)
+[PASS  ] t_d1000509_c2                (45 bytes x86)
+[PASS  ] t_d10005ec_c0                (45 bytes x86)
+[PASS  ] t_d10005ec_c1                (45 bytes x86)
+[PASS  ] t_d10005ec_c2                (45 bytes x86)
+[PASS  ] t_d1004748_c0                (48 bytes x86)
+[PASS  ] t_d1004748_c1                (48 bytes x86)
+[PASS  ] t_d1004748_c2                (48 bytes x86)
+[PASS  ] t_d1008042_c0                (45 bytes x86)
+[PASS  ] t_d1008042_c1                (45 bytes x86)
+[PASS  ] t_d1008042_c2                (45 bytes x86)
+[PASS  ] t_d10083a0_c0                (47 bytes x86)
+[PASS  ] t_d10083a0_c1                (47 bytes x86)
+[PASS  ] t_d10083a0_c2                (47 bytes x86)
+[PASS  ] t_d10083ff_c0                (51 bytes x86)
+[PASS  ] t_d10083ff_c1                (51 bytes x86)
+[PASS  ] t_d10083ff_c2                (51 bytes x86)
+[PASS  ] t_d100a319_c0                (51 bytes x86)
+[PASS  ] t_d100a319_c1                (51 bytes x86)
+[PASS  ] t_d100a319_c2                (51 bytes x86)
+[PASS  ] t_d100c3ff_c0                (51 bytes x86)
+[PASS  ] t_d100c3ff_c1                (51 bytes x86)
+[PASS  ] t_d100c3ff_c2                (51 bytes x86)
+[PASS  ] t_d10103ff_c0                (51 bytes x86)
+[PASS  ] t_d10103ff_c1                (51 bytes x86)
+[PASS  ] t_d10103ff_c2                (51 bytes x86)
+[PASS  ] t_d10183ff_c0                (51 bytes x86)
+[PASS  ] t_d10183ff_c1                (51 bytes x86)
+[PASS  ] t_d10183ff_c2                (51 bytes x86)
+[PASS  ] t_d101c3ff_c0                (51 bytes x86)
+[PASS  ] t_d101c3ff_c1                (51 bytes x86)
+[PASS  ] t_d101c3ff_c2                (51 bytes x86)
+[PASS  ] t_d10203ff_c0                (51 bytes x86)
+[PASS  ] t_d10203ff_c1                (51 bytes x86)
+[PASS  ] t_d10203ff_c2                (51 bytes x86)
+[PASS  ] t_d10283ff_c0                (51 bytes x86)
+[PASS  ] t_d10283ff_c1                (51 bytes x86)
+[PASS  ] t_d10283ff_c2                (51 bytes x86)
+[PASS  ] t_d10483ff_c0                (51 bytes x86)
+[PASS  ] t_d10483ff_c1                (51 bytes x86)
+[PASS  ] t_d10483ff_c2                (51 bytes x86)
+[PASS  ] t_d104c3ff_c0                (51 bytes x86)
+[PASS  ] t_d104c3ff_c1                (51 bytes x86)
+[PASS  ] t_d104c3ff_c2                (51 bytes x86)
+[PASS  ] t_d10583ff_c0                (51 bytes x86)
+[PASS  ] t_d10583ff_c1                (51 bytes x86)
+[PASS  ] t_d10583ff_c2                (51 bytes x86)
+[PASS  ] t_d105c3ff_c0                (51 bytes x86)
+[PASS  ] t_d105c3ff_c1                (51 bytes x86)
+[PASS  ] t_d105c3ff_c2                (51 bytes x86)
+[PASS  ] t_d10683ff_c0                (51 bytes x86)
+[PASS  ] t_d10683ff_c1                (51 bytes x86)
+[PASS  ] t_d10683ff_c2                (51 bytes x86)
+[PASS  ] t_d10783ff_c0                (51 bytes x86)
+[PASS  ] t_d10783ff_c1                (51 bytes x86)
+[PASS  ] t_d10783ff_c2                (51 bytes x86)
+[PASS  ] t_d240f828_c0                (48 bytes x86)
+[PASS  ] t_d240f828_c1                (48 bytes x86)
+[PASS  ] t_d240f828_c2                (48 bytes x86)
+[PASS  ] t_d2800000_c0                (30 bytes x86)
+[PASS  ] t_d2800000_c1                (30 bytes x86)
+[PASS  ] t_d2800000_c2                (30 bytes x86)
+[PASS  ] t_d2800708_c0                (35 bytes x86)
+[PASS  ] t_d2800708_c1                (35 bytes x86)
+[PASS  ] t_d2800708_c2                (35 bytes x86)
+[PASS  ] t_d2a60a00_c0                (34 bytes x86)
+[PASS  ] t_d2a60a00_c1                (34 bytes x86)
+[PASS  ] t_d2a60a00_c2                (34 bytes x86)
+[PASS  ] t_d2e00011_c0                (34 bytes x86)
+[PASS  ] t_d2e00011_c1                (34 bytes x86)
+[PASS  ] t_d2e00011_c2                (34 bytes x86)
+[PASS  ] t_d341fc4e_c0                (64 bytes x86)
+[PASS  ] t_d341fc4e_c1                (64 bytes x86)
+[PASS  ] t_d341fc4e_c2                (64 bytes x86)
+[PASS  ] t_d341fd0a_c0                (64 bytes x86)
+[PASS  ] t_d341fd0a_c1                (64 bytes x86)
+[PASS  ] t_d341fd0a_c2                (64 bytes x86)
+[PASS  ] t_d341fd15_c0                (67 bytes x86)
+[PASS  ] t_d341fd15_c1                (67 bytes x86)
+[PASS  ] t_d341fd15_c2                (67 bytes x86)
+[PASS  ] t_d341fd6d_c0                (64 bytes x86)
+[PASS  ] t_d341fd6d_c1                (64 bytes x86)
+[PASS  ] t_d341fd6d_c2                (64 bytes x86)
+[PASS  ] t_d344fd08_c0                (64 bytes x86)
+[PASS  ] t_d344fd08_c1                (64 bytes x86)
+[PASS  ] t_d344fd08_c2                (64 bytes x86)
+[PASS  ] t_d34c7d04_c0                (61 bytes x86)
+[PASS  ] t_d34c7d04_c1                (61 bytes x86)
+[PASS  ] t_d34c7d04_c2                (61 bytes x86)
+[PASS  ] t_d35e986a_c0                (61 bytes x86)
+[PASS  ] t_d35e986a_c1                (61 bytes x86)
+[PASS  ] t_d35e986a_c2                (61 bytes x86)
+[PASS  ] t_d360fc08_c0                (63 bytes x86)
+[PASS  ] t_d360fc08_c1                (63 bytes x86)
+[PASS  ] t_d360fc08_c2                (63 bytes x86)
+[PASS  ] t_d37ae509_c0                (64 bytes x86)
+[PASS  ] t_d37ae509_c1                (64 bytes x86)
+[PASS  ] t_d37ae509_c2                (64 bytes x86)
+[PASS  ] t_d37ced0b_c0                (64 bytes x86)
+[PASS  ] t_d37ced0b_c1                (64 bytes x86)
+[PASS  ] t_d37ced0b_c2                (64 bytes x86)
+[PASS  ] t_d37df1af_c0                (64 bytes x86)
+[PASS  ] t_d37df1af_c1                (64 bytes x86)
+[PASS  ] t_d37df1af_c2                (64 bytes x86)
+[PASS  ] t_d37ef58f_c0                (64 bytes x86)
+[PASS  ] t_d37ef58f_c1                (64 bytes x86)
+[PASS  ] t_d37ef58f_c2                (64 bytes x86)
+[PASS  ] t_d37ef779_c0                (70 bytes x86)
+[PASS  ] t_d37ef779_c1                (70 bytes x86)
+[PASS  ] t_d37ef779_c2                (70 bytes x86)
+[SKIP  ] t_d503201f_c0                reference: unsupported insn 0xd503201f
+[SKIP  ] t_d503201f_c1                reference: unsupported insn 0xd503201f
+[SKIP  ] t_d503201f_c2                reference: unsupported insn 0xd503201f
+[SKIP  ] t_d503245f_c0                reference: unsupported insn 0xd503245f
+[SKIP  ] t_d503245f_c1                reference: unsupported insn 0xd503245f
+[SKIP  ] t_d503245f_c2                reference: unsupported insn 0xd503245f
+[SKIP  ] t_d5033f9f_c0                reference: unsupported insn 0xd5033f9f
+[SKIP  ] t_d5033f9f_c1                reference: unsupported insn 0xd5033f9f
+[SKIP  ] t_d5033f9f_c2                reference: unsupported insn 0xd5033f9f
+[SKIP  ] t_d5033fbf_c0                reference: unsupported insn 0xd5033fbf
+[SKIP  ] t_d5033fbf_c1                reference: unsupported insn 0xd5033fbf
+[SKIP  ] t_d5033fbf_c2                reference: unsupported insn 0xd5033fbf
+[SKIP  ] t_d5087620_c0                reference: unsupported insn 0xd5087620
+[SKIP  ] t_d5087620_c1                reference: unsupported insn 0xd5087620
+[SKIP  ] t_d5087620_c2                reference: unsupported insn 0xd5087620
+[SKIP  ] t_d50b7e21_c0                reference: unsupported insn 0xd50b7e21
+[SKIP  ] t_d50b7e21_c1                reference: unsupported insn 0xd50b7e21
+[SKIP  ] t_d50b7e21_c2                reference: unsupported insn 0xd50b7e21
+[SKIP  ] t_d518a211_c0                reference: unsupported insn 0xd518a211
+[SKIP  ] t_d518a211_c1                reference: unsupported insn 0xd518a211
+[SKIP  ] t_d518a211_c2                reference: unsupported insn 0xd518a211
+[SKIP  ] t_d5380401_c0                reference: unsupported insn 0xd5380401
+[SKIP  ] t_d5380401_c1                reference: unsupported insn 0xd5380401
+[SKIP  ] t_d5380401_c2                reference: unsupported insn 0xd5380401
+[SKIP  ] t_d53bd048_c0                reference: unsupported insn 0xd53bd048
+[SKIP  ] t_d53bd048_c1                reference: unsupported insn 0xd53bd048
+[SKIP  ] t_d53bd048_c2                reference: unsupported insn 0xd53bd048
+[SKIP  ] t_d53bd04a_c0                reference: unsupported insn 0xd53bd04a
+[SKIP  ] t_d53bd04a_c1                reference: unsupported insn 0xd53bd04a
+[SKIP  ] t_d53bd04a_c2                reference: unsupported insn 0xd53bd04a
+[SKIP  ] t_d65f0380_c0                reference: unsupported insn 0xd65f0380
+[SKIP  ] t_d65f0380_c1                reference: unsupported insn 0xd65f0380
+[SKIP  ] t_d65f0380_c2                reference: unsupported insn 0xd65f0380
+[SKIP  ] t_d65f03c0_c0                reference: unsupported insn 0xd65f03c0
+[SKIP  ] t_d65f03c0_c1                reference: unsupported insn 0xd65f03c0
+[SKIP  ] t_d65f03c0_c2                reference: unsupported insn 0xd65f03c0
+[PASS  ] t_da9f13ec_c0                (80 bytes x86)
+[PASS  ] t_da9f13ec_c1                (80 bytes x86)
+[PASS  ] t_da9f13ec_c2                (80 bytes x86)
+[SKIP  ] t_dac000c6_c0                reference: unsupported insn 0xdac000c6
+[SKIP  ] t_dac000c6_c1                reference: unsupported insn 0xdac000c6
+[SKIP  ] t_dac000c6_c2                reference: unsupported insn 0xdac000c6
+[FAIL  ] t_dac00cc6_c0                  x6  DBT=0x06000080ffffffff  REF=0xffffffff80000006
+             x6  DBT=0x06000080ffffffff  REF=0xffffffff80000006
+[FAIL  ] t_dac00cc6_c1                  x6  DBT=0x66666666666666e6  REF=0xe666666666666666
+             x6  DBT=0x66666666666666e6  REF=0xe666666666666666
+[FAIL  ] t_dac00cc6_c2                  x6  DBT=0xffffffff00000000  REF=0x0000000000000001
+             x6  DBT=0xffffffff00000000  REF=0x0000000000000001
+[SKIP  ] t_dac01109_c0                reference: unsupported insn 0xdac01109
+[SKIP  ] t_dac01109_c1                reference: unsupported insn 0xdac01109
+[SKIP  ] t_dac01109_c2                reference: unsupported insn 0xdac01109
+[PASS  ] t_ea03001f_c0                (73 bytes x86)
+[PASS  ] t_ea03001f_c1                (73 bytes x86)
+[PASS  ] t_ea03001f_c2                (73 bytes x86)
+[PASS  ] t_eb010129_c0                (106 bytes x86)
+[PASS  ] t_eb010129_c1                (106 bytes x86)
+[PASS  ] t_eb010129_c2                (106 bytes x86)
+[PASS  ] t_eb03003f_c0                (102 bytes x86)
+[PASS  ] t_eb03003f_c1                (102 bytes x86)
+[PASS  ] t_eb03003f_c2                (102 bytes x86)
+[PASS  ] t_eb04007f_c0                (102 bytes x86)
+[PASS  ] t_eb04007f_c1                (102 bytes x86)
+[PASS  ] t_eb04007f_c2                (102 bytes x86)
+[PASS  ] t_eb08013f_c0                (102 bytes x86)
+[PASS  ] t_eb08013f_c1                (102 bytes x86)
+[PASS  ] t_eb08013f_c2                (102 bytes x86)
+[PASS  ] t_eb0a006a_c0                (106 bytes x86)
+[PASS  ] t_eb0a006a_c1                (106 bytes x86)
+[PASS  ] t_eb0a006a_c2                (106 bytes x86)
+[PASS  ] t_eb0a013f_c0                (102 bytes x86)
+[PASS  ] t_eb0a013f_c1                (102 bytes x86)
+[PASS  ] t_eb0a013f_c2                (102 bytes x86)
+[PASS  ] t_eb0a017f_c0                (102 bytes x86)
+[PASS  ] t_eb0a017f_c1                (102 bytes x86)
+[PASS  ] t_eb0a017f_c2                (102 bytes x86)
+[PASS  ] t_eb140014_c0                (111 bytes x86)
+[PASS  ] t_eb140014_c1                (111 bytes x86)
+[PASS  ] t_eb140014_c2                (111 bytes x86)
+[PASS  ] t_eb15027f_c0                (108 bytes x86)
+[PASS  ] t_eb15027f_c1                (108 bytes x86)
+[PASS  ] t_eb15027f_c2                (108 bytes x86)
+[PASS  ] t_eb16001f_c0                (104 bytes x86)
+[PASS  ] t_eb16001f_c1                (104 bytes x86)
+[PASS  ] t_eb16001f_c2                (104 bytes x86)
+[PASS  ] t_eb1702df_c0                (108 bytes x86)
+[PASS  ] t_eb1702df_c1                (108 bytes x86)
+[PASS  ] t_eb1702df_c2                (108 bytes x86)
+[PASS  ] t_eb1802ff_c0                (108 bytes x86)
+[PASS  ] t_eb1802ff_c1                (108 bytes x86)
+[PASS  ] t_eb1802ff_c2                (108 bytes x86)
+[PASS  ] t_eb19007f_c0                (105 bytes x86)
+[PASS  ] t_eb19007f_c1                (105 bytes x86)
+[PASS  ] t_eb19007f_c2                (105 bytes x86)
+[PASS  ] t_eb1a02bf_c0                (108 bytes x86)
+[PASS  ] t_eb1a02bf_c1                (108 bytes x86)
+[PASS  ] t_eb1a02bf_c2                (108 bytes x86)
+[PASS  ] t_eb1a039f_c0                (108 bytes x86)
+[PASS  ] t_eb1a039f_c1                (108 bytes x86)
+[PASS  ] t_eb1a039f_c2                (108 bytes x86)
+[PASS  ] t_eb1c001f_c0                (104 bytes x86)
+[PASS  ] t_eb1c001f_c1                (104 bytes x86)
+[PASS  ] t_eb1c001f_c2                (104 bytes x86)
+[SKIP  ] t_f0000010_c0                reference: unsupported insn 0xf0000010
+[SKIP  ] t_f0000010_c1                reference: unsupported insn 0xf0000010
+[SKIP  ] t_f0000010_c2                reference: unsupported insn 0xf0000010
+[SKIP  ] t_f0000030_c0                reference: unsupported insn 0xf0000030
+[SKIP  ] t_f0000030_c1                reference: unsupported insn 0xf0000030
+[SKIP  ] t_f0000030_c2                reference: unsupported insn 0xf0000030
+[SKIP  ] t_f0000050_c0                reference: unsupported insn 0xf0000050
+[SKIP  ] t_f0000050_c1                reference: unsupported insn 0xf0000050
+[SKIP  ] t_f0000050_c2                reference: unsupported insn 0xf0000050
+[SKIP  ] t_f00000b0_c0                reference: unsupported insn 0xf00000b0
+[SKIP  ] t_f00000b0_c1                reference: unsupported insn 0xf00000b0
+[SKIP  ] t_f00000b0_c2                reference: unsupported insn 0xf00000b0
+[SKIP  ] t_f0005c69_c0                reference: unsupported insn 0xf0005c69
+[SKIP  ] t_f0005c69_c1                reference: unsupported insn 0xf0005c69
+[SKIP  ] t_f0005c69_c2                reference: unsupported insn 0xf0005c69
+[SKIP  ] t_f0ff86f7_c0                reference: unsupported insn 0xf0ff86f7
+[SKIP  ] t_f0ff86f7_c1                reference: unsupported insn 0xf0ff86f7
+[SKIP  ] t_f0ff86f7_c2                reference: unsupported insn 0xf0ff86f7
+[SKIP  ] t_f0fffe6d_c0                reference: unsupported insn 0xf0fffe6d
+[SKIP  ] t_f0fffe6d_c1                reference: unsupported insn 0xf0fffe6d
+[SKIP  ] t_f0fffe6d_c2                reference: unsupported insn 0xf0fffe6d
+[PASS  ] t_f100001f_c0                (100 bytes x86)
+[PASS  ] t_f100001f_c1                (100 bytes x86)
+[PASS  ] t_f100001f_c2                (100 bytes x86)
+[PASS  ] t_f10002bf_c0                (104 bytes x86)
+[PASS  ] t_f10002bf_c1                (104 bytes x86)
+[PASS  ] t_f10002bf_c2                (104 bytes x86)
+[PASS  ] t_f1000508_c0                (109 bytes x86)
+[PASS  ] t_f1000508_c1                (109 bytes x86)
+[PASS  ] t_f1000508_c2                (109 bytes x86)
+[PASS  ] t_f100069f_c0                (108 bytes x86)
+[PASS  ] t_f100069f_c1                (108 bytes x86)
+[PASS  ] t_f100069f_c2                (108 bytes x86)
+[PASS  ] t_f1001c7f_c0                (105 bytes x86)
+[PASS  ] t_f1001c7f_c1                (105 bytes x86)
+[PASS  ] t_f1001c7f_c2                (105 bytes x86)
+[PASS  ] t_f100233f_c0                (108 bytes x86)
+[PASS  ] t_f100233f_c1                (108 bytes x86)
+[PASS  ] t_f100233f_c2                (108 bytes x86)
+[PASS  ] t_f100391f_c0                (105 bytes x86)
+[PASS  ] t_f100391f_c1                (105 bytes x86)
+[PASS  ] t_f100391f_c2                (105 bytes x86)
+[PASS  ] t_f100405f_c0                (105 bytes x86)
+[PASS  ] t_f100405f_c1                (105 bytes x86)
+[PASS  ] t_f100405f_c2                (105 bytes x86)
+[PASS  ] t_f10042bf_c0                (108 bytes x86)
+[PASS  ] t_f10042bf_c1                (108 bytes x86)
+[PASS  ] t_f10042bf_c2                (108 bytes x86)
+[PASS  ] t_f1005f5f_c0                (108 bytes x86)
+[PASS  ] t_f1005f5f_c1                (108 bytes x86)
+[PASS  ] t_f1005f5f_c2                (108 bytes x86)
+[PASS  ] t_f100805f_c0                (105 bytes x86)
+[PASS  ] t_f100805f_c1                (105 bytes x86)
+[PASS  ] t_f100805f_c2                (105 bytes x86)
+[PASS  ] t_f100869f_c0                (108 bytes x86)
+[PASS  ] t_f100869f_c1                (108 bytes x86)
+[PASS  ] t_f100869f_c2                (108 bytes x86)
+[PASS  ] t_f100875f_c0                (108 bytes x86)
+[PASS  ] t_f100875f_c1                (108 bytes x86)
+[PASS  ] t_f100875f_c2                (108 bytes x86)
+[PASS  ] t_f102805f_c0                (105 bytes x86)
+[PASS  ] t_f102805f_c1                (105 bytes x86)
+[PASS  ] t_f102805f_c2                (105 bytes x86)
+[PASS  ] t_f240081f_c0                (76 bytes x86)
+[PASS  ] t_f240081f_c1                (76 bytes x86)
+[PASS  ] t_f240081f_c2                (76 bytes x86)
+[PASS  ] t_f240085f_c0                (77 bytes x86)
+[PASS  ] t_f240085f_c1                (77 bytes x86)
+[PASS  ] t_f240085f_c2                (77 bytes x86)
+[PASS  ] t_f24008bf_c0                (77 bytes x86)
+[PASS  ] t_f24008bf_c1                (77 bytes x86)
+[PASS  ] t_f24008bf_c2                (77 bytes x86)
+[PASS  ] t_f2400e7f_c0                (80 bytes x86)
+[PASS  ] t_f2400e7f_c1                (80 bytes x86)
+[PASS  ] t_f2400e7f_c2                (80 bytes x86)
+[SKIP  ] t_fa405a4d_c0                reference: unsupported insn 0xfa405a4d
+[SKIP  ] t_fa405a4d_c1                reference: unsupported insn 0xfa405a4d
+[SKIP  ] t_fa405a4d_c2                reference: unsupported insn 0xfa405a4d
+
+summary: 1149 PASS, 6 FAIL, 462 SKIP, 0 DBTERR

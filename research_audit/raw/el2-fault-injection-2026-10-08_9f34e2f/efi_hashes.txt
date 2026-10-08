@@ -1,0 +1,9 @@
+control_smp4 05661b706de20a34
+control_smp1 05661b706de20a34
+FI1_eoimode0 e669de8f4711d57b
+FI2_pl011_no_amba f00f692a0aa7a0e2
+FI3_psci_hvc e39c28dd33240b1b
+FI4_no_elr_advance 54943515e70b03db
+FI5_no_id_sanitize c54e776cbe5f45bc
+FI6_no_apk_api dec4b672d74e9420
+FI7_hardcoded_4cpus 5f0d20267ea247f1

@@ -1,0 +1,1075 @@
+# cmd: CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine cargo +nightly test -p aether-translator --target x86_64-pc-windows-gnu
+# why: at_exec_proof/phase_e_* are #![cfg(windows)] (VirtualAlloc + Win64 helper ABI); run under Wine 9.0
+# start: 2026-10-08T09:46:41Z
+ Downloading crates ...
+  Downloaded windows-link v0.2.1
+  Downloaded windows-sys v0.61.2
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling find-msvc-tools v0.1.9
+   Compiling getrandom v0.4.2
+   Compiling zerocopy v0.8.48
+   Compiling shlex v1.3.0
+   Compiling cc v1.2.62
+   Compiling windows-link v0.2.1
+   Compiling autocfg v1.5.0
+   Compiling rand_core v0.9.5
+   Compiling windows-sys v0.61.2
+   Compiling num-traits v0.2.19
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.4.1
+   Compiling tempfile v3.27.0
+   Compiling quick-error v1.2.3
+   Compiling fnv v1.0.7
+   Compiling bit-vec v0.8.0
+   Compiling wait-timeout v0.2.1
+   Compiling rusty-fork v0.3.1
+   Compiling bit-set v0.8.0
+   Compiling capstone-sys v0.18.0
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.10
+   Compiling static_assertions v1.1.0
+   Compiling bitflags v2.11.1
+   Compiling aether-translator v0.0.1 (/home/user/aether-files/aether-translator)
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling proptest v1.11.0
+   Compiling capstone v0.14.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.53s
+     Running unittests src/lib.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/8e956ef719513faa/out/aether_translator-8e956ef719513faa.exe)
+
+running 120 tests
+test backend::code_buf::at15_tests::at15_alloc_block_then_commit_makes_block_committed ... ok
+test backend::code_buf::at15_tests::at15_capacity_at_least_as_large_as_requested ... ok
+test backend::code_buf::at15_tests::at15_commit_promotes_to_rx ... ok
+test backend::code_buf::at15_tests::at15_committed_bytes_match_emitted ... ok
+test backend::code_buf::at15_tests::at15_dirty_after_emit ... ok
+test backend::code_buf::at15_tests::at15_emit_after_commit_returns_to_rw ... ok
+test backend::code_buf::at15_tests::at15_emit_bytes_advances_written_len ... ok
+test backend::code_buf::at15_tests::at15_executable_after_commit ... ok
+test backend::code_buf::at15_tests::at15_initial_protection_is_rw ... ok
+test backend::code_buf::at15_tests::at15_invalidate_increments_generation ... ok
+test backend::code_buf::at15_tests::at15_invalidate_marks_block_uncommitted ... ok
+test backend::code_buf::at15_tests::at15_invalidate_nonexistent_pc_is_noop ... ok
+test backend::code_buf::at15_tests::at15_lookup_guest_pc_finds_committed_block ... ok
+test backend::code_buf::at15_tests::at15_mfence_encoding_survives_commit ... ok
+test backend::code_buf::at15_tests::at15_multiple_blocks_lookup ... ok
+test backend::code_buf::at15_tests::at15_new_buf_is_empty ... ok
+test backend::code_buf::at15_tests::at15_not_dirty_after_commit ... ok
+test backend::code_buf::at15_tests::at15_not_executable_when_dirty ... ok
+test backend::code_buf::at15_tests::at15_overflow_returns_error ... ok
+test backend::code_buf::at15_tests::at15_reinject_after_invalidate_succeeds ... ok
+test backend::code_buf::at15_tests::at15_reset_allows_fresh_emit ... ok
+test backend::code_buf::at15_tests::at15_smc_1m_iterations_structural ... ignored
+test backend::code_buf::at15_tests::at15_reset_clears_all_state ... ok
+test backend::code_buf::at15_tests::at15_smc_generation_advances_after_cycle ... ok
+test backend::code_buf::at15_tests::at15_smc_single_cycle_succeeds ... ok
+test backend::code_buf::at15_tests::at15_two_blocks_committed ... ok
+test backend::code_buf::at15_tests::at15_xor_rax_rax_ret_survives_commit ... ok
+test backend::code_buf::at15_tests::at15_uncommitted_block_not_returned_by_lookup ... ok
+test backend::encode::tests::fma3_vfmadd213ps_vex_encoding ... ok
+test backend::encode::tests::fma3_vfmadd213ss_vex_encoding ... ok
+test backend::encode::tests::strb_high_reg_forces_rex ... ok
+test decoder::branch_sys::tests::drps_is_not_eret ... ok
+test decoder::branch_sys::tests::eretaa_is_not_plain_eret ... ok
+test decoder::branch_sys::tests::eret_decodes ... ok
+test decoder::branch_sys::tests::ret_still_decodes ... ok
+test decoder::branch_sys::tests::retaa_retab_target_implicit_x30 ... ok
+test decoder::sysreg::tests::known_named_regs ... ok
+test decoder::sysreg::tests::packed_id_roundtrip ... ok
+test backend::code_buf::at15_tests::at15_smc_1k_iterations_structural_fast ... ok
+test decoder::sysreg::tests::unknown_named_returns_other_known ... ok
+test lift::tests::lift_add_imm_x1_x1_1 ... ok
+test lift::tests::lift_and_imm_sp_dest_writes_sp ... ok
+test lift::tests::lift_bl_sets_x30 ... ok
+test lift::tests::lift_eret_emits_eret_runtime_call ... ok
+test lift::tests::lift_ldaprb_zero_extending_load ... ok
+test lift::tests::lift_ldar_sp_base_reads_sp_not_xzr ... ok
+test lift::tests::lift_b_writes_pc ... ok
+test lift::tests::lift_ldr_byte_fp_lands_in_vreg_not_gpr ... ok
+test lift::tests::lift_ldr_x0_x1 ... ok
+test lift::tests::lift_ngc_decodes_and_preserves_nzcv ... ok
+test lift::tests::lift_nop_emits_hint ... ok
+test lift::tests::lift_str_half_fp_extracts_lane_not_gpr ... ok
+test lift::tests::lift_svc_stages_return_pc_then_svc ... ok
+test lift::tests::lift_subs_xzr_x1_1_sets_flags ... ok
+test lift::tests::lift_swp_sp_base_reads_sp_not_xzr ... ok
+test runtime::crypto_rt::tests::crc32_iso_matches_bit_serial_reference ... ok
+test runtime::crypto_rt::tests::schedule_via_su0_su1_matches_reference ... ok
+test runtime::crypto_rt::tests::sha256_abc_via_crypto_ops ... ok
+test runtime::exceptions::tests::abort_ec_follows_source_el_not_far ... ok
+test runtime::exceptions::tests::eret_to_el0_then_entry_banks_sp ... ok
+test runtime::crypto_rt::tests::crc32_iso_is_incremental ... ok
+test runtime::exceptions::tests::eret_to_el1h_no_swap_restores_pstate ... ok
+test runtime::exceptions::tests::inject_data_abort_sets_every_field ... ok
+test runtime::exceptions::tests::inject_fixes_abort_ec_for_source_el ... ok
+test runtime::exceptions::tests::inject_irq_uses_irq_vector ... ok
+test runtime::exceptions::tests::inject_then_eret_roundtrips_pc_and_nzcv ... ok
+test runtime::exceptions::tests::irq_mask_gate ... ok
+test runtime::exceptions::tests::inject_then_full_eret_roundtrips ... ok
+test runtime::exceptions::tests::svc_enter_injects_sync_with_ec_0x15 ... ok
+test runtime::exceptions::tests::take_pending_abort_consumes_and_clears ... ok
+test runtime::exceptions::tests::vector_offset_selects_group_and_type ... ok
+test runtime::gic::tests::disabled_or_wrong_group_not_signalled ... ok
+test runtime::gic::tests::eoimode_split_requires_dir_to_deactivate ... ok
+test runtime::gic::tests::group1_enable_gates_signalling ... ok
+test runtime::gic::tests::highest_priority_wins_among_pending ... ok
+test runtime::gic::tests::nothing_signalled_when_idle ... ok
+test runtime::gic::tests::pmr_masks_lower_priority ... ok
+test runtime::mmu::tests::clamp_rejects_out_of_window_leaf ... ok
+test runtime::gic::tests::raise_then_signal_ack_eoi_lifecycle ... ok
+test runtime::mmu::tests::clamp_rejects_out_of_window_table_base ... ok
+test runtime::mmu::tests::fault_access_flag ... ok
+test runtime::mmu::tests::esr_with_ec_rewrites_only_ec ... ok
+test runtime::mmu::tests::fault_invalid_descriptor ... ok
+test runtime::mmu::tests::fault_permission_on_write ... ok
+test runtime::mmu::tests::fault_unsupported_granule ... ok
+test runtime::mmu::tests::fetch_walks_va_to_pa_and_reads_mapped_bytes ... ok
+test runtime::mmu::tests::flat_mmu_off_access_outside_window_faults_not_wild_rw ... ok
+test runtime::mmu::tests::fetch_flat_when_mmu_off ... ok
+test runtime::mmu::tests::fetch_fault_records_instruction_abort_esr ... ok
+test runtime::mmu::tests::ttbr1_selected_by_va55 ... ok
+test runtime::mmu::tests::walk_1g_block ... ok
+test runtime::mmu::tests::walk_2m_block ... ok
+test runtime::mmu::tests::walk_4k_page ... ok
+test runtime::mmu::tests::walk_39bit_3level_start_l1 ... ok
+test runtime::mmu::tests::walk_tbi_tagged_va_resolves_like_untagged ... ok
+test runtime::mmu::tests::xlate_flat_when_mmu_off ... ok
+test runtime::mmu::tests::xlate_spanning_contiguous_pages_ok ... ok
+test runtime::mmu::tests::xlate_spanning_discontiguous_load_gathers ... ok
+test runtime::mmu::tests::xlate_spanning_discontiguous_store_scatters ... ok
+test runtime::mmu::tests::xlate_tbi_tagged_and_untagged_share_tlb_entry ... ok
+test runtime::mmu::tests::xlate_walks_and_caches_then_faults_pending ... ok
+test runtime::psci::tests::affinity_info_boot_on_others_off ... ok
+test runtime::psci::tests::cpu_on_secondary_yields_action_and_already_on_for_boot ... ok
+test runtime::mmu::tests::xlate_ttbr0_asid_tag_isolates_forked_child ... ok
+test runtime::psci::tests::features_reports_supported_and_unsupported ... ok
+test runtime::psci::tests::migrate_info_type_is_mp ... ok
+test runtime::psci::tests::negative_codes_sign_extend_into_x0 ... ok
+test runtime::psci::tests::system_off_and_reset_actions ... ok
+test runtime::psci::tests::version_is_1_1 ... ok
+test runtime::psci::tests::unknown_func_is_not_supported ... ok
+test runtime::sysreg_rt::tests::pending_irq_fires_when_timer_expires_and_gic_armed ... ok
+test runtime::sysreg_rt::tests::icc_sre_reads_as_set ... ok
+test runtime::sysreg_rt::tests::timer_ctl_cval_tval_roundtrip ... ok
+test runtime::sysreg_rt::tests::cntvct_advances_with_set_now ... ok
+test runtime::timer::tests::condition_is_wrap_correct ... ok
+test runtime::timer::tests::fires_when_count_reaches_cval ... ok
+test runtime::timer::tests::imask_suppresses_irq_but_not_istatus ... ok
+test runtime::timer::tests::istatus_clears_when_cval_reprogrammed_ahead ... ok
+test runtime::timer::tests::disabled_timer_never_fires ... ok
+test runtime::timer::tests::tval_is_cval_minus_now_signed ... ok
+
+test result: ok. 119 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/aes_block_ud2.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/a014902d8a27cc3d/out/aes_block_ud2-a014902d8a27cc3d.exe)
+
+running 4 tests
+test ghash_block_no_ud2 ... ok
+test aes_ctr_block_no_ud2 ... ok
+test aes_ctr_drbg_block_no_ud2 ... ok
+test fmov_high_half_decodes ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/at10_mem_order.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/e36b9d14e8f9b24e/out/at10_mem_order-e36b9d14e8f9b24e.exe)
+
+running 9 tests
+test at10_dmb_sy_becomes_mfence ... ok
+test at10_dmb_ish_becomes_mfence ... ok
+test at10_dmb_ld_elided ... ok
+test at10_dmb_st_elided ... ok
+test at10_dsb_sy_becomes_mfence ... ok
+test at10_isb_becomes_cpuid ... ok
+test at10_load_acquire_becomes_plain_load ... ok
+test at10_sb_elided ... ok
+test at10_store_release_gets_mfence ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/at11_encoder.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/f8160a3b7c6f5040/out/at11_encoder-f8160a3b7c6f5040.exe)
+
+running 68 tests
+test at11_addps ... ok
+test at11_add_rax_imm8 ... ok
+test at11_add_rax_rcx ... ok
+test at11_and_rsi_rdi ... ok
+test at11_addpd ... ok
+test at11_bswap_r9 ... ok
+test at11_bswap_rax ... ok
+test at11_aesenc ... ok
+test at11_cmov_e_rax_rcx ... ok
+test at11_cmp_rax_rcx ... ok
+test at11_cqo ... ok
+test at11_imul_rax_rcx ... ok
+test at11_cpuid ... ok
+test at11_isb_sequence ... ok
+test at11_jcc_z_rel32 ... ok
+test at11_jmp_r64 ... ok
+test at11_jmp_r8 ... ok
+test at11_lock_xadd_mem64 ... ok
+test at11_lzcnt_rax_rcx ... ok
+test at11_lfence ... ok
+test at11_jmp_rel32_forward ... ok
+test at11_lock_cmpxchg_mem64 ... ok
+test at11_mfence ... ok
+test at11_m4b6_byte_exact ... ok
+test at11_mov_mem_r64_nodisp ... ok
+test at11_mov_r10_imm64 ... ok
+test at11_mov_r64_mem_disp8 ... ok
+test at11_mov_r64_rbp_nodisp ... ok
+test at11_mov_r64_rsp_mem ... ok
+test at11_mov_r8_rax ... ok
+test at11_mov_r64_mem_rax_nodisp ... ok
+test at11_mov_rax_imm32_42 ... ok
+test at11_mov_rax_r9 ... ok
+test at11_mov_rax_imm32_zero ... ok
+test at11_mov_rax_rcx ... ok
+test at11_mov_rcx_imm64 ... ok
+test at11_mov_rcx_rax ... ok
+test at11_movdqa_rr ... ok
+test at11_movsx_r64_r32 ... ok
+test at11_movzx_r64_r8 ... ok
+test at11_movzx_r64_mem8 ... ok
+test at11_mul_rsi ... ok
+test at11_neg_rbp ... ok
+test at11_nop ... ok
+test at11_not_rax ... ok
+test at11_opcode_coverage_100pct ... ok
+test at11_or_r11_r12 ... ok
+test at11_paddd ... ok
+test at11_pclmulqdq ... ok
+test at11_pshufb ... ok
+test at11_pmulld ... ok
+test at11_pxor ... ok
+test at11_ret ... ok
+test at11_ror_rcx_cl ... ok
+test at11_sar_rbx_cl ... ok
+test at11_setcc_z_al ... ok
+test at11_sfence ... ok
+test at11_shl_rax_cl ... ok
+test at11_shl_rax_imm8_3 ... ok
+test at11_sub_rcx_imm32 ... ok
+test at11_shr_rdx_cl ... ok
+test at11_sub_rdx_rbx ... ok
+test at11_test_rdx_rdx ... ok
+test at11_ud2 ... ok
+test at11_xchg_r64_mem64 ... ok
+test at11_xor_rax_rax ... ok
+test at11_xor_zero_r9d ... ok
+test at11_xor_zero_rax ... ok
+
+test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/at12_int_lower.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/7727b90848d99259/out/at12_int_lower-7727b90848d99259.exe)
+
+running 20 tests
+test at12_add_different_dst ... ok
+test at12_add_two_regs ... ok
+test at12_branch_patches_collected ... ok
+test at12_cbz_emits_test_jz ... ok
+test at12_cmp_flags ... ok
+test at12_const_i64_large ... ok
+test at12_cpuid_passthrough ... ok
+test at12_hello_world_const_42 ... ok
+test at12_hello_world_const_zero ... ok
+test at12_hello_world_full_pipeline ... ok
+test at12_load_spilled_addr_reloads_from_slot ... ok
+test at12_load_u64 ... ok
+test at12_load_u8_zero_extend ... ok
+test at12_mfence_passthrough ... ok
+test at12_neg ... ok
+test at12_sext_32_to_64 ... ok
+test at12_shr_imm_pipeline ... ok
+test at12_store_u64 ... ok
+test at12_sub ... ok
+test at12_xor_rax_rax ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/at13_simd_ctx.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/07787fd92c4607b2/out/at13_simd_ctx-07787fd92c4607b2.exe)
+
+running 36 tests
+test cnt_byte_no_ud2 ... ok
+test dup_general_broadcasts_no_ud2 ... ok
+test fmov_s_from_w_no_ud2 ... ok
+test ext_extract_no_ud2 ... ok
+test fmov_d_from_x_no_ud2 ... ok
+test ins_general_no_ud2 ... ok
+test fmov_x_from_d_no_ud2 ... ok
+test fp_scalar_no_ud2 ... ok
+test init_block_simd_ops_no_ud2 ... ok
+test ld1r_replicate_no_ud2 ... ok
+test ldp_q_targets_fpr_not_gpr ... ok
+test m4b6_add_v0_4s_byte_exact ... ok
+test m4b6_and_8b_dform_fixup ... ok
+test m4b6_cmeq_4s_uses_pcmpeqd ... ok
+test m4b6_cmge_4s_invert_pcmpgt ... ok
+test m4b6_cmgt_4s_uses_pcmpgtd ... ok
+test m4b6_cmhi_unsigned_byte_no_ud2 ... ok
+test m4b6_dc_cvac_stays_noop ... ok
+test m4b6_dc_zva_zeroes_block ... ok
+test m4b6_ldr_q0_x1 ... ok
+test m4b6_mul_8h_uses_pmullw ... ok
+test mla_mls_no_ud2 ... ok
+test m4b6_str_q0_x1 ... ok
+test movi_resolves_immediate ... ok
+test m4b6_orr_16b_uses_por ... ok
+test m4b6_sub_2d_uses_psubq ... ok
+test mul_long_no_translatefail_no_ud2 ... ok
+test rev64_no_ud2 ... ok
+test sha256_crypto_lifts_to_cryptosha256 ... ok
+test smov_x_byte_no_ud2 ... ok
+test stp_d_reads_fpr_not_gpr ... ok
+test umov_w_word_no_ud2 ... ok
+test uaddlv_byte_no_ud2 ... ok
+test strchr_block_ops_decode ... ok
+test umov_x_dword_no_ud2 ... ok
+test ushll_shift_left_long_no_ud2 ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/at16_block_cache.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/546f916bdca98d13/out/at16_block_cache-546f916bdca98d13.exe)
+
+running 9 tests
+test at16_generational_eviction_promotes_active ... ok
+test at16_flush_all_clears_both_generations ... ok
+test at16_invalidate_removes_entry ... ok
+test at16_insert_and_hit ... ok
+test at16_load_factor_below_threshold_before_rotation ... ok
+test at16_miss_returns_none ... ok
+test at16_stat_counters_monotone ... ok
+test at16_update_existing_entry ... ok
+test at16_hit_rate_gate_99pct ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/at17_dispatcher.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/abee31131afcbd75/out/at17_dispatcher-abee31131afcbd75.exe)
+
+running 7 tests
+test at17_cold_path_translates_nop ... ok
+test at17_guest_pc_out_of_range ... ok
+test at17_hot_path_max_branches_constant ... ok
+test at17_cold_then_hot_hit ... ok
+test at17_hit_rate_after_many_lookups ... ok
+test at17_p99_latency_structural_gate ... ok
+test at17_invalidate_forces_retranslation ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/at18_branch_chain.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/f05795b028ab8df3/out/at18_branch_chain-f05795b028ab8df3.exe)
+
+running 7 tests
+test at18_patchable_after_offsets_set ... ok
+test at18_direct_dispatches_counted_after_settle ... ok
+test at18_gate_passes_when_all_settled_are_patchable ... ok
+test at18_multiple_call_sites_independent ... ok
+test at18_settle_after_threshold ... ok
+test at18_settle_threshold_value ... ok
+test at18_target_change_resets_counter ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/at19_context.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/6c1111190d155414/out/at19_context-6c1111190d155414.exe)
+
+running 17 tests
+test at19_bytes_as_slice_correct_size ... ok
+test at19_epilogue_contains_mov_opcode ... ok
+test at19_gpr_offset_zero ... ok
+test at19_gpr_read_write ... ok
+test at19_nzcv_offset ... ok
+test at19_layout_constants_correct ... ok
+test at19_pc_offset ... ok
+test at19_prologue_has_rex_w_prefix ... ok
+test at19_prologue_contains_mov_opcode ... ok
+test at19_restore_epilogue_non_empty ... ok
+test at19_round_trip_all_registers ... ok
+test at19_save_prologue_non_empty ... ok
+test at19_sp_offset ... ok
+test at19_sp_pc_nzcv_fields ... ok
+test at19_total_size ... ok
+test at19_vec_offset ... ok
+test at19_vec_read_write ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/at1_canned_1000.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/53379687f2954819/out/at1_canned_1000-53379687f2954819.exe)
+
+running 1 test
+test at1_canned_1000_vectors ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at1_capstone_fuzz.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/bd57b816580823ef/out/at1_capstone_fuzz-bd57b816580823ef.exe)
+
+running 5 tests
+test at1_capstone_full_parity_smoke ... ignored, AT-1 full parity; un-ignore when lift fills + mnemonic formatter land
+test at1_capstone_no_panic_10k ... ok
+test at1_capstone_validates_anchors ... ok
+test at1_capstone_no_false_positives_5k ... ok
+test at1_capstone_coverage_report ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/at20_exception_forward.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/64638497dcc5c360/out/at20_exception_forward-64638497dcc5c360.exe)
+
+running 16 tests
+test at20_align_gate_passes ... ok
+test at20_align_fault_produces_correct_iss ... ok
+test at20_bp_is_software_breakpoint ... ok
+test at20_db_is_breakpoint ... ok
+test at20_de_is_unknown ... ok
+test at20_esr_iss_preserved ... ok
+test at20_esr_ec_field_correct_for_data_abort ... ok
+test at20_esr_il_bit_set ... ok
+test at20_pf_data_gate_passes ... ok
+test at20_fault_vector_numbers ... ok
+test at20_gp_is_data_abort ... ok
+test at20_pf_not_present_data_is_data_abort ... ok
+test at20_pf_instruction_fetch_is_insn_abort ... ok
+test at20_pf_present_write_is_permission_abort ... ok
+test at20_ss_is_data_abort ... ok
+test at20_ud_is_unknown ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/at21_aot.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/589f6ce6f9837e1e/out/at21_aot-589f6ce6f9837e1e.exe)
+
+running 19 tests
+test at21_blocks_pretranslated_counter_increments ... ok
+test at21_config_aether_defaults_valid ... ok
+test at21_default_library_count_is_21 ... ok
+test at21_gate_fails_if_no_frames_recorded ... ok
+test at21_gate_passes_after_good_frames ... ok
+test at21_init_pipeline_succeeds ... ok
+test at21_library_list_contains_libart ... ok
+test at21_library_list_contains_libvulkan ... ok
+test at21_library_list_no_duplicates ... ok
+test at21_p99_99th_percentile_correct ... ok
+test at21_p99_gate_fails_above_target ... ok
+test at21_p99_gate_passes_below_target ... ok
+test at21_p99_no_samples_returns_max ... ok
+test at21_p99_single_sample ... ok
+test at21_p99_target_constant ... ok
+test at21_queue_capacity_constant ... ok
+test at21_queue_enqueue_and_pop ... ok
+test at21_queue_full_returns_error ... ok
+test at21_queue_invalid_lib_idx_returns_error ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/at22_cache_persist.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/c9dc12e962fcc848/out/at22_cache_persist-c9dc12e962fcc848.exe)
+
+running 19 tests
+test at22_crc32_deterministic ... ok
+test at22_config_zero_queue_depth_invalid ... ok
+test at22_config_aether_defaults_valid ... ok
+test at22_crc32_empty_input ... ok
+test at22_crc32_known_value ... ok
+test at22_entry_new_fields ... ok
+test at22_gate_fails_below_reduction_target ... ok
+test at22_init_pipeline_succeeds ... ok
+test at22_nvme_lba_base_nonzero ... ok
+test at22_queue_depth_constant ... ok
+test at22_reduction_pct_100_pct ... ok
+test at22_reduction_pct_80_pct ... ok
+test at22_reduction_pct_below_target ... ok
+test at22_reduction_pct_zero_when_no_baseline ... ok
+test at22_spill_accumulates_block_count ... ok
+test at22_spill_queue_enqueue_and_drain ... ok
+test at22_spill_queue_full_returns_error ... ok
+test at22_spill_then_restore_gate ... ok
+test at22_target_reduction_constant ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/at23_smc_handler.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/ed022ccc3983f9fe/out/at23_smc_handler-ed022ccc3983f9fe.exe)
+
+running 15 tests
+test at23_config_aether_defaults_wx_strict ... ok
+test at23_range_count_correct ... ok
+test at23_rx_range_add_guest_pc_dedup ... ok
+test at23_rx_range_contains_pa ... ok
+test at23_rx_range_overlaps ... ok
+test at23_gate_fails_after_stale_execution ... ok
+test at23_init_pipeline_phase ... ok
+test at23_gate_passes_after_range_registered_and_no_stale ... ok
+test at23_watcher_bind_to_nonexistent_range_fails ... ok
+test at23_watcher_bind_block_to_range ... ok
+test at23_watcher_register_and_fault ... ok
+test at23_watcher_fault_outside_range_no_invalidation ... ok
+test at23_watcher_duplicate_range_returns_error ... ok
+test at23_write_fault_returns_pcs_and_clears_range ... ok
+test at23_watcher_stale_execution_recorded ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/at24_dbt_ffi.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/e26d85e000cbf7e0/out/at24_dbt_ffi-e26d85e000cbf7e0.exe)
+
+running 25 tests
+test at24_check_dbt_present_all_present ... ok
+test at24_check_dbt_present_detects_missing ... ok
+test at24_check_fex_absent_detects_fex_init ... ok
+test at24_config_aether_defaults_valid ... ok
+test at24_check_fex_absent_clean_input ... ok
+test at24_config_jit_cache_too_small_invalid ... ok
+test at24_config_bump_arena_too_small_invalid ... ok
+test at24_audit_fails_when_fex_symbol_present ... ok
+test at24_config_overlapping_regions_invalid ... ok
+test at24_config_unaligned_jit_cache_invalid ... ok
+test at24_dbt_required_symbols_count ... ok
+test at24_dbt_symbols_all_prefixed ... ok
+test at24_fex_forbidden_symbols_count ... ok
+test at24_fex_symbols_all_prefixed ... ok
+test at24_gate_passes_after_elf_and_audit ... ok
+test at24_init_pipeline_phase_advances ... ok
+test at24_stub_load_elf_rejects_zero_pa ... ok
+test at24_stub_load_elf_rejects_zero_size ... ok
+test at24_stub_shutdown_returns_ok ... ok
+test at24_stub_load_elf_valid_descriptor ... ok
+test at24_dispatch_block_returns_ok_on_cached ... ok
+test at24_translate_block_returns_ok_on_valid_arm64 ... ok
+test at24_stub_init_returns_ok ... ok
+test at24_translate_block_fails_on_unknown_encoding ... ok
+test at24_version_nonzero ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/at25_forbidden_symbols.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/a16cce258e8e7032/out/at25_forbidden_symbols-a16cce258e8e7032.exe)
+
+running 22 tests
+test at25_forbidden_list_contains_exit ... ok
+test at25_forbidden_list_contains_malloc ... ok
+test at25_forbidden_list_contains_fopen ... ok
+test at25_forbidden_list_contains_pthread_create ... ok
+test at25_forbidden_list_nonempty ... ok
+test at25_forbidden_list_contains_libc_start_main ... ok
+test at25_clean_nm_output_no_violations ... ok
+test at25_forbidden_list_size_matches_ch52 ... ok
+test at25_forbidden_list_contains_mmap ... ok
+test at25_gate_fails_dirty_archive ... ok
+test at25_gate_struct_fails_on_malloc ... ok
+test at25_gate_struct_passes_on_clean_output ... ok
+test at25_nm_with_fopen_detected ... ok
+test at25_gate_passes_clean_archive ... ok
+test at25_nm_with_malloc_detected ... ok
+test at25_no_false_positive_on_aether_write ... ok
+test at25_nm_with_pthread_create_detected ... ok
+test at25_no_false_positive_on_malloc_trim ... ok
+test at25_nm_with_multiple_violations_detected ... ok
+test at25_run_gate_clean_succeeds ... ok
+test at25_run_gate_dirty_fails ... ok
+test at25_run_gate_empty_input_fails ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/at26_hello_world.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/6ffbe51a76363379/out/at26_hello_world-6ffbe51a76363379.exe)
+
+running 20 tests
+test at26_block_limit_nonzero ... ok
+test at26_config_aether_defaults_valid ... ok
+test at26_config_tiny_cache_invalid ... ok
+test at26_config_zero_jit_base_invalid ... ok
+test at26_expected_uart_lines_four_entries ... ok
+test at26_gate_fails_with_libc_symbol ... ok
+test at26_gate_fails_without_hello ... ok
+test at26_gate_from_log_full_sequence ... ok
+test at26_gate_from_log_libc_symbol_fails ... ok
+test at26_gate_from_log_no_hello_fails ... ok
+test at26_gate_passes_after_full_sequence ... ok
+test at26_hello_world_expected_string ... ok
+test at26_init_pipeline_succeeds ... ok
+test at26_init_starts_with_clean_no_libc_flag ... ok
+test at26_mark_hello_observed_advances_phase ... ok
+test at26_process_block_translated_line ... ok
+test at26_process_dispatcher_start_line ... ok
+test at26_process_hello_world_line ... ok
+test at26_record_block_increments_counter ... ok
+test at26_uart_sigs_non_empty ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/at27_bionic_libart.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/893adf54d14a82da/out/at27_bionic_libart-893adf54d14a82da.exe)
+
+running 20 tests
+test at27_config_unaligned_jit_base_invalid ... ok
+test at27_default_config_interpret_only ... ok
+test at27_config_tiny_cache_invalid ... ok
+test at27_config_aether_defaults_valid ... ok
+test at27_gate_fails_without_dalvikvm ... ok
+test at27_gate_fails_without_hello ... ok
+test at27_gate_from_log_missing_hello ... ok
+test at27_gate_from_log_full ... ok
+test at27_gate_passes_after_full_sequence ... ok
+test at27_hello_dex_class_name ... ok
+test at27_hello_dex_classpath ... ok
+test at27_hello_dex_expected_output ... ok
+test at27_init_pipeline_succeeds ... ok
+test at27_mark_dalvikvm_started ... ok
+test at27_mark_hello_observed_triggers_gate ... ok
+test at27_mark_libart_loaded ... ok
+test at27_process_dalvikvm_start_line ... ok
+test at27_process_hello_line ... ok
+test at27_process_libart_init_line ... ok
+test at27_uart_sigs_non_empty ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/at28_zygote_launch.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/5ae017baf60047f1/out/at28_zygote_launch-5ae017baf60047f1.exe)
+
+running 20 tests
+test at28_config_zero_timeout_invalid ... ok
+test at28_boot_completed_prop_name ... ok
+test at28_gate_fails_without_boot_completed ... ok
+test at28_boot_timeout_nonzero ... ok
+test at28_fork_count_increments_per_zygote_line ... ok
+test at28_gate_fails_without_logcat ... ok
+test at28_config_aether_defaults_valid ... ok
+test at28_gate_fails_without_zygote ... ok
+test at28_gate_fails_without_system_server ... ok
+test at28_gate_from_log_full ... ok
+test at28_gate_from_log_empty_fails ... ok
+test at28_gate_from_log_missing_logcat_fails ... ok
+test at28_gate_passes_after_full_sequence ... ok
+test at28_process_boot_completed_line ... ok
+test at28_init_pipeline_succeeds ... ok
+test at28_process_logcat_alive_line ... ok
+test at28_process_system_server_line ... ok
+test at28_process_zygote_started_line ... ok
+test at28_process_zygote_forked_line ... ok
+test at28_uart_sigs_non_empty ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/at29_app_compat_x86.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/9f30e7fd983902cc/out/at29_app_compat_x86-9f30e7fd983902cc.exe)
+
+running 20 tests
+test at29_config_min_pass_exceeds_total_invalid ... ok
+test at29_attestation_only_bug_is_not_unresolved ... ok
+test at29_config_aether_defaults_valid ... ok
+test at29_attestation_only_excluded_from_denominator ... ok
+test at29_gate_fails_with_unresolved_bug ... ok
+test at29_gate_passes_after_full_run ... ok
+test at29_config_zero_total_invalid ... ok
+test at29_gate_passes_after_resolving_bugs ... ok
+test at29_init_pipeline_succeeds ... ok
+test at29_init_starts_with_no_unresolved_bugs ... ok
+test at29_min_pass_is_950 ... ok
+test at29_process_app_pass_advances_phase ... ok
+test at29_pass_rate_zero_with_no_tests ... ok
+test at29_process_harness_ready_line ... ok
+test at29_stats_pass_rate_950_of_1000 ... ok
+test at29_stats_pass_rate_949_fails ... ok
+test at29_total_apps_is_1000 ... ok
+test at29_translation_failed_bug_is_not_attestation_only ... ok
+test at29_total_tested_counts_pass_plus_fail ... ok
+test at29_uart_sigs_non_empty ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/at2_ir_roundtrip.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/89e69296e6956074/out/at2_ir_roundtrip-89e69296e6956074.exe)
+
+running 5 tests
+test at2_every_variant_roundtrips ... ok
+test at2_every_implemented_variant_roundtrips ... ok
+test at2_tag_smoke ... ok
+test at2_implemented_tags_unique ... ok
+test variant_tag_is_injective ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/at30_perf_bench.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/936939ed98b697a1/out/at30_perf_bench-936939ed98b697a1.exe)
+
+running 25 tests
+test at30_bench_score_fails_threshold ... ok
+test at30_bench_score_meets_threshold ... ok
+test at30_bench_score_zero_native_returns_zero ... ok
+test at30_bench_score_ratio_exact ... ok
+test at30_config_aether_defaults_valid ... ok
+test at30_config_threshold_above_one_invalid ... ok
+test at30_config_zero_baseline_invalid ... ok
+test at30_config_zero_int_threshold_invalid ... ok
+test at30_gate_fails_without_suites_done ... ok
+test at30_gate_fails_if_int_below_threshold ... ok
+test at30_gate_passes_after_all_three_suites ... ok
+test at30_int_threshold_is_70_pct ... ok
+test at30_init_pipeline_succeeds ... ok
+test at30_js_threshold_is_60_pct ... ok
+test at30_overall_geomean_all_at_threshold ... ok
+test at30_overall_geomean_zero_when_no_scores ... ok
+test at30_process_bench_start_line ... ok
+test at30_process_full_uart_sequence ... ok
+test at30_record_int_score_above_threshold ... ok
+test at30_record_int_score_below_threshold_fails_gate ... ok
+test at30_record_js_score_above_threshold ... ok
+test at30_simd_threshold_is_80_pct ... ok
+test at30_record_simd_score_above_threshold ... ok
+test at30_subtests_completed_counter ... ok
+test at30_uart_sigs_non_empty ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/at3_neon_corpus.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/872c4bd566e459ec/out/at3_neon_corpus-872c4bd566e459ec.exe)
+
+running 2 tests
+test at3_libcrypto_has_zero_unknowns ... ignored, AT-3 gate: needs corpus/libcrypto.so.aarch64 from a GSI extract; run with --features linux_corpus on a Linux host
+test at3_neon_compile_o_has_zero_unknowns ... ignored, AT-3 gate: needs aarch64-linux-gnu-gcc-compiled neon_compile.o; run with --features linux_corpus on a Linux host or via the corpus-gates CI lane
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at4_system_corpus.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/ef7fed519085793f/out/at4_system_corpus-ef7fed519085793f.exe)
+
+running 2 tests
+test at4_bionic_libc_zero_unknowns ... ignored, AT-4 gate: needs corpus/libc.so.aarch64 from a GSI extract; run with --features linux_corpus on a Linux host
+test at4_vmlinux_zero_unknowns ... ignored, AT-4 gate: needs corpus/vmlinux-gki.aarch64 (decompressed GKI vmlinux); run with --features linux_corpus on a Linux host
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at5_aether_efi_corpus.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/38a20aaa31c2c187/out/at5_aether_efi_corpus-38a20aaa31c2c187.exe)
+
+running 1 test
+test at5_audit_aether_arm64_efi ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/at5_system_img.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/be8215167ed6995b/out/at5_system_img-be8215167ed6995b.exe)
+
+running 1 test
+test at5_all_21_libs_zero_unknowns ... ignored, AT-5 gate: needs 21 AOT libs from a GSI extract; run scripts/fetch_gsi.sh then `cargo test --features linux_corpus`
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at6_ssa.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/2c94d8a97aa82b05/out/at6_ssa-2c94d8a97aa82b05.exe)
+
+running 7 tests
+test at6_multiblock_def_reaches_successor ... ok
+test at6_load_store_sequence ... ok
+test at6_nop_sequence ... ok
+test at6_single_block_no_reg_access_after_ssa ... ok
+test at6_verifier_full_check ... ok
+test at6_verifier_accepts_empty_function ... ok
+test at6_corpus_no_reg_access ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/at7_optimizer.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/f8a2f9cba2b3df31/out/at7_optimizer-f8a2f9cba2b3df31.exe)
+
+running 9 tests
+test at7_const_fold_add ... ok
+test at7_const_fold_chain ... ok
+test at7_dce_removes_unused_const ... ok
+test at7_copy_prop_zext_same_width ... ok
+test at7_dce_keeps_side_effects ... ok
+test at7_pipeline_reduces_op_count ... ok
+test at7_semantic_equiv_const_fold ... ok
+test at7_semantic_equiv_dce_preserves_output ... ok
+test at7_corpus_pipeline_non_increasing ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/at8_flag_elision.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/ab68a855f448a860/out/at8_flag_elision-ab68a855f448a860.exe)
+
+running 4 tests
+test at8_elision_on_straight_line_code ... ok
+test at8_flags_kept_when_consumed ... ok
+test at8_elision_flags_from_cmp_no_branch ... ok
+test at8_corpus_60pct_gate ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/at9_regalloc.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/c919a8b8d2fa5087/out/at9_regalloc-c919a8b8d2fa5087.exe)
+
+running 5 tests
+test at9_basic_allocation ... ok
+test at9_empty_function_ok ... ok
+test at9_every_value_assigned ... ok
+test at9_nop_sequence ... ok
+test at9_corpus_spill_gate ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/at_exec_proof.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/86db7aec1071b225/out/at_exec_proof-86db7aec1071b225.exe)
+
+running 213 tests
+test adcs_sbcs_spilled_chain ... ok
+test addp_executes ... ok
+test alloc_large_system_hash_log2qty_executes ... ok
+test addp_narrow_sizes ... ok
+test addp_8b_dform_uses_vm_not_vn_high_half ... ok
+test b20_b29_b31_simd_fp_ops_execute ... ok
+test bionic_strlen_unaligned_offsets ... ok
+test bionic_strlen_compute_dev ... ok
+test casp_match_does_not_clobber_live_expected ... ok
+test casp_mismatch_does_not_clobber_live_expected ... ok
+test casp_slub_block_lowers_without_ud2 ... ok
+test caspw_match_does_not_clobber_live_expected ... ok
+test cbz_spilled_branch ... ok
+test casp_pair_match_stores_new_and_returns_old ... ok
+test cls_absolute_values ... ok
+test casp_pair_mismatch_leaves_memory_unchanged ... ok
+test cmgt_ge_lt_le_zero_4s_execute ... ok
+test cmgt_16b_zero_execute ... ok
+test clz_spilled ... ok
+test cls_spilled ... ok
+test cmhi_cmhs_2d_4s_unsigned_execute ... ok
+test cmhs_unsigned_execute ... ok
+test cmlt_2d_zero_execute ... ok
+test cmtst_executes ... ok
+test cmp_sp_imm_compares_sp_not_xzr ... ok
+test crc32_iso_b_executes_via_helper ... ok
+test crc32c_w_executes_native ... ok
+test crc32cx_executes_native ... ok
+test csel_spilled_executes_both_directions ... ok
+test dup_4h_element_execute ... ok
+test dup_8b_element_execute ... ok
+test extr_lsb0 ... ok
+test extr_wform_dirty_upper ... ok
+test fabd_4s_executes ... ok
+test fabs_fneg_fsqrt_4s_execute ... ok
+test fadd_2d_executes ... ok
+test fadd_4s_executes ... ok
+test fadd_2s_dform_zeroes_upper ... ok
+test fcmeq_fcmgt_fcmge_reg_execute ... ok
+test fcmp_vs_zero_execute ... ok
+test fcvt_narrow_zeroes_upper_bits_execute ... ok
+test fcvtz_scalar_saturate_execute ... ok
+test fcvtzs_4s_executes ... ok
+test fdiv_4s_executes ... ok
+test fma_scalar_fused_execute ... ok
+test fmax_fmin_4s_execute ... ok
+test fmax_fmin_vector_propagate_nan ... ok
+test fmaxnm_fminnm_nan_fixup_execute ... ok
+test fmaxnm_fminnm_scalar_ignore_nan ... ok
+test fmla_4s_executes ... ok
+test fmla_by_element_4s_executes ... ok
+test fmls_4s_executes ... ok
+test fmul_4s_executes ... ok
+test fmul_by_element_4s_executes ... ok
+test fnmul_scalar_double_execute ... ok
+test fnmul_scalar_single_execute ... ok
+test fp_byelem_fmla_fused ... ok
+test fp_fcvtas_ties_away ... ok
+test fp_frecpe_is_fail_loud_not_int_convert ... ok
+test fp_scalar_fmax_fmin_nan_and_signed_zero ... ok
+test fp_scalar_fmaxnm_fminnm_nan_and_signed_zero ... ok
+test fp_scalar_frinta_ties_away ... ok
+test fp_vector_fcvtzs_saturation ... ok
+test fp_vector_frinta_no_double_round ... ok
+test fp_vector_scvtf_4s_executes ... ok
+test frint_vector_round_to_integral ... ok
+test frintm_frintp_scalar_execute ... ok
+test fsub_4s_executes ... ok
+test halving_sub_no_overflow ... ok
+test ins_element_execute ... ok
+test halving_add_no_overflow ... ok
+test integer_mul_by_element_still_lowers ... ok
+test integer_mla_by_element_is_fail_loud ... ok
+test ldpsw_signed_pair_dest_order ... ok
+test ldr_str_d_uses_fp_reg_not_gpr ... ok
+test ldrsb_wt_zext ... ok
+test llsc_ldxp_loads_both_halves ... ok
+test llsc_stxp_stores_both_halves ... ok
+test lsrv_wform_masks_operand_to_32bit ... ok
+test m4a_csinc_single_transform_and_flags ... ok
+test m3_cbz_cbnz_next_pc ... ok
+test m3_multiblock_store_load_dispatch ... ok
+test m4a_nzcv_beq_branch ... ok
+test m4a_csinv_csneg_single_transform_and_flags ... ok
+test m4a_nzcv_subs_polarity ... ok
+test m4a_silicon_proof_program ... ok
+test m4a_spill_sixteen_live_values ... ok
+test m4a_sysreg_roundtrip ... ok
+test m4b2_synthetic_enable_mmu_then_load ... ok
+test m4b4_hvc_psci_version_and_system_off ... ok
+test m4b5_mmio_load_returns_handler_value ... ok
+test m4b4_cntvct_advances_through_sysreg_call ... ok
+test m4b2_unmapped_va_after_enable_mmu_faults ... ok
+test m4b4_cval_write_read_roundtrips_through_sysreg_calls ... ok
+test m4b5_mmio_store_forwards_to_handler ... ok
+test m4b5_msr_pstate_imm_daif_spsel_are_functional ... ok
+test m4b_barriers_execute_no_ud2 ... ok
+test m4b_ccmp_branched ... ok
+test m4b_adcs_carry_chain ... ok
+test m4b_ccmn_add_polarity ... ok
+test m4b_eret_restores_pc_and_nzcv ... ok
+test m4b_dbt_invalidate_all_resets_cache ... ok
+test m4b_live_regs_survive_mmu_call ... ok
+test m4b_flat_access_when_mmu_off ... ok
+test m4b_long_straightline_block_has_fallthrough_pc ... ok
+test m4b_msr_sctlr_does_not_flush_tlb ... ok
+test m4b_msr_ttbr0_flushes_tlb ... ok
+test m4b_sbcs_borrow_chain ... ok
+test m4b_str_ldr_roundtrip_through_mmu ... ok
+test m4b_stp_ldp_pair_roundtrip_through_mmu ... ok
+test m4b_ttbr0_msr_emits_flush_call_sctlr_does_not ... ok
+test m4b_tlbi_emits_expected_calls ... ok
+test m4b_tlbi_broad_flushes_tlb ... ok
+test m4b_tlbi_va_flushes_one_page ... ok
+test m4b_unmapped_load_faults_and_early_rets ... ok
+test m4b_wform_flags_use_32bit_eflags ... ok
+test madd_msub_spilled ... ok
+test madd_spilled ... ok
+test madd_wform_spilled ... ok
+test mid_block_memop_pc_stamp ... ok
+test movz_liveout_only_commits_to_ctx ... ok
+test movz_then_add_executes_and_updates_regfile ... ok
+test mul_spilled ... ok
+test mulhigh_spilled_b_live_across_mul ... ok
+test neg_abs_4s_execute ... ok
+test movz_then_branch_commits_to_ctx ... ok
+test phase_c_dump_movk_emitted_x86 ... ignored, debug dump tool — panics by design to print the emitted x86
+test not_spilled ... ok
+test phase_c_jump_table_dispatch_shifted_add ... ok
+test phase_c_movk_preserves_low_bits ... ok
+test phase_c_movz_x10_alone ... ok
+test phase_e_clz_w_low_bit_set ... ok
+test phase_e_clz_w_msb_set ... ok
+test phase_e_clz_w_zero ... ok
+test phase_e_clz_x_low_bit_set ... ok
+test phase_e_clz_x_zero ... ok
+test phase_e_ldxp_loads_pair ... ok
+test phase_e_rbit_w_low_bit_to_bit31 ... ok
+test phase_e_rbit_x_involution ... ok
+test phase_e_rbit_x_low_bit_to_msb ... ok
+test phase_e_smulh_negative_no_overflow_is_zero ... ok
+test phase_e_stxp_stores_pair ... ok
+test phase_e_umulh_no_overflow_is_zero ... ok
+test phase_e_umulh_overflow_high_bit ... ok
+test phase_g_asr_w_sign_extend ... ok
+test phase_g_bhs_after_tbnz_consumes_arm_nzcv ... ok
+test phase_g_lsl_w_mod_32 ... ok
+test phase_g_ror_w_wraps_32 ... ok
+test popcount_idiom_cnt_uaddlv_executes ... ok
+test public_api_translate_resolve_execute ... ok
+test readgpr_wform_zext ... ok
+test regoffset_uxtw ... ok
+test rev16_swaps ... ok
+test rev32_xform ... ok
+test rshrn_modular_narrow_no_saturation ... ok
+test saddlp_4h_dform_signed_execute ... ok
+test saddlp_2d_signed_execute ... ok
+test saddlp_4s_signed_execute ... ok
+test saddlp_8h_signed_execute ... ok
+test saturating_narrow_shift ... ok
+test scalar_addp_2d_executes ... ok
+test scalar_dup_same_reg_high_lane ... ok
+test scvtf_ucvtf_wform_sign_execute ... ok
+test scvtf_4s_executes ... ok
+test sdiv_div_by_zero ... ok
+test sdiv_min_neg1_does_not_trap ... ok
+test sdiv_wform_negative ... ok
+test shrn_2s_and_shrn2_execute ... ok
+test sha256h_executes_via_crypto_helper ... ok
+test smaxp_4h_dform_execute ... ok
+test sli_shift_left_insert ... ok
+test sminp_4s_execute ... ok
+test smulh_spilled ... ok
+test spilled_atomic_address_does_rmw_on_real_pointer ... ok
+test spilled_fp_load_address_materializes_not_ud2 ... ok
+test spilled_fp_store_address_materializes_not_ud2 ... ok
+test spilled_pointer_load_base_uses_real_pointer_not_rax ... ok
+test sqadd_uqadd_16b_execute ... ok
+test sqrshrn2_signed_saturate_no_lane_overflow ... ok
+test sri_shift_right_insert ... ok
+test sqrshrn_rounding_narrow ... ok
+test sqrshrun_signed_to_unsigned_rounding_narrow ... ok
+test sshl_ushl_register_variable_shift ... ok
+test sshr_16b_arithmetic_execute ... ok
+test sshr_16b_by_8_is_pure_sign_fill ... ok
+test ssra_16b_accumulate_execute ... ok
+test sshr_2d_arithmetic_execute ... ok
+test ssra_16b_by_8_accumulates_sign_fill ... ok
+test ssra_2d_accumulate_execute ... ok
+test strchr_loop_neon_ops_execute ... ok
+test strchr_neon_ops_execute ... ok
+test tbl_single_reg_execute ... ok
+test tbl_tbx_multi_reg_execute ... ok
+test tbz_spilled_no_mutate ... ok
+test trn_narrow_sizes ... ok
+test uabd_16b_executes ... ok
+test uabd_uaba_4s_execute ... ok
+test uaddlp_widening_executes ... ok
+test umaxp_8h_execute ... ok
+test umaxp_8b_dform_uses_vm_not_vn_high_half ... ok
+test uminp_2s_dform_execute ... ok
+test umulh_spilled ... ok
+test ushr_16b_by_8_is_zero ... ok
+test usra_executes ... ok
+test uzp1_addv_execute ... ok
+test uzp_narrow_sizes ... ok
+test vector_fmla_fmls_fused_execute ... ok
+test wform_shifted_reg ... ok
+test write_gpr_w_form_does_not_truncate_live_source ... ok
+test write_sp_w_form_does_not_truncate_live_source ... ok
+test xtn_narrow_execute ... ok
+test zip1_16b_executes ... ok
+test zip1_zip2_4s_execute ... ok
+
+test result: ok. 212 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/at_step_a_pipeline.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/e7f317d00a24256e/out/at_step_a_pipeline-e7f317d00a24256e.exe)
+
+running 8 tests
+test step_a_dispatch_hits_cache_after_translate ... ok
+test step_a_counter_increments_per_block ... ok
+test step_a_rejects_empty_guest_mem ... ok
+test step_a_dispatch_cold_path_translates ... ok
+test step_a_rejects_truncated_guest_mem ... ok
+test step_a_stops_at_branch_terminator ... ok
+test step_a_translates_a_single_ret ... ok
+test step_a_translates_arithmetic_then_ret ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/block_words.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/eb87f9fb5765b675/out/block_words-eb87f9fb5765b675.exe)
+
+running 1 test
+test scan_block ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/leak_probe.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/523c7423ef97b3ab/out/leak_probe-523c7423ef97b3ab.exe)
+
+running 8 tests
+test bisect_decode_lift_reused ... ok
+test bisect_decode_only ... ok
+test codebuf_alloc_block_is_bounded ... ok
+test bisect_codebuf_alloc_block ... ok
+test words_decode_ok ... ok
+test bisect_through_regalloc ... ok
+test translate_block_leak_per_cold ... ok
+test bisect_through_encode ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running tests/phase_e_cgroup_unsafe.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/742f5381b060371d/out/phase_e_cgroup_unsafe-742f5381b060371d.exe)
+
+running 1 test
+test cgroup_disable_block_no_ud2 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/phase_e_second_unsafe.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/35f78bd42d7c79ba/out/phase_e_second_unsafe-35f78bd42d7c79ba.exe)
+
+running 2 tests
+test second_unsafe_block_no_ud2 ... ok
+test second_unsafe_block_no_ud2_public_api ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/scan_libcrypto.rs (target-win/x86_64-pc-windows-gnu/debug/build/aether-translator/a1a5c8118fb0841c/out/scan_libcrypto-a1a5c8118fb0841c.exe)
+
+running 1 test
+test scan ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests aether_translator
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+# exit: 0 wall_s=33

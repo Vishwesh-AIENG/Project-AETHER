@@ -1,0 +1,26 @@
+=== AETHER dbt-oracle — 21 block(s) ===
+    reference engine: hand-written ARM64 interpreter (independent of DBT)
+
+[SKIP  ] bb_libartbase_33ed4_c0       reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libartbase_33ed4_c1       reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libartbase_33ed4_c2       reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libartbase_3c8ac_c0       reference: unsupported insn 0x4f000546
+[SKIP  ] bb_libartbase_3c8ac_c1       reference: unsupported insn 0x4f000546
+[SKIP  ] bb_libartbase_3c8ac_c2       reference: unsupported insn 0x4f000546
+[SKIP  ] bb_libartbase_3c90c_c0       reference: unsupported insn 0x4f011602
+[SKIP  ] bb_libartbase_3c90c_c1       reference: unsupported insn 0x4f011602
+[SKIP  ] bb_libartbase_3c90c_c2       reference: unsupported insn 0x4f011602
+[SKIP  ] bb_libartbase_3c92c_c0       reference: unsupported insn 0x4f011611
+[SKIP  ] bb_libartbase_3c92c_c1       reference: unsupported insn 0x4f011611
+[SKIP  ] bb_libartbase_3c92c_c2       reference: unsupported insn 0x4f011611
+[SKIP  ] bb_libartbase_3e848_c0       reference: unsupported insn 0x1e26000a
+[SKIP  ] bb_libartbase_3e848_c1       reference: unsupported insn 0x1e26000a
+[SKIP  ] bb_libartbase_3e848_c2       reference: unsupported insn 0x1e26000a
+[SKIP  ] bb_libartbase_3e8a4_c0       reference: unsupported insn 0x1e26000d
+[SKIP  ] bb_libartbase_3e8a4_c1       reference: unsupported insn 0x1e26000d
+[SKIP  ] bb_libartbase_3e8a4_c2       reference: unsupported insn 0x1e26000d
+[SKIP  ] bb_libartbase_4a020_c0       reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libartbase_4a020_c1       reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libartbase_4a020_c2       reference: unsupported insn 0x6f00e400
+
+summary: 0 PASS, 0 FAIL, 21 SKIP, 0 DBTERR

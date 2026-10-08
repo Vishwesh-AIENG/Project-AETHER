@@ -1,0 +1,57 @@
+# cmd: qemu-aarch64 (8.2.2 TCG user-mode) tcgbench 500000  [v2: init once/outer iter, 16 non-unrolled inner iters]
+# host: Model name: Intel(R) Xeon(R) Processor @ 2.10GHz, date=2026-10-08T09:53:20Z
+baseline_init_only run=0 ns_per_16=40.63
+family=int_arith (add/sub/madd/eor x8) run=0 ns_per_16=57.13
+family=shift_bitfield (lsl/lsr/asr/ubfx/bfi) run=0 ns_per_16=54.06
+family=flags_csel (cmp/csel/csinc/ccmp) run=0 ns_per_16=94.83
+family=scalar_fp (fadd/fmul/fdiv/fmadd d) run=0 ns_per_16=637.34
+family=fp_convert (scvtf/fcvtzs/fcvt s<-d) run=0 ns_per_16=763.66
+family=simd_int (add.4s/cmhi.2d/zip1/tbl) run=0 ns_per_16=727.63
+family=simd_fp (fmla.4s/fadd.4s/fmul.4s) run=0 ns_per_16=1811.35
+family=load_store (ldr/str x, flat MMU) run=0 ns_per_16=93.51
+family=atomics (ldadd/swp/cas x) run=0 ns_per_16=137.30
+family=system (mrs nzcv/msr nzcv/mrs tpidr_el0) run=0 ns_per_16=163.10
+baseline_init_only run=1 ns_per_16=43.80
+family=int_arith (add/sub/madd/eor x8) run=1 ns_per_16=56.98
+family=shift_bitfield (lsl/lsr/asr/ubfx/bfi) run=1 ns_per_16=50.95
+family=flags_csel (cmp/csel/csinc/ccmp) run=1 ns_per_16=91.23
+family=scalar_fp (fadd/fmul/fdiv/fmadd d) run=1 ns_per_16=622.41
+family=fp_convert (scvtf/fcvtzs/fcvt s<-d) run=1 ns_per_16=818.18
+family=simd_int (add.4s/cmhi.2d/zip1/tbl) run=1 ns_per_16=750.68
+family=simd_fp (fmla.4s/fadd.4s/fmul.4s) run=1 ns_per_16=1765.42
+family=load_store (ldr/str x, flat MMU) run=1 ns_per_16=71.97
+family=atomics (ldadd/swp/cas x) run=1 ns_per_16=157.65
+family=system (mrs nzcv/msr nzcv/mrs tpidr_el0) run=1 ns_per_16=158.48
+baseline_init_only run=2 ns_per_16=53.93
+family=int_arith (add/sub/madd/eor x8) run=2 ns_per_16=54.58
+family=shift_bitfield (lsl/lsr/asr/ubfx/bfi) run=2 ns_per_16=47.28
+family=flags_csel (cmp/csel/csinc/ccmp) run=2 ns_per_16=84.86
+family=scalar_fp (fadd/fmul/fdiv/fmadd d) run=2 ns_per_16=646.48
+family=fp_convert (scvtf/fcvtzs/fcvt s<-d) run=2 ns_per_16=733.37
+family=simd_int (add.4s/cmhi.2d/zip1/tbl) run=2 ns_per_16=727.07
+family=simd_fp (fmla.4s/fadd.4s/fmul.4s) run=2 ns_per_16=1714.88
+family=load_store (ldr/str x, flat MMU) run=2 ns_per_16=53.46
+family=atomics (ldadd/swp/cas x) run=2 ns_per_16=100.70
+family=system (mrs nzcv/msr nzcv/mrs tpidr_el0) run=2 ns_per_16=112.26
+baseline_init_only run=3 ns_per_16=30.82
+family=int_arith (add/sub/madd/eor x8) run=3 ns_per_16=40.31
+family=shift_bitfield (lsl/lsr/asr/ubfx/bfi) run=3 ns_per_16=38.08
+family=flags_csel (cmp/csel/csinc/ccmp) run=3 ns_per_16=64.27
+family=scalar_fp (fadd/fmul/fdiv/fmadd d) run=3 ns_per_16=445.46
+family=fp_convert (scvtf/fcvtzs/fcvt s<-d) run=3 ns_per_16=544.32
+family=simd_int (add.4s/cmhi.2d/zip1/tbl) run=3 ns_per_16=564.35
+family=simd_fp (fmla.4s/fadd.4s/fmul.4s) run=3 ns_per_16=1553.36
+family=load_store (ldr/str x, flat MMU) run=3 ns_per_16=70.58
+family=atomics (ldadd/swp/cas x) run=3 ns_per_16=129.22
+family=system (mrs nzcv/msr nzcv/mrs tpidr_el0) run=3 ns_per_16=148.10
+baseline_init_only run=4 ns_per_16=39.10
+family=int_arith (add/sub/madd/eor x8) run=4 ns_per_16=52.07
+family=shift_bitfield (lsl/lsr/asr/ubfx/bfi) run=4 ns_per_16=46.45
+family=flags_csel (cmp/csel/csinc/ccmp) run=4 ns_per_16=82.07
+family=scalar_fp (fadd/fmul/fdiv/fmadd d) run=4 ns_per_16=596.12
+family=fp_convert (scvtf/fcvtzs/fcvt s<-d) run=4 ns_per_16=772.62
+family=simd_int (add.4s/cmhi.2d/zip1/tbl) run=4 ns_per_16=754.01
+family=simd_fp (fmla.4s/fadd.4s/fmul.4s) run=4 ns_per_16=1725.72
+family=load_store (ldr/str x, flat MMU) run=4 ns_per_16=89.49
+family=atomics (ldadd/swp/cas x) run=4 ns_per_16=138.89
+family=system (mrs nzcv/msr nzcv/mrs tpidr_el0) run=4 ns_per_16=141.18

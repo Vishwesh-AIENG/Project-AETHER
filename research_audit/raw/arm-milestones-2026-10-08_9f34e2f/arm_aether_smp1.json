@@ -1,0 +1,72 @@
+[
+ {
+  "aether_start": 5.799,
+  "el2_detected": 5.799,
+  "stage2_ok": 5.85,
+  "hyp_ready": 5.85,
+  "eret_to_el1": 5.85,
+  "kernel_entry": 5.9,
+  "smp_up": 6.505,
+  "free_initmem": 9.985,
+  "userspace": 10.086,
+  "online_cpus": 10.137,
+  "proof_done": 11.196,
+  "_cmd": "qemu-system-aarch64 -machine virt,gic-version=3,virtualization=on -cpu max -m 4G -smp 1 -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd -drive if=none,id=hd0,format=raw,file=fat:rw:raw/arm-milestones-2026-10-08_9f34e2f/_efi -device virtio-blk-pci,drive=hd0,bootindex=0 -device loader,file=/home/user/aether-files/_kernel_new,addr=0x40800000,force-raw=on -device loader,file=/home/user/aether-files/qemu/initrd-proof.cpio,addr=0x44100000,force-raw=on -serial file:raw/arm-milestones-2026-10-08_9f34e2f/arm_aether_smp1_run0.serial.log -display none -monitor none -no-reboot"
+ },
+ {
+  "aether_start": 5.696,
+  "el2_detected": 5.696,
+  "stage2_ok": 5.746,
+  "hyp_ready": 5.746,
+  "eret_to_el1": 5.746,
+  "kernel_entry": 5.746,
+  "smp_up": 6.351,
+  "free_initmem": 9.728,
+  "userspace": 9.829,
+  "online_cpus": 9.829,
+  "proof_done": 10.888,
+  "_cmd": "qemu-system-aarch64 -machine virt,gic-version=3,virtualization=on -cpu max -m 4G -smp 1 -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd -drive if=none,id=hd0,format=raw,file=fat:rw:raw/arm-milestones-2026-10-08_9f34e2f/_efi -device virtio-blk-pci,drive=hd0,bootindex=0 -device loader,file=/home/user/aether-files/_kernel_new,addr=0x40800000,force-raw=on -device loader,file=/home/user/aether-files/qemu/initrd-proof.cpio,addr=0x44100000,force-raw=on -serial file:raw/arm-milestones-2026-10-08_9f34e2f/arm_aether_smp1_run1.serial.log -display none -monitor none -no-reboot"
+ },
+ {
+  "aether_start": 5.706,
+  "el2_detected": 5.706,
+  "stage2_ok": 5.706,
+  "hyp_ready": 5.756,
+  "eret_to_el1": 5.756,
+  "kernel_entry": 5.756,
+  "smp_up": 6.412,
+  "free_initmem": 9.904,
+  "userspace": 10.005,
+  "online_cpus": 10.005,
+  "proof_done": 11.114,
+  "_cmd": "qemu-system-aarch64 -machine virt,gic-version=3,virtualization=on -cpu max -m 4G -smp 1 -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd -drive if=none,id=hd0,format=raw,file=fat:rw:raw/arm-milestones-2026-10-08_9f34e2f/_efi -device virtio-blk-pci,drive=hd0,bootindex=0 -device loader,file=/home/user/aether-files/_kernel_new,addr=0x40800000,force-raw=on -device loader,file=/home/user/aether-files/qemu/initrd-proof.cpio,addr=0x44100000,force-raw=on -serial file:raw/arm-milestones-2026-10-08_9f34e2f/arm_aether_smp1_run2.serial.log -display none -monitor none -no-reboot"
+ },
+ {
+  "aether_start": 5.698,
+  "el2_detected": 5.698,
+  "stage2_ok": 5.698,
+  "hyp_ready": 5.698,
+  "eret_to_el1": 5.698,
+  "kernel_entry": 5.749,
+  "smp_up": 6.303,
+  "free_initmem": 9.63,
+  "userspace": 9.731,
+  "online_cpus": 9.731,
+  "proof_done": 10.84,
+  "_cmd": "qemu-system-aarch64 -machine virt,gic-version=3,virtualization=on -cpu max -m 4G -smp 1 -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd -drive if=none,id=hd0,format=raw,file=fat:rw:raw/arm-milestones-2026-10-08_9f34e2f/_efi -device virtio-blk-pci,drive=hd0,bootindex=0 -device loader,file=/home/user/aether-files/_kernel_new,addr=0x40800000,force-raw=on -device loader,file=/home/user/aether-files/qemu/initrd-proof.cpio,addr=0x44100000,force-raw=on -serial file:raw/arm-milestones-2026-10-08_9f34e2f/arm_aether_smp1_run3.serial.log -display none -monitor none -no-reboot"
+ },
+ {
+  "aether_start": 5.799,
+  "el2_detected": 5.799,
+  "stage2_ok": 5.799,
+  "hyp_ready": 5.799,
+  "eret_to_el1": 5.799,
+  "kernel_entry": 5.849,
+  "smp_up": 6.557,
+  "free_initmem": 9.785,
+  "userspace": 9.835,
+  "online_cpus": 9.835,
+  "proof_done": 10.945,
+  "_cmd": "qemu-system-aarch64 -machine virt,gic-version=3,virtualization=on -cpu max -m 4G -smp 1 -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd -drive if=none,id=hd0,format=raw,file=fat:rw:raw/arm-milestones-2026-10-08_9f34e2f/_efi -device virtio-blk-pci,drive=hd0,bootindex=0 -device loader,file=/home/user/aether-files/_kernel_new,addr=0x40800000,force-raw=on -device loader,file=/home/user/aether-files/qemu/initrd-proof.cpio,addr=0x44100000,force-raw=on -serial file:raw/arm-milestones-2026-10-08_9f34e2f/arm_aether_smp1_run4.serial.log -display none -monitor none -no-reboot"
+ }
+]

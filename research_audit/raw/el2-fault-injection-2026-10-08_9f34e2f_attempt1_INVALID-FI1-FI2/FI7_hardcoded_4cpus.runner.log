@@ -1,0 +1,43 @@
+==> qemu-system-aarch64 -machine virt,gic-version=3,virtualization=on -cpu max -m 4G -smp 1 -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd -drive if=none,id=hd0,format=raw,file=fat:rw:/tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/qemu/efi -device virtio-blk-pci,drive=hd0,bootindex=0 -device loader,file=_kernel_new,addr=0x40800000,force-raw=on -serial file:/tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/qemu/arm-serial.log -display none -monitor none -no-reboot -device loader,file=qemu/initrd-proof.cpio,addr=0x44100000,force-raw=on
+==> serial quiet 45s; stopping
+==> serial log 1125 bytes; tail:
+======================================
+
+  AETHER Hypervisor starting...      
+
+======================================
+
+  CurrentEL: EL2
+
+  EL2 detected
+
+  ExitBootServices...
+
+  ExitBootServices: OK
+
+  EL2 page tables: AETHER-owned at 0x000000013c75b000 (firmware SCTLR_EL2=0x000000000000100d)
+
+  Conventional RAM: 4090 MiB
+
+  Largest region PA: 0x00000000c0000000  size: 1991 MiB
+
+  Stage 2 tables: OK
+
+  S2 root PA: 0x00000000c0000000
+
+  Exception vectors: OK
+
+  HCR_EL2   = 0x00000008807d663f
+
+  VTTBR_EL2 = 0x00010000c0000000
+
+  VTCR_EL2  = 0x0000000080053558
+
+  GIC via ACPI MADT — GICD=0x0000000008000000 GICR=0x00000000080a0000
+
+  CPUs: 8 (MADT enabled GICC entries)
+
+
+
+[EL2] FAULT AT EL2  ESR=0x0000000096000010 EC=0x0000000000000025 ELR=0x000000013c71e648 SPSR=0x00000000800003c9 FAR=0x00000000080c0014
+

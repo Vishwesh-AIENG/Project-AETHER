@@ -1,0 +1,252 @@
+=== AETHER dbt-oracle — 240 block(s) ===
+    reference engine: hand-written ARM64 interpreter (independent of DBT)
+
+[SKIP  ] bb_libui_40044_c0            reference: unsupported insn 0x1e3e1001
+[SKIP  ] bb_libui_40044_c1            reference: unsupported insn 0x1e3e1001
+[SKIP  ] bb_libui_40044_c2            reference: unsupported insn 0x1e3e1001
+[PASS  ] bb_libui_4006c_c0            (230 bytes x86)
+[PASS  ] bb_libui_4006c_c1            (230 bytes x86)
+[PASS  ] bb_libui_4006c_c2            (230 bytes x86)
+[PASS  ] bb_libui_400ec_c0            (157 bytes x86)
+[PASS  ] bb_libui_400ec_c1            (157 bytes x86)
+[PASS  ] bb_libui_400ec_c2            (157 bytes x86)
+[SKIP  ] bb_libui_40100_c0            reference: unsupported insn 0x1e3e1003
+[SKIP  ] bb_libui_40100_c1            reference: unsupported insn 0x1e3e1003
+[SKIP  ] bb_libui_40100_c2            reference: unsupported insn 0x1e3e1003
+[PASS  ] bb_libui_40120_c0            (247 bytes x86)
+[PASS  ] bb_libui_40120_c1            (247 bytes x86)
+[PASS  ] bb_libui_40120_c2            (247 bytes x86)
+[PASS  ] bb_libui_40130_c0            (111 bytes x86)
+[PASS  ] bb_libui_40130_c1            (111 bytes x86)
+[PASS  ] bb_libui_40130_c2            (111 bytes x86)
+[PASS  ] bb_libui_407fc_c0            (433 bytes x86)
+[PASS  ] bb_libui_407fc_c1            (433 bytes x86)
+[PASS  ] bb_libui_407fc_c2            (433 bytes x86)
+[PASS  ] bb_libui_4081c_c0            (433 bytes x86)
+[PASS  ] bb_libui_4081c_c1            (433 bytes x86)
+[PASS  ] bb_libui_4081c_c2            (433 bytes x86)
+[PASS  ] bb_libui_4083c_c0            (607 bytes x86)
+[PASS  ] bb_libui_4083c_c1            (607 bytes x86)
+[PASS  ] bb_libui_4083c_c2            (607 bytes x86)
+[PASS  ] bb_libui_4085c_c0            (849 bytes x86)
+[PASS  ] bb_libui_4085c_c1            (849 bytes x86)
+[PASS  ] bb_libui_4085c_c2            (849 bytes x86)
+[PASS  ] bb_libui_4087c_c0            (849 bytes x86)
+[PASS  ] bb_libui_4087c_c1            (849 bytes x86)
+[PASS  ] bb_libui_4087c_c2            (849 bytes x86)
+[SKIP  ] bb_libui_4089c_c0            reference: unsupported insn 0x1e300028
+[SKIP  ] bb_libui_4089c_c1            reference: unsupported insn 0x1e300028
+[SKIP  ] bb_libui_4089c_c2            reference: unsupported insn 0x1e300028
+[PASS  ] bb_libui_40968_c0            (111 bytes x86)
+[PASS  ] bb_libui_40968_c1            (111 bytes x86)
+[PASS  ] bb_libui_40968_c2            (111 bytes x86)
+[PASS  ] bb_libui_409b8_c0            (230 bytes x86)
+[PASS  ] bb_libui_409b8_c1            (230 bytes x86)
+[PASS  ] bb_libui_409b8_c2            (230 bytes x86)
+[PASS  ] bb_libui_44530_c0            (433 bytes x86)
+[PASS  ] bb_libui_44530_c1            (433 bytes x86)
+[PASS  ] bb_libui_44530_c2            (433 bytes x86)
+[PASS  ] bb_libui_44550_c0            (433 bytes x86)
+[PASS  ] bb_libui_44550_c1            (433 bytes x86)
+[PASS  ] bb_libui_44550_c2            (433 bytes x86)
+[PASS  ] bb_libui_44570_c0            (433 bytes x86)
+[PASS  ] bb_libui_44570_c1            (433 bytes x86)
+[PASS  ] bb_libui_44570_c2            (433 bytes x86)
+[PASS  ] bb_libui_44590_c0            (433 bytes x86)
+[PASS  ] bb_libui_44590_c1            (433 bytes x86)
+[PASS  ] bb_libui_44590_c2            (433 bytes x86)
+[PASS  ] bb_libui_44610_c0            (331 bytes x86)
+[PASS  ] bb_libui_44610_c1            (331 bytes x86)
+[PASS  ] bb_libui_44610_c2            (331 bytes x86)
+[PASS  ] bb_libui_44630_c0            (364 bytes x86)
+[PASS  ] bb_libui_44630_c1            (364 bytes x86)
+[PASS  ] bb_libui_44630_c2            (364 bytes x86)
+[PASS  ] bb_libui_44650_c0            (381 bytes x86)
+[PASS  ] bb_libui_44650_c1            (381 bytes x86)
+[PASS  ] bb_libui_44650_c2            (381 bytes x86)
+[SKIP  ] bb_libui_44670_c0            reference: unsupported insn 0x5fa19003
+[SKIP  ] bb_libui_44670_c1            reference: unsupported insn 0x5fa19003
+[SKIP  ] bb_libui_44670_c2            reference: unsupported insn 0x5fa19003
+[SKIP  ] bb_libui_44690_c0            reference: unsupported insn 0x7e30d842
+[SKIP  ] bb_libui_44690_c1            reference: unsupported insn 0x7e30d842
+[SKIP  ] bb_libui_44690_c2            reference: unsupported insn 0x7e30d842
+[SKIP  ] bb_libui_4536c_c0            reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libui_4536c_c1            reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libui_4536c_c2            reference: unsupported insn 0x1e260009
+[PASS  ] bb_libui_48174_c0            (168 bytes x86)
+[PASS  ] bb_libui_48174_c1            (168 bytes x86)
+[PASS  ] bb_libui_48174_c2            (168 bytes x86)
+[PASS  ] bb_libui_482b4_c0            (383 bytes x86)
+[PASS  ] bb_libui_482b4_c1            (383 bytes x86)
+[PASS  ] bb_libui_482b4_c2            (383 bytes x86)
+[PASS  ] bb_libui_482f4_c0            (354 bytes x86)
+[PASS  ] bb_libui_482f4_c1            (354 bytes x86)
+[PASS  ] bb_libui_482f4_c2            (354 bytes x86)
+[PASS  ] bb_libui_48314_c0            (407 bytes x86)
+[PASS  ] bb_libui_48314_c1            (407 bytes x86)
+[PASS  ] bb_libui_48314_c2            (407 bytes x86)
+[PASS  ] bb_libui_489ec_c0            (170 bytes x86)
+[PASS  ] bb_libui_489ec_c1            (170 bytes x86)
+[PASS  ] bb_libui_489ec_c2            (170 bytes x86)
+[SKIP  ] bb_libui_49e8c_c0            reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libui_49e8c_c1            reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libui_49e8c_c2            reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libui_4c180_c0            reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libui_4c180_c1            reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libui_4c180_c2            reference: unsupported insn 0x1e260008
+[PASS  ] bb_libui_4c420_c0            (85 bytes x86)
+[PASS  ] bb_libui_4c420_c1            (85 bytes x86)
+[PASS  ] bb_libui_4c420_c2            (85 bytes x86)
+[SKIP  ] bb_libui_4c900_c0            reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libui_4c900_c1            reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libui_4c900_c2            reference: unsupported insn 0x9e6702c0
+[PASS  ] bb_libui_4c9b4_c0            (266 bytes x86)
+[PASS  ] bb_libui_4c9b4_c1            (266 bytes x86)
+[PASS  ] bb_libui_4c9b4_c2            (266 bytes x86)
+[SKIP  ] bb_libui_4ca74_c0            reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libui_4ca74_c1            reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libui_4ca74_c2            reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libui_4cb70_c0            reference: unsupported insn 0x9e6702a0
+[SKIP  ] bb_libui_4cb70_c1            reference: unsupported insn 0x9e6702a0
+[SKIP  ] bb_libui_4cb70_c2            reference: unsupported insn 0x9e6702a0
+[SKIP  ] bb_libui_4d058_c0            reference: unsupported insn 0x0e205800
+[SKIP  ] bb_libui_4d058_c1            reference: unsupported insn 0x0e205800
+[SKIP  ] bb_libui_4d058_c2            reference: unsupported insn 0x0e205800
+[SKIP  ] bb_libui_4d078_c0            reference: unsupported insn 0x1e26000a
+[SKIP  ] bb_libui_4d078_c1            reference: unsupported insn 0x1e26000a
+[SKIP  ] bb_libui_4d078_c2            reference: unsupported insn 0x1e26000a
+[SKIP  ] bb_libui_5476c_c0            reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libui_5476c_c1            reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libui_5476c_c2            reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libui_65ecc_c0            reference: unsupported insn 0x9e43d900
+[SKIP  ] bb_libui_65ecc_c1            reference: unsupported insn 0x9e43d900
+[SKIP  ] bb_libui_65ecc_c2            reference: unsupported insn 0x9e43d900
+[SKIP  ] bb_libui_68bd0_c0            reference: unsupported insn 0x2f00e401
+[SKIP  ] bb_libui_68bd0_c1            reference: unsupported insn 0x2f00e401
+[SKIP  ] bb_libui_68bd0_c2            reference: unsupported insn 0x2f00e401
+[PASS  ] bb_libui_68fac_c0            (181 bytes x86)
+[PASS  ] bb_libui_68fac_c1            (181 bytes x86)
+[PASS  ] bb_libui_68fac_c2            (181 bytes x86)
+[PASS  ] bb_libui_69000_c0            (222 bytes x86)
+[PASS  ] bb_libui_69000_c1            (222 bytes x86)
+[PASS  ] bb_libui_69000_c2            (222 bytes x86)
+[SKIP  ] bb_libui_6904c_c0            reference: unsupported insn 0x00000000
+[SKIP  ] bb_libui_6904c_c1            reference: unsupported insn 0x00000000
+[SKIP  ] bb_libui_6904c_c2            reference: unsupported insn 0x00000000
+[PASS  ] bb_libui_69a08_c0            (376 bytes x86)
+[PASS  ] bb_libui_69a08_c1            (376 bytes x86)
+[PASS  ] bb_libui_69a08_c2            (376 bytes x86)
+[SKIP  ] bb_libui_69c34_c0            reference: unsupported insn 0x7ea1d444
+[SKIP  ] bb_libui_69c34_c1            reference: unsupported insn 0x7ea1d444
+[SKIP  ] bb_libui_69c34_c2            reference: unsupported insn 0x7ea1d444
+[PASS  ] bb_libui_69ce4_c0            (235 bytes x86)
+[PASS  ] bb_libui_69ce4_c1            (235 bytes x86)
+[PASS  ] bb_libui_69ce4_c2            (235 bytes x86)
+[PASS  ] bb_libui_69d2c_c0            (235 bytes x86)
+[PASS  ] bb_libui_69d2c_c1            (235 bytes x86)
+[PASS  ] bb_libui_69d2c_c2            (235 bytes x86)
+[PASS  ] bb_libui_69e80_c0            (213 bytes x86)
+[PASS  ] bb_libui_69e80_c1            (213 bytes x86)
+[PASS  ] bb_libui_69e80_c2            (213 bytes x86)
+[SKIP  ] bb_libui_69f60_c0            reference: unsupported insn 0x0f8790a1
+[SKIP  ] bb_libui_69f60_c1            reference: unsupported insn 0x0f8790a1
+[SKIP  ] bb_libui_69f60_c2            reference: unsupported insn 0x0f8790a1
+[SKIP  ] bb_libui_6a190_c0            reference: unsupported insn 0x2f00e402
+[SKIP  ] bb_libui_6a190_c1            reference: unsupported insn 0x2f00e402
+[SKIP  ] bb_libui_6a190_c2            reference: unsupported insn 0x2f00e402
+[PASS  ] bb_libui_6d7d8_c0            (332 bytes x86)
+[PASS  ] bb_libui_6d7d8_c1            (332 bytes x86)
+[PASS  ] bb_libui_6d7d8_c2            (332 bytes x86)
+[PASS  ] bb_libui_6e400_c0            (202 bytes x86)
+[PASS  ] bb_libui_6e400_c1            (202 bytes x86)
+[PASS  ] bb_libui_6e400_c2            (202 bytes x86)
+[SKIP  ] bb_libui_6e40c_c0            reference: unsupported insn 0x00000000
+[SKIP  ] bb_libui_6e40c_c1            reference: unsupported insn 0x00000000
+[SKIP  ] bb_libui_6e40c_c2            reference: unsupported insn 0x00000000
+[SKIP  ] bb_libui_6e840_c0            reference: unsupported insn 0x5e0c0401
+[SKIP  ] bb_libui_6e840_c1            reference: unsupported insn 0x5e0c0401
+[SKIP  ] bb_libui_6e840_c2            reference: unsupported insn 0x5e0c0401
+[SKIP  ] bb_libui_6e88c_c0            reference: unsupported insn 0x5e0c0401
+[SKIP  ] bb_libui_6e88c_c1            reference: unsupported insn 0x5e0c0401
+[SKIP  ] bb_libui_6e88c_c2            reference: unsupported insn 0x5e0c0401
+[SKIP  ] bb_libui_6e950_c0            reference: unsupported insn 0x5e21d863
+[SKIP  ] bb_libui_6e950_c1            reference: unsupported insn 0x5e21d863
+[SKIP  ] bb_libui_6e950_c2            reference: unsupported insn 0x5e21d863
+[SKIP  ] bb_libui_6e970_c0            reference: unsupported insn 0x0f8390a4
+[SKIP  ] bb_libui_6e970_c1            reference: unsupported insn 0x0f8390a4
+[SKIP  ] bb_libui_6e970_c2            reference: unsupported insn 0x0f8390a4
+[SKIP  ] bb_libui_6e990_c0            reference: unsupported insn 0x5e0c0405
+[SKIP  ] bb_libui_6e990_c1            reference: unsupported insn 0x5e0c0405
+[SKIP  ] bb_libui_6e990_c2            reference: unsupported insn 0x5e0c0405
+[PASS  ] bb_libui_6e9b0_c0            (213 bytes x86)
+[PASS  ] bb_libui_6e9b0_c1            (213 bytes x86)
+[PASS  ] bb_libui_6e9b0_c2            (213 bytes x86)
+[SKIP  ] bb_libui_6e9bc_c0            reference: unsupported insn 0x5e0c0465
+[SKIP  ] bb_libui_6e9bc_c1            reference: unsupported insn 0x5e0c0465
+[SKIP  ] bb_libui_6e9bc_c2            reference: unsupported insn 0x5e0c0465
+[FAIL  ] bb_libui_6e9dc_c0              v1  DBT=0x00000000000000003f8000003f800000  REF=0x00000000000000000000000000000000
+             v1  DBT=0x00000000000000003f8000003f800000  REF=0x00000000000000000000000000000000
+             v3  DBT=0x00000000000000003f8000003f800000  REF=0x00000000000000000000000000000000
+[PASS  ] bb_libui_6e9dc_c1            (541 bytes x86)
+[FAIL  ] bb_libui_6e9dc_c2              v1  DBT=0x0000000000000000000000003f800000  REF=0x00000000000000000000000000000000
+             v1  DBT=0x0000000000000000000000003f800000  REF=0x00000000000000000000000000000000
+             v3  DBT=0x00000000000000003f8000003f800000  REF=0x00000000000000000000000000000000
+[SKIP  ] bb_libui_6e9fc_c0            reference: unsupported insn 0x0ea1b820
+[SKIP  ] bb_libui_6e9fc_c1            reference: unsupported insn 0x0ea1b820
+[SKIP  ] bb_libui_6e9fc_c2            reference: unsupported insn 0x0ea1b820
+[SKIP  ] bb_libui_6ea24_c0            reference: unsupported insn 0x5e0c0461
+[SKIP  ] bb_libui_6ea24_c1            reference: unsupported insn 0x5e0c0461
+[SKIP  ] bb_libui_6ea24_c2            reference: unsupported insn 0x5e0c0461
+[SKIP  ] bb_libui_6ea44_c0            reference: unsupported insn 0x0f0167e2
+[SKIP  ] bb_libui_6ea44_c1            reference: unsupported insn 0x0f0167e2
+[SKIP  ] bb_libui_6ea44_c2            reference: unsupported insn 0x0f0167e2
+[FAIL  ] bb_libui_6ea64_c0              v1  DBT=0x00000000000000000000000000000000  REF=0x00000000000000003f8000003f800000
+             v1  DBT=0x00000000000000000000000000000000  REF=0x00000000000000003f8000003f800000
+[FAIL  ] bb_libui_6ea64_c1              v1  DBT=0x0000000000000000bf80000000000000  REF=0x0000000000000000800000003f800000
+             v1  DBT=0x0000000000000000bf80000000000000  REF=0x0000000000000000800000003f800000
+[FAIL  ] bb_libui_6ea64_c2              v1  DBT=0x00000000000000000000000000000000  REF=0x0000000000000000000000003f800000
+             v1  DBT=0x00000000000000000000000000000000  REF=0x0000000000000000000000003f800000
+[PASS  ] bb_libui_6eac0_c0            (441 bytes x86)
+[PASS  ] bb_libui_6eac0_c1            (441 bytes x86)
+[PASS  ] bb_libui_6eac0_c2            (441 bytes x86)
+[PASS  ] bb_libui_6eae0_c0            (405 bytes x86)
+[PASS  ] bb_libui_6eae0_c1            (405 bytes x86)
+[PASS  ] bb_libui_6eae0_c2            (405 bytes x86)
+[PASS  ] bb_libui_6eb00_c0            (391 bytes x86)
+[PASS  ] bb_libui_6eb00_c1            (391 bytes x86)
+[PASS  ] bb_libui_6eb00_c2            (391 bytes x86)
+[SKIP  ] bb_libui_6eb20_c0            reference: unsupported insn 0x5e0c0401
+[SKIP  ] bb_libui_6eb20_c1            reference: unsupported insn 0x5e0c0401
+[SKIP  ] bb_libui_6eb20_c2            reference: unsupported insn 0x5e0c0401
+[SKIP  ] bb_libui_6ec1c_c0            reference: unsupported insn 0x1e3e1004
+[SKIP  ] bb_libui_6ec1c_c1            reference: unsupported insn 0x1e3e1004
+[SKIP  ] bb_libui_6ec1c_c2            reference: unsupported insn 0x1e3e1004
+[PASS  ] bb_libui_6ec44_c0            (230 bytes x86)
+[PASS  ] bb_libui_6ec44_c1            (230 bytes x86)
+[PASS  ] bb_libui_6ec44_c2            (230 bytes x86)
+[PASS  ] bb_libui_6eccc_c0            (157 bytes x86)
+[PASS  ] bb_libui_6eccc_c1            (157 bytes x86)
+[PASS  ] bb_libui_6eccc_c2            (157 bytes x86)
+[SKIP  ] bb_libui_6ece0_c0            reference: unsupported insn 0x1e3e1006
+[SKIP  ] bb_libui_6ece0_c1            reference: unsupported insn 0x1e3e1006
+[SKIP  ] bb_libui_6ece0_c2            reference: unsupported insn 0x1e3e1006
+[PASS  ] bb_libui_6ed00_c0            (247 bytes x86)
+[PASS  ] bb_libui_6ed00_c1            (247 bytes x86)
+[PASS  ] bb_libui_6ed00_c2            (247 bytes x86)
+[PASS  ] bb_libui_6ed10_c0            (111 bytes x86)
+[PASS  ] bb_libui_6ed10_c1            (111 bytes x86)
+[PASS  ] bb_libui_6ed10_c2            (111 bytes x86)
+[PASS  ] bb_libui_6ef78_c0            (142 bytes x86)
+[PASS  ] bb_libui_6ef78_c1            (142 bytes x86)
+[PASS  ] bb_libui_6ef78_c2            (142 bytes x86)
+[SKIP  ] bb_libui_6f294_c0            reference: unsupported insn 0x4f000546
+[SKIP  ] bb_libui_6f294_c1            reference: unsupported insn 0x4f000546
+[SKIP  ] bb_libui_6f294_c2            reference: unsupported insn 0x4f000546
+[SKIP  ] bb_libui_6f2f4_c0            reference: unsupported insn 0x4f011602
+[SKIP  ] bb_libui_6f2f4_c1            reference: unsupported insn 0x4f011602
+[SKIP  ] bb_libui_6f2f4_c2            reference: unsupported insn 0x4f011602
+[SKIP  ] bb_libui_6f314_c0            reference: unsupported insn 0x4f011611
+[SKIP  ] bb_libui_6f314_c1            reference: unsupported insn 0x4f011611
+[SKIP  ] bb_libui_6f314_c2            reference: unsupported insn 0x4f011611
+
+summary: 127 PASS, 5 FAIL, 108 SKIP, 0 DBTERR

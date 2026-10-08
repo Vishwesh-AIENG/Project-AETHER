@@ -1,0 +1,11 @@
+--- /tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/hypervisor/src/smp.rs.orig	2026-10-08 10:16:06.598058648 +0000
++++ /tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/hypervisor/src/smp.rs	2026-10-08 10:16:06.608830068 +0000
+@@ -174,7 +174,7 @@
+         let result: i64;
+         unsafe {
+             asm!(
+-                "smc #0",
++                "hvc #0",
+                 inout("x0") crate::cpu::psci::CPU_ON_64 as u64 => result,
+                 in("x1") target_mpidr,
+                 in("x2") entry_pa,

@@ -1,0 +1,9 @@
+=== AETHER dbt-oracle — 4 block(s) ===
+    reference engine: hand-written ARM64 interpreter (independent of DBT)
+
+[PASS  ] str_then_ldr                 (278 bytes x86)
+[PASS  ] strb_zero_extend_ldrb        (279 bytes x86)
+[PASS  ] ldrsw_sign_extend            (142 bytes x86)
+[PASS  ] ldr_q_vector                 (149 bytes x86)
+
+summary: 4 PASS, 0 FAIL, 0 SKIP, 0 DBTERR

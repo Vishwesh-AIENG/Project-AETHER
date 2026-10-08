@@ -1,0 +1,94 @@
+UEFI firmware (version 2024.02-2ubuntu0.10 built at 15:40:28 on Sep 23 2026)
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0)
+BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0)
+
+======================================
+  AETHER Hypervisor starting...      
+======================================
+  CurrentEL: EL2
+  EL2 detected
+  ExitBootServices...
+  ExitBootServices: OK
+  EL2 page tables: AETHER-owned at 0x000000013c75b000 (firmware SCTLR_EL2=0x000000000000100d)
+  Conventional RAM: 4090 MiB
+  Largest region PA: 0x00000000c0000000  size: 1991 MiB
+  Stage 2 tables: OK
+  S2 root PA: 0x00000000c0000000
+  Exception vectors: OK
+  HCR_EL2   = 0x00000308807d663f
+  VTTBR_EL2 = 0x00010000c0000000
+  VTCR_EL2  = 0x0000000080053558
+  GIC via ACPI MADT — GICD=0x0000000008000000 GICR=0x00000000080a0000
+  CPUs: 4 (MADT enabled GICC entries)
+  GIC: OK (GICD=0x0000000008000000 GICR=0x00000000080a0000)
+  VGIC: OK (maint_intid=25)
+  IRQ forwarding: timer PPIs + UART SPI enabled
+  SMP: 4 cores pre-registered
+  SMP: CPU_ON core 1 -> 0
+  SMP: CPU_ON core 2 -> 0
+  SMP: CPU_ON core 3 -> 0
+======================================
+  Hypervisor ready.
+======================================
+
+  initramfs at 0x0000000044100000: 815076 bytes (newc)
+  ch36: Building Android DTB (4-core SMP + IRQ forwarding)...
+  DTB at IPA=0x0000000044000000  Kernel entry IPA=0x0000000040800000
+  EL2 stack/image at 0x000000013c7493d0 (outside guest RAM)
+  ERET to Linux kernel EL1...
+[    0.000000][    T0] Booting Linux on physical CPU 0x0000000000 [0x000f0510]
+[    0.000000][    T0] Linux version 6.1.79-g2dca19b0a7e6-dirty (root@DESKTOP-S9EMU7O) (aarch64-buildroot-linux-gnu-gcc.br_real (Buildroot 2021.11-11272-ge2962af) 12.3.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT Wed Jul  1 19:46:52 UTC 2026
+[    0.000000][    T0] random: crng init done
+[    0.000000][    T0] Machine model: aether,android-partition
+[    0.000000][    T0] Stack Depot is disabled
+[    0.000000][    T0] KVM is not available. Ignoring kvm-arm.mode
+[    0.000000][    T0] earlycon: pl11 at MMIO 0x0000000009000000 (options '')
+[    0.000000][    T0] printk: bootconsole [pl11] enabled
+[    0.000000][    T0] efi: UEFI not found.
+[    0.000000][    T0] Zone ranges:
+[    0.000000][    T0]   DMA32    [mem 0x0000000040000000-0x00000000bfdfffff]
+[    0.000000][    T0]   Normal   empty
+[    0.000000][    T0]   Device   empty
+[    0.000000][    T0] Movable zone start for each node
+[    0.000000][    T0] Early memory node ranges
+[    0.000000][    T0]   node   0: [mem 0x0000000040000000-0x00000000bfdfffff]
+[    0.000000][    T0] Initmem setup node 0 [mem 0x0000000040000000-0x00000000bfdfffff]
+[    0.000000][    T0] On node 0, zone DMA32: 512 pages in unavailable ranges
+[    0.000000][    T0] cma: Reserved 16 MiB at 0x00000000bc800000
+[    0.000000][    T0] psci: probing for conduit method from DT.
+[    0.000000][    T0] psci: PSCIv2.0 detected in firmware.
+[    0.000000][    T0] psci: Using standard PSCI v0.2 function IDs
+[    0.000000][    T0] psci: Trusted OS migration not required
+[    0.000000][    T0] psci: SMC Calling Convention v1.0
+[    0.000000][    T0] 'bootconfig' found on command line, but no bootconfig found
+[    0.000000][    T0] percpu: Embedded 30 pages/cpu s85544 r8192 d29144 u122880
+[    0.000000][    T0] Detected PIPT I-cache on CPU0
+[    0.000000][    T0] CPU features: SYS_ID_AA64MMFR1_EL1[11:8]: forced to 0
+[    0.000000][    T0] Internal error: Oops - Undefined instruction: 0000000002000000 [#1] PREEMPT SMP
+[    0.000000][    T0] Modules linked in:
+[    0.000000][    T0] CPU: 0 PID: 0 Comm: swapper Not tainted 6.1.79-g2dca19b0a7e6-dirty #1
+[    0.000000][    T0] Hardware name: aether,android-partition (DT)
+[    0.000000][    T0] pstate: 004000c5 (nzcv daIF +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[    0.000000][    T0] pc : sme_kernel_enable+0x4/0x40
+[    0.000000][    T0] lr : read_smcr_features+0x14/0x40
+[    0.000000][    T0] sp : ffffffd195433d80
+[    0.000000][    T0] x29: ffffffd195433d80 x28: 0000000000000018 x27: 0000000000000020
+[    0.000000][    T0] x26: 0000000000000001 x25: ffffffd194f3c550 x24: ffffffd194b355e8
+[    0.000000][    T0] x23: ffffffd19544eb20 x22: ffffffd194b330a8 x21: ffffffd194b32e18
+[    0.000000][    T0] x20: 0000000000000027 x19: ffffffd195614148 x18: ffffffffffffffff
+[    0.000000][    T0] x17: 000000000001e000 x16: 0000000000000000 x15: ffffffd195433820
+[    0.000000][    T0] x14: 0000000000000000 x13: 8000000000000000 x12: 0000000000000000
+[    0.000000][    T0] x11: 0000000000000000 x10: 0000000000000000 x9 : 0000000000000000
+[    0.000000][    T0] x8 : 0000000000000000 x7 : 0000000000000000 x6 : 0000000000000000
+[    0.000000][    T0] x5 : ffffffd19503d020 x4 : ffffffd193c244c0 x3 : 0000000000000010
+[    0.000000][    T0] x2 : 0000000000000027 x1 : 0000000000180420 x0 : 0000000000000000
+[    0.000000][    T0] Call trace:
+[    0.000000][    T0]  sme_kernel_enable+0x4/0x40
+[    0.000000][    T0]  init_cpu_features+0x270/0x2fc
+[    0.000000][    T0]  cpuinfo_store_boot_cpu+0x4c/0x5c
+[    0.000000][    T0]  smp_prepare_boot_cpu+0x30/0x40
+[    0.000000][    T0]  start_kernel+0x474/0x9e0
+[    0.000000][    T0]  __primary_switched+0xbc/0xc4
+[    0.000000][    T0] Code: 17fffff4 d503201f d503201f d503233f (d5381280) 
+[    0.000000][    T0] ---[ end trace 0000000000000000 ]---
+[    0.000000][    T0] Kernel panic - not syncing: Oops - Undefined instruction: Fatal exception

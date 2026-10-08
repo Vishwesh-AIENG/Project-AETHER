@@ -1,0 +1,43 @@
+==> qemu-system-aarch64 -machine virt,gic-version=3,virtualization=on -cpu max -m 4G -smp 4 -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd -drive if=none,id=hd0,format=raw,file=fat:rw:/tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/qemu/efi -device virtio-blk-pci,drive=hd0,bootindex=0 -device loader,file=_kernel_new,addr=0x40800000,force-raw=on -serial file:/tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/qemu/arm-serial.log -display none -monitor none -no-reboot -device loader,file=qemu/initrd-proof.cpio,addr=0x44100000,force-raw=on
+==> serial quiet 45s; stopping
+==> serial log 8388 bytes; tail:
+[    0.000000][    T0] 	Trampoline variant of Tasks RCU enabled.
+[    0.000000][    T0] 	Tracing variant of Tasks RCU enabled.
+[    0.000000][    T0] rcu: RCU calculated value of scheduler-enlistment delay is 25 jiffies.
+[    0.000000][    T0] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=4
+[    0.000000][    T0] NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+[    0.000000][    T0] GICv3: 256 SPIs implemented
+[    0.000000][    T0] GICv3: 0 Extended SPIs implemented
+[    0.000000][    T0] Root IRQ handler: gic_handle_irq
+[    0.000000][    T0] GICv3: GICv3 features: 16 PPIs
+[    0.000000][    T0] GICv3: CPU0: found redistributor 0 region 0:0x00000000080a0000
+[    0.000000][    T0] ITS: No ITS available, not enabling LPIs
+[    0.000000][    T0] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[    0.000000][    T0] arch_timer: cp15 timer(s) running at 62.50MHz (virt).
+[    0.000000][    T0] clocksource: arch_sys_counter: mask: 0x1ffffffffffffff max_cycles: 0x1cd42e208c, max_idle_ns: 881590405314 ns
+[    0.000065][    T0] sched_clock: 57 bits at 63MHz, resolution 16ns, wraps every 4398046511096ns
+[    0.006817][    T0] kfence: initialized - using 524288 bytes for 63 objects at 0x(____ptrval____)-0x(____ptrval____)
+[    0.007829][    T0] Internal error: Oops - Undefined instruction: 0000000002000000 [#1] PREEMPT SMP
+[    0.008151][    T0] Modules linked in:
+[    0.008367][    T0] CPU: 0 PID: 0 Comm: swapper/0 Not tainted 6.1.79-g2dca19b0a7e6-dirty #1
+[    0.008574][    T0] Hardware name: aether,android-partition (DT)
+[    0.008822][    T0] pstate: 004000c5 (nzcv daIF +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[    0.009061][    T0] pc : start_kernel+0x854/0x9e0
+[    0.009242][    T0] lr : start_kernel+0x83c/0x9e0
+[    0.009317][    T0] sp : ffffffde5da33e30
+[    0.009381][    T0] x29: ffffffde5da33e30 x28: 0000000041d08cf0 x27: ffffffde5d7b5108
+[    0.009576][    T0] x26: 0000000000000000 x25: ffffff807f95ac40 x24: 0000000000000000
+[    0.009713][    T0] x23: ffffffde5da3ad40 x22: ffffffde5d7b6100 x21: ffffffde5d7b5108
+[    0.009837][    T0] x20: ffffffde5da4b9c0 x19: ffffffde5dc14000 x18: 0000000000000014
+[    0.009990][    T0] x17: 000000006d2aa1db x16: 00000000e4e68ace x15: 00000000efb8c000
+[    0.010114][    T0] x14: 00000000100547de x13: ecc243b77aec5993 x12: eb5199fef3f7018b
+[    0.010230][    T0] x11: 00000000181eac4e x10: 0000000076e77e57 x9 : 00000000c409dcf9
+[    0.010373][    T0] x8 : ffffffde5da33dd8 x7 : 0000000000000000 x6 : eb5199fef3f7018b
+[    0.010485][    T0] x5 : ffffffde5da4d510 x4 : 0000000000000008 x3 : 0000000000000030
+[    0.010627][    T0] x2 : 0000000000000000 x1 : eb5199fef3f7018b x0 : ffffffde5da4d480
+[    0.010906][    T0] Call trace:
+[    0.011074][    T0]  start_kernel+0x854/0x9e0
+[    0.011278][    T0]  __primary_switched+0xbc/0xc4
+[    0.011498][    T0] Code: 54000100 d2824001 8b010000 f9404001 (d5182101) 
+[    0.011834][    T0] ---[ end trace 0000000000000000 ]---
+[    0.012096][    T0] Kernel panic - not syncing: Oops - Undefined instruction: Fatal exception

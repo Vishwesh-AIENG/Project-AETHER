@@ -1,0 +1,26 @@
+832c832
+<                         fp_misc_unary(opcode, u, sz == 1, bits).map(|x| x & lane_mask(felem))
+---
+>                         fp_misc_unary(opcode, if matches!(opcode, 0b11000 | 0b11001) { if u == 0 { 10 + ((size >> 1) & 1) as u32 } else { 20 + ((size >> 1) & 1) as u32 } } else { u }, sz == 1, bits).map(|x| x & lane_mask(felem))
+1982,1985c1982,1986
+<             (0b11000, 0) => round_ties_even(v as f64) as $f, // FRINTN (to-nearest-even)
+<             (0b11000, 1) => (v as f64).floor() as $f,        // FRINTM (toward -inf)
+<             (0b11001, 0) => (v as f64).ceil() as $f,         // FRINTP (toward +inf)
+<             (0b11001, 1) => (v as f64).trunc() as $f,        // FRINTZ (toward zero)
+---
+>             (0b11000, 10) => round_ties_even(v as f64) as $f,
+>             (0b11001, 10) => (v as f64).floor() as $f,
+>             (0b11000, 11) => (v as f64).ceil() as $f,
+>             (0b11001, 11) => (v as f64).trunc() as $f,
+>             (0b11000, 20) => (v as f64).round() as $f,
+1999,2002c2000,2004
+<             (0b11000, 0) => round_ties_even(v as f64) as f32,
+<             (0b11000, 1) => v.floor(),
+<             (0b11001, 0) => v.ceil(),
+<             (0b11001, 1) => v.trunc(),
+---
+>             (0b11000, 10) => round_ties_even(v as f64) as f32,
+>             (0b11001, 10) => v.floor(),
+>             (0b11000, 11) => v.ceil(),
+>             (0b11001, 11) => v.trunc(),
+>             (0b11000, 20) => (v as f64).round() as f32,

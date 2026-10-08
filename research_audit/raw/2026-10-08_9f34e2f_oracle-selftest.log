@@ -1,0 +1,113 @@
+=== AETHER dbt-oracle — 85 block(s) ===
+    reference engine: hand-written ARM64 interpreter (independent of DBT)
+
+[PASS  ] movz_add                     (73 bytes x86)
+[PASS  ] add_reg                      (40 bytes x86)
+[PASS  ] subs_flags                   (105 bytes x86)
+[PASS  ] logic_imm                    (88 bytes x86)
+[PASS  ] lsl_imm                      (62 bytes x86)
+[PASS  ] madd                         (49 bytes x86)
+[PASS  ] csel_eq                      (74 bytes x86)
+[PASS  ] fadd_s                       (55 bytes x86)
+[PASS  ] neon_add_2d                  (55 bytes x86)
+[PASS  ] cmhi_2d                      (83 bytes x86)
+[PASS  ] wform_dirty_upper            (43 bytes x86)
+[PASS  ] extr_w_reg_order             (77 bytes x86)
+[PASS  ] csinv_ge_true                (96 bytes x86)
+[PASS  ] csinv_ge_false               (96 bytes x86)
+[PASS  ] orr_bitmask_2bit             (50 bytes x86)
+[PASS  ] orr_bitmask_4bit             (46 bytes x86)
+[PASS  ] simd_mul_4s                  (56 bytes x86)
+[PASS  ] simd_mla_4s                  (69 bytes x86)
+[PASS  ] simd_mls_4s                  (73 bytes x86)
+[PASS  ] simd_smax_4s                 (56 bytes x86)
+[PASS  ] simd_umin_4s                 (56 bytes x86)
+[PASS  ] simd_sabd_4s                 (69 bytes x86)
+[PASS  ] simd_uabd_8b                 (71 bytes x86)
+[PASS  ] simd_addp_4s                 (56 bytes x86)
+[PASS  ] simd_cmtst_4s                (71 bytes x86)
+[PASS  ] simd_and_16b                 (55 bytes x86)
+[PASS  ] simd_bsl_16b                 (72 bytes x86)
+[PASS  ] simd_orn_16b                 (63 bytes x86)
+[PASS  ] simd_abs_4s                  (47 bytes x86)
+[PASS  ] simd_neg_4s                  (54 bytes x86)
+[PASS  ] simd_cmgt0_4s                (50 bytes x86)
+[PASS  ] simd_cmlt0_4s                (50 bytes x86)
+[PASS  ] simd_cmge0_4s                (58 bytes x86)
+[PASS  ] simd_saddlp_2d               (66 bytes x86)
+[PASS  ] simd_xtn_4h                  (69 bytes x86)
+[PASS  ] simd_shl_4s                  (47 bytes x86)
+[PASS  ] simd_ushr_4s                 (47 bytes x86)
+[PASS  ] simd_sshr_4s                 (47 bytes x86)
+[PASS  ] simd_ssra_4s                 (60 bytes x86)
+[PASS  ] simd_ushll_4s                (57 bytes x86)
+[PASS  ] simd_ushll_8h                (47 bytes x86)
+[PASS  ] simd_sshll_8h                (47 bytes x86)
+[PASS  ] simd_sshll2_8h               (52 bytes x86)
+[PASS  ] simd_shrn_4h                 (69 bytes x86)
+[PASS  ] simd_sqshrun_8b              (55 bytes x86)
+[PASS  ] simd_sqshrn_4h               (55 bytes x86)
+[PASS  ] simd_uqshrn_8b               (69 bytes x86)
+[PASS  ] simd_zip1_4s                 (55 bytes x86)
+[PASS  ] simd_zip2_4s                 (55 bytes x86)
+[PASS  ] simd_uzp1_4s                 (55 bytes x86)
+[PASS  ] simd_trn1_4s                 (60 bytes x86)
+[PASS  ] simd_ext_16b                 (57 bytes x86)
+[PASS  ] simd_tbl_16b                 (79 bytes x86)
+[PASS  ] simd_tbx_16b                 (143 bytes x86)
+[PASS  ] simd_dupel_4s                (47 bytes x86)
+[PASS  ] simd_ins_gen                 (35 bytes x86)
+[PASS  ] simd_umov_w                  (37 bytes x86)
+[PASS  ] simd_smov_x                  (35 bytes x86)
+[PASS  ] simd_addv_4s                 (89 bytes x86)
+[PASS  ] simd_smaxv_4s                (111 bytes x86)
+[PASS  ] simd_uminv_4s                (111 bytes x86)
+[PASS  ] simd_saddlv_4s               (89 bytes x86)
+[PASS  ] fp_fmax_s                    (148 bytes x86)
+[PASS  ] fp_fmin_s                    (148 bytes x86)
+[PASS  ] fp_fnmul_s                   (70 bytes x86)
+[PASS  ] fp_fabs_s                    (57 bytes x86)
+[PASS  ] fp_fsqrt_s                   (46 bytes x86)
+[PASS  ] fp_frintn_s                  (48 bytes x86)
+[PASS  ] fp_frintm_s                  (48 bytes x86)
+[PASS  ] fp_fcvt_ds                   (50 bytes x86)
+[PASS  ] fp_fcmp_lt_s                 (125 bytes x86)
+[PASS  ] fp_fcsel_gt_s                (127 bytes x86)
+[PASS  ] fp_scvtf_s                   (46 bytes x86)
+[PASS  ] fp_ucvtf_s                   (46 bytes x86)
+[PASS  ] fp_fcvtzs_s                  (90 bytes x86)
+[PASS  ] fp_fcvtzu_s                  (97 bytes x86)
+[PASS  ] fp_fadd_4s                   (54 bytes x86)
+[PASS  ] fp_fmul_4s                   (54 bytes x86)
+[PASS  ] fp_fmla_4s                   (65 bytes x86)
+[PASS  ] fp_fcmeq_4s                  (55 bytes x86)
+[PASS  ] fp_fabs_4s                   (55 bytes x86)
+[PASS  ] fp_fneg_4s                   (55 bytes x86)
+[PASS  ] fp_fcmgt0_4s                 (54 bytes x86)
+[PASS  ] fp_fmax_4s                   (150 bytes x86)
+[PASS  ] fp_fmin_4s                   (150 bytes x86)
+
+summary: 85 PASS, 0 FAIL, 0 SKIP, 0 DBTERR
+
+=== CATCH demonstration: reconstruct the CMHI signed-vs-unsigned bug ===
+    Running the CMHI .2d block with a deliberately-BUGGY reference
+    (CMHI lowered as a SIGNED compare — the exact historical defect).
+    The oracle MUST now report a divergence, proving it catches this
+    class of silent miscompile.
+[CATCH ] cmhi_2d                      divergence detected (as required):
+             v0  DBT=0x0000000000000000ffffffffffffffff  REF=0x00000000000000000000000000000000
+    ==> oracle CAUGHT the injected signed-vs-unsigned CMHI defect.
+
+=== SQSHRUN saturating narrow-shift (reference fix regression guard) ===
+[REF   ] selftest_sqshrun_8b      negatives saturate to 0: V0=0x0f0000ff48000500
+[PASS  ] selftest_sqshrun_8b      DBT agrees — DBT and reference both correct.
+    ==> the 33 framework false-FAILs are resolved.
+
+=== Known DBT issues surfaced by the new SIMD/FP reference ===
+    These are real defects the oracle now catches (previously SKIPped).
+    They do NOT affect the exit code (tracked, not gating).
+[MISCOMPILE] fp_fcvt_sd_BUG           FCVT Sd,Dn leaves stale bits[63:32] (should zero upper) — lower_fpcvt2 in lower_simd_ctx.rs (UNEXPECTED — verify)
+[MISCOMPILE] fp_fmax_s_nan_BUG        FMAX/FMIN NaN: x86 maxps returns 2nd src on NaN → Vn=NaN drops the NaN (returns number); ARM propagates NaN. lower_simd_ctx.rs:1230 (Max/Min). FPCR.DN canonicalizes payload only, not this. (UNEXPECTED — verify)
+[GAP(UD2)  ] fp_fmadd_s_GAP           scalar FMADD emits UD2 (Tier-1 unimplemented) (UNEXPECTED — verify)
+[GAP(UD2)  ] simd_uabd_4s_GAP         UABD .4S emits UD2 (Tier-1; .8B/.4H are lowered) — lower_simd_ctx.rs UAbd size S (UNEXPECTED — verify)
+# exit 0

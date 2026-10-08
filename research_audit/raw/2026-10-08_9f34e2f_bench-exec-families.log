@@ -1,0 +1,44 @@
+# cmd: BENCH_K=100000 wine aether-dbt-bench.exe exec (x86_64-pc-windows-gnu, Wine 9.0, opt-level=s lto). v2 method: identical reseed, 16 calls/reseed, net=(block-bareRET)/16
+# host: Model name: Intel(R) Xeon(R) Processor @ 2.10GHz, date=2026-10-08T09:52:02Z
+exec_iters_per_run=100000 runs=5
+harness_bare_ret_ns_per_16calls: N=5 mean=62.2 median=61.2 min=60.0 max=64.5 sd=2.1 [ns]
+family=int_arith (add/sub/madd/eor x8) arm_insns=8 x86_bytes=378 expansion=47.2B/insn
+  gross_ns_per_16calls[int_arith (add/sub/madd/eor x8)]: N=5 mean=132.2 median=132.7 min=129.5 max=134.8 sd=2.0 [ns]
+  net_ns_per_block[int_arith (add/sub/madd/eor x8)]: N=5 mean=4.4 median=4.3 min=4.2 max=4.6 sd=0.2 [ns (minus bare-RET loop, /CALLS)]
+  net_ns_per_arm_insn[int_arith (add/sub/madd/eor x8)]: N=5 mean=0.5 median=0.5 min=0.5 max=0.6 sd=0.0 [ns]
+family=shift_bitfield (lsl/lsr/asr/ubfx/bfi) arm_insns=8 x86_bytes=580 expansion=72.5B/insn
+  gross_ns_per_16calls[shift_bitfield (lsl/lsr/asr/ubfx/bfi)]: N=5 mean=137.2 median=138.8 min=125.0 max=143.8 sd=7.6 [ns]
+  net_ns_per_block[shift_bitfield (lsl/lsr/asr/ubfx/bfi)]: N=5 mean=4.7 median=4.8 min=3.8 max=5.2 sd=0.6 [ns (minus bare-RET loop, /CALLS)]
+  net_ns_per_arm_insn[shift_bitfield (lsl/lsr/asr/ubfx/bfi)]: N=5 mean=0.6 median=0.6 min=0.5 max=0.6 sd=0.1 [ns]
+family=flags_csel (cmp/csel/csinc/ccmp) arm_insns=8 x86_bytes=840 expansion=105.0B/insn
+  gross_ns_per_16calls[flags_csel (cmp/csel/csinc/ccmp)]: N=5 mean=218.9 median=211.3 min=206.2 max=241.2 sd=14.6 [ns]
+  net_ns_per_block[flags_csel (cmp/csel/csinc/ccmp)]: N=5 mean=9.8 median=9.4 min=9.1 max=11.1 sd=0.8 [ns (minus bare-RET loop, /CALLS)]
+  net_ns_per_arm_insn[flags_csel (cmp/csel/csinc/ccmp)]: N=5 mean=1.2 median=1.2 min=1.1 max=1.4 sd=0.1 [ns]
+family=scalar_fp (fadd/fmul/fdiv/fmadd d) arm_insns=8 x86_bytes=490 expansion=61.2B/insn
+  gross_ns_per_16calls[scalar_fp (fadd/fmul/fdiv/fmadd d)]: N=5 mean=136.1 median=131.4 min=129.2 max=152.9 sd=9.9 [ns]
+  net_ns_per_block[scalar_fp (fadd/fmul/fdiv/fmadd d)]: N=5 mean=4.6 median=4.3 min=4.0 max=5.7 sd=0.7 [ns (minus bare-RET loop, /CALLS)]
+  net_ns_per_arm_insn[scalar_fp (fadd/fmul/fdiv/fmadd d)]: N=5 mean=0.6 median=0.5 min=0.5 max=0.7 sd=0.1 [ns]
+family=fp_convert (scvtf/fcvtzs/fcvt s<-d) arm_insns=8 x86_bytes=504 expansion=63.0B/insn
+  gross_ns_per_16calls[fp_convert (scvtf/fcvtzs/fcvt s<-d)]: N=5 mean=131.1 median=131.1 min=128.6 max=134.8 sd=2.3 [ns]
+  net_ns_per_block[fp_convert (scvtf/fcvtzs/fcvt s<-d)]: N=5 mean=4.3 median=4.4 min=4.2 max=4.4 sd=0.1 [ns (minus bare-RET loop, /CALLS)]
+  net_ns_per_arm_insn[fp_convert (scvtf/fcvtzs/fcvt s<-d)]: N=5 mean=0.5 median=0.5 min=0.5 max=0.5 sd=0.0 [ns]
+family=simd_int (add.4s/cmhi.2d/zip1/tbl) arm_insns=8 x86_bytes=574 expansion=71.8B/insn
+  gross_ns_per_16calls[simd_int (add.4s/cmhi.2d/zip1/tbl)]: N=5 mean=163.5 median=162.4 min=156.3 max=174.8 sd=6.8 [ns]
+  net_ns_per_block[simd_int (add.4s/cmhi.2d/zip1/tbl)]: N=5 mean=6.3 median=6.2 min=6.0 max=7.1 sd=0.5 [ns (minus bare-RET loop, /CALLS)]
+  net_ns_per_arm_insn[simd_int (add.4s/cmhi.2d/zip1/tbl)]: N=5 mean=0.8 median=0.8 min=0.7 max=0.9 sd=0.1 [ns]
+family=simd_fp (fmla.4s/fadd.4s/fmul.4s) arm_insns=8 x86_bytes=495 expansion=61.9B/insn
+  gross_ns_per_16calls[simd_fp (fmla.4s/fadd.4s/fmul.4s)]: N=5 mean=154.1 median=153.8 min=150.6 max=157.3 sd=2.6 [ns]
+  net_ns_per_block[simd_fp (fmla.4s/fadd.4s/fmul.4s)]: N=5 mean=5.7 median=5.8 min=5.6 max=5.9 sd=0.1 [ns (minus bare-RET loop, /CALLS)]
+  net_ns_per_arm_insn[simd_fp (fmla.4s/fadd.4s/fmul.4s)]: N=5 mean=0.7 median=0.7 min=0.7 max=0.7 sd=0.0 [ns]
+family=load_store (ldr/str x, flat MMU) arm_insns=8 x86_bytes=1338 expansion=167.2B/insn
+  gross_ns_per_16calls[load_store (ldr/str x, flat MMU)]: N=5 mean=1020.0 median=945.4 min=929.0 max=1291.5 sd=154.2 [ns]
+  net_ns_per_block[load_store (ldr/str x, flat MMU)]: N=5 mean=59.9 median=55.3 min=54.0 max=76.9 sd=9.7 [ns (minus bare-RET loop, /CALLS)]
+  net_ns_per_arm_insn[load_store (ldr/str x, flat MMU)]: N=5 mean=7.5 median=6.9 min=6.8 max=9.6 sd=1.2 [ns]
+family=atomics (ldadd/swp/cas x) arm_insns=8 x86_bytes=1379 expansion=172.4B/insn
+  gross_ns_per_16calls[atomics (ldadd/swp/cas x)]: N=5 mean=859.9 median=832.6 min=821.2 max=954.5 sd=55.5 [ns]
+  net_ns_per_block[atomics (ldadd/swp/cas x)]: N=5 mean=49.9 median=48.0 min=47.5 max=55.8 sd=3.5 [ns (minus bare-RET loop, /CALLS)]
+  net_ns_per_arm_insn[atomics (ldadd/swp/cas x)]: N=5 mean=6.2 median=6.0 min=5.9 max=7.0 sd=0.4 [ns]
+family=system (mrs nzcv/msr nzcv/mrs tpidr_el0) arm_insns=8 x86_bytes=304 expansion=38.0B/insn
+  gross_ns_per_16calls[system (mrs nzcv/msr nzcv/mrs tpidr_el0)]: N=5 mean=112.8 median=111.9 min=101.2 max=121.9 sd=9.1 [ns]
+  net_ns_per_block[system (mrs nzcv/msr nzcv/mrs tpidr_el0)]: N=5 mean=3.2 median=3.2 min=2.3 max=3.8 sd=0.6 [ns (minus bare-RET loop, /CALLS)]
+  net_ns_per_arm_insn[system (mrs nzcv/msr nzcv/mrs tpidr_el0)]: N=5 mean=0.4 median=0.4 min=0.3 max=0.5 sd=0.1 [ns]

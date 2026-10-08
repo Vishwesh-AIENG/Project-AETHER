@@ -1,0 +1,121 @@
+UEFI firmware (version 2024.02-2ubuntu0.10 built at 15:40:28 on Sep 23 2026)
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0)
+BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0)
+
+======================================
+  AETHER Hypervisor starting...      
+======================================
+  CurrentEL: EL2
+  EL2 detected
+  ExitBootServices...
+  ExitBootServices: OK
+  EL2 page tables: AETHER-owned at 0x000000013c75b000 (firmware SCTLR_EL2=0x000000000000100d)
+  Conventional RAM: 4090 MiB
+  Largest region PA: 0x00000000c0000000  size: 1991 MiB
+  Stage 2 tables: OK
+  S2 root PA: 0x00000000c0000000
+  Exception vectors: OK
+  HCR_EL2   = 0x00000008807d663f
+  VTTBR_EL2 = 0x00010000c0000000
+  VTCR_EL2  = 0x0000000080053558
+  GIC via ACPI MADT — GICD=0x0000000008000000 GICR=0x00000000080a0000
+  CPUs: 1 (MADT enabled GICC entries)
+  GIC: OK (GICD=0x0000000008000000 GICR=0x00000000080a0000)
+  VGIC: OK (maint_intid=25)
+  IRQ forwarding: timer PPIs + UART SPI enabled
+  SMP: 1 cores pre-registered
+======================================
+  Hypervisor ready.
+======================================
+
+  initramfs at 0x0000000044100000: 815076 bytes (newc)
+  ch36: Building Android DTB (4-core SMP + IRQ forwarding)...
+  DTB at IPA=0x0000000044000000  Kernel entry IPA=0x0000000040800000
+  EL2 stack/image at 0x000000013c7493d0 (outside guest RAM)
+  ERET to Linux kernel EL1...
+[    0.000000][    T0] Booting Linux on physical CPU 0x0000000000 [0x000f0510]
+[    0.000000][    T0] Linux version 6.1.79-g2dca19b0a7e6-dirty (root@DESKTOP-S9EMU7O) (aarch64-buildroot-linux-gnu-gcc.br_real (Buildroot 2021.11-11272-ge2962af) 12.3.0, GNU ld (GNU Binutils) 2.41) #1 SMP PREEMPT Wed Jul  1 19:46:52 UTC 2026
+[    0.000000][    T0] random: crng init done
+[    0.000000][    T0] Machine model: aether,android-partition
+[    0.000000][    T0] Stack Depot is disabled
+[    0.000000][    T0] KVM is not available. Ignoring kvm-arm.mode
+[    0.000000][    T0] earlycon: pl11 at MMIO 0x0000000009000000 (options '')
+[    0.000000][    T0] printk: bootconsole [pl11] enabled
+[    0.000000][    T0] efi: UEFI not found.
+[    0.000000][    T0] Zone ranges:
+[    0.000000][    T0]   DMA32    [mem 0x0000000040000000-0x00000000bfdfffff]
+[    0.000000][    T0]   Normal   empty
+[    0.000000][    T0]   Device   empty
+[    0.000000][    T0] Movable zone start for each node
+[    0.000000][    T0] Early memory node ranges
+[    0.000000][    T0]   node   0: [mem 0x0000000040000000-0x00000000bfdfffff]
+[    0.000000][    T0] Initmem setup node 0 [mem 0x0000000040000000-0x00000000bfdfffff]
+[    0.000000][    T0] On node 0, zone DMA32: 512 pages in unavailable ranges
+[    0.000000][    T0] cma: Reserved 16 MiB at 0x00000000bc800000
+[    0.000000][    T0] psci: probing for conduit method from DT.
+[    0.000000][    T0] psci: PSCIv2.0 detected in firmware.
+[    0.000000][    T0] psci: Using standard PSCI v0.2 function IDs
+[    0.000000][    T0] psci: Trusted OS migration not required
+[    0.000000][    T0] psci: SMC Calling Convention v1.0
+[    0.000000][    T0] 'bootconfig' found on command line, but no bootconfig found
+[    0.000000][    T0] percpu: Embedded 30 pages/cpu s85544 r8192 d29144 u122880
+[    0.000000][    T0] Detected PIPT I-cache on CPU0
+[    0.000000][    T0] CPU features: SYS_ID_AA64MMFR1_EL1[11:8]: forced to 0
+[    0.000000][    T0] CPU features: detected: Address authentication (architected QARMA5 algorithm)
+[    0.000000][    T0] CPU features: detected: GIC system register CPU interface
+[    0.000000][    T0] CPU features: detected: Hardware dirty bit management
+[    0.000000][    T0] CPU features: detected: Spectre-v4
+[    0.000000][    T0] alternatives: applying boot alternatives
+[    0.000000][    T0] Built 1 zonelists, mobility grouping on.  Total pages: 515592
+[    0.000000][    T0] Kernel command line: console=ttynull stack_depot_disable=on cgroup_disable=pressure kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=protected bootconfig ioremap_guard console=ttyAMA0 earlycon rdinit=/bin/sh
+[    0.000000][    T0] cgroup: Disabling pressure control group feature
+[    0.000000][    T0] Dentry cache hash table entries: 262144 (order: 9, 2097152 bytes, linear)
+[    0.000000][    T0] Inode-cache hash table entries: 131072 (order: 8, 1048576 bytes, linear)
+[    0.000000][    T0] mem auto-init: stack:all(zero), heap alloc:on, heap free:off
+[    0.000000][    T0] Memory: 2009940K/2095104K available (15488K kernel code, 1898K rwdata, 5884K rodata, 3264K init, 619K bss, 68780K reserved, 16384K cma-reserved)
+[    0.000000][    T0] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=1, Nodes=1
+[    0.000000][    T0] trace event string verifier disabled
+[    0.000000][    T0] rcu: Preemptible hierarchical RCU implementation.
+[    0.000000][    T0] rcu: 	RCU event tracing is enabled.
+[    0.000000][    T0] rcu: 	RCU restricting CPUs from NR_CPUS=32 to nr_cpu_ids=1.
+[    0.000000][    T0] rcu: 	RCU priority boosting: priority 1 delay 500 ms.
+[    0.000000][    T0] 	Trampoline variant of Tasks RCU enabled.
+[    0.000000][    T0] 	Tracing variant of Tasks RCU enabled.
+[    0.000000][    T0] rcu: RCU calculated value of scheduler-enlistment delay is 25 jiffies.
+[    0.000000][    T0] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=1
+[    0.000000][    T0] NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+[    0.000000][    T0] GICv3: 256 SPIs implemented
+[    0.000000][    T0] GICv3: 0 Extended SPIs implemented
+[    0.000000][    T0] Root IRQ handler: gic_handle_irq
+[    0.000000][    T0] GICv3: GICv3 features: 16 PPIs
+[    0.000000][    T0] GICv3: CPU0: found redistributor 0 region 0:0x00000000080a0000
+[    0.000000][    T0] ITS: No ITS available, not enabling LPIs
+[    0.000000][    T0] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[    0.000000][    T0] arch_timer: cp15 timer(s) running at 62.50MHz (virt).
+[    0.000000][    T0] clocksource: arch_sys_counter: mask: 0x1ffffffffffffff max_cycles: 0x1cd42e208c, max_idle_ns: 881590405314 ns
+[    0.000088][    T0] sched_clock: 57 bits at 63MHz, resolution 16ns, wraps every 4398046511096ns
+[    0.003108][    T0] kfence: initialized - using 524288 bytes for 63 objects at 0x(____ptrval____)-0x(____ptrval____)
+[    0.004209][    T0] Internal error: Oops - Undefined instruction: 0000000002000000 [#1] PREEMPT SMP
+[    0.004572][    T0] Modules linked in:
+[    0.004823][    T0] CPU: 0 PID: 0 Comm: swapper/0 Not tainted 6.1.79-g2dca19b0a7e6-dirty #1
+[    0.005091][    T0] Hardware name: aether,android-partition (DT)
+[    0.005383][    T0] pstate: 004000c5 (nzcv daIF +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[    0.005555][    T0] pc : start_kernel+0x854/0x9e0
+[    0.005732][    T0] lr : start_kernel+0x83c/0x9e0
+[    0.005829][    T0] sp : ffffffda18233e30
+[    0.005943][    T0] x29: ffffffda18233e30 x28: 0000000041d08cf0 x27: ffffffda17fb5108
+[    0.006233][    T0] x26: 0000000000000000 x25: ffffff807f95b500 x24: 0000000000000000
+[    0.006511][    T0] x23: ffffffda1823ad40 x22: ffffffda17fb6100 x21: ffffffda17fb5108
+[    0.006672][    T0] x20: ffffffda1824b9c0 x19: ffffffda18414000 x18: 0000000000000014
+[    0.006820][    T0] x17: 00000000310e7dd0 x16: 0000000020246919 x15: 00000000c9824bcd
+[    0.006980][    T0] x14: 0000000064777e53 x13: c63ab967330edaca x12: dd62381cce464c21
+[    0.007138][    T0] x11: 000000001314be9b x10: 00000000cfe505d0 x9 : 000000004eddaebf
+[    0.007406][    T0] x8 : ffffffda18233dd8 x7 : 0000000000000000 x6 : dd62381cce464c21
+[    0.007584][    T0] x5 : ffffffda1824d510 x4 : 0000000000000008 x3 : 0000000000000030
+[    0.007732][    T0] x2 : 0000000000000000 x1 : dd62381cce464c21 x0 : ffffffda1824d480
+[    0.008015][    T0] Call trace:
+[    0.008213][    T0]  start_kernel+0x854/0x9e0
+[    0.008506][    T0]  __primary_switched+0xbc/0xc4
+[    0.008795][    T0] Code: 54000100 d2824001 8b010000 f9404001 (d5182101) 
+[    0.009138][    T0] ---[ end trace 0000000000000000 ]---
+[    0.009499][    T0] Kernel panic - not syncing: Oops - Undefined instruction: Fatal exception

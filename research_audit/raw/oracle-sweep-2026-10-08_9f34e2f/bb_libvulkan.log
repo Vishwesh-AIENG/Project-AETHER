@@ -1,0 +1,47 @@
+=== AETHER dbt-oracle — 42 block(s) ===
+    reference engine: hand-written ARM64 interpreter (independent of DBT)
+
+[SKIP  ] bb_libvulkan_20084_c0        reference: unsupported insn 0x4f000546
+[SKIP  ] bb_libvulkan_20084_c1        reference: unsupported insn 0x4f000546
+[SKIP  ] bb_libvulkan_20084_c2        reference: unsupported insn 0x4f000546
+[SKIP  ] bb_libvulkan_200e4_c0        reference: unsupported insn 0x4f011602
+[SKIP  ] bb_libvulkan_200e4_c1        reference: unsupported insn 0x4f011602
+[SKIP  ] bb_libvulkan_200e4_c2        reference: unsupported insn 0x4f011602
+[SKIP  ] bb_libvulkan_20104_c0        reference: unsupported insn 0x4f011611
+[SKIP  ] bb_libvulkan_20104_c1        reference: unsupported insn 0x4f011611
+[SKIP  ] bb_libvulkan_20104_c2        reference: unsupported insn 0x4f011611
+[SKIP  ] bb_libvulkan_24a44_c0        reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libvulkan_24a44_c1        reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libvulkan_24a44_c2        reference: unsupported insn 0x9e6702e0
+[PASS  ] bb_libvulkan_24b70_c0        (266 bytes x86)
+[PASS  ] bb_libvulkan_24b70_c1        (266 bytes x86)
+[PASS  ] bb_libvulkan_24b70_c2        (266 bytes x86)
+[PASS  ] bb_libvulkan_24b84_c0        (521 bytes x86)
+[PASS  ] bb_libvulkan_24b84_c1        (521 bytes x86)
+[PASS  ] bb_libvulkan_24b84_c2        (521 bytes x86)
+[SKIP  ] bb_libvulkan_24ba4_c0        reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libvulkan_24ba4_c1        reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libvulkan_24ba4_c2        reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libvulkan_24c60_c0        reference: unsupported insn 0x9e6702a0
+[SKIP  ] bb_libvulkan_24c60_c1        reference: unsupported insn 0x9e6702a0
+[SKIP  ] bb_libvulkan_24c60_c2        reference: unsupported insn 0x9e6702a0
+[SKIP  ] bb_libvulkan_33940_c0        reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libvulkan_33940_c1        reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libvulkan_33940_c2        reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libvulkan_37210_c0        reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libvulkan_37210_c1        reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libvulkan_37210_c2        reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libvulkan_37400_c0        reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libvulkan_37400_c1        reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libvulkan_37400_c2        reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libvulkan_37db8_c0        reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libvulkan_37db8_c1        reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libvulkan_37db8_c2        reference: unsupported insn 0x9e6702c0
+[PASS  ] bb_libvulkan_37e34_c0        (266 bytes x86)
+[PASS  ] bb_libvulkan_37e34_c1        (266 bytes x86)
+[PASS  ] bb_libvulkan_37e34_c2        (266 bytes x86)
+[SKIP  ] bb_libvulkan_37ea8_c0        reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libvulkan_37ea8_c1        reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libvulkan_37ea8_c2        reference: unsupported insn 0x9e290009
+
+summary: 9 PASS, 0 FAIL, 33 SKIP, 0 DBTERR

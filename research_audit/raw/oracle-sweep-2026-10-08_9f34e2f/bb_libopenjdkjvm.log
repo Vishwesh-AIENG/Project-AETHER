@@ -1,0 +1,8 @@
+=== AETHER dbt-oracle — 3 block(s) ===
+    reference engine: hand-written ARM64 interpreter (independent of DBT)
+
+[SKIP  ] bb_libopenjdkjvm_1263c_c0    reference: unsupported insn 0x00000000
+[SKIP  ] bb_libopenjdkjvm_1263c_c1    reference: unsupported insn 0x00000000
+[SKIP  ] bb_libopenjdkjvm_1263c_c2    reference: unsupported insn 0x00000000
+
+summary: 0 PASS, 0 FAIL, 3 SKIP, 0 DBTERR

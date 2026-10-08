@@ -1,0 +1,9 @@
+# cmd: aether-dbt-bench translate simd_from_framework.txt trace_insns.txt
+corpus_files=2 distinct_blocks=30375 arm_insns=30375 mean_insns_per_block=1.00
+translate_ok=29646 translate_failed=729 stat_blocks_translated=29646 decode_fail=1458 lift_fail=0 lower_fail=0 x86_bytes_live=2953666 warm_hits=29646 warm_hit_rate=0.9760
+expansion_x86_bytes_per_arm_insn=99.63 (approx: code_buf may reset when full)
+cold_translate_blocks_per_s: N=5 mean=1865694.8 median=1805180.8 min=1468967.8 max=2226732.8 sd=338216.2 [blocks/s]
+cold_translate_arm_insns_per_s: N=5 mean=1865694.8 median=1805180.8 min=1468967.8 max=2226732.8 sd=338216.2 [insns/s]
+cold_translate_ns_per_block: N=5 mean=550.5 median=554.0 min=449.1 max=680.8 sd=100.5 [ns]
+warm_cache_hit_ns_per_lookup: N=5 mean=45.2 median=43.6 min=32.8 max=65.9 sd=12.7 [ns]
+warm_cache_hit_lookups_per_s: N=5 mean=23397637.2 median=22921881.5 min=15173115.9 max=30526533.7 sd=5761375.2 [lookups/s]

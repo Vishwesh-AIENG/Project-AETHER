@@ -1,0 +1,43 @@
+==> qemu-system-aarch64 -machine virt,gic-version=3,virtualization=on -cpu max -m 4G -smp 4 -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd -drive if=none,id=hd0,format=raw,file=fat:rw:/tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/qemu/efi -device virtio-blk-pci,drive=hd0,bootindex=0 -device loader,file=_kernel_new,addr=0x40800000,force-raw=on -serial file:/tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/qemu/arm-serial.log -display none -monitor none -no-reboot -device loader,file=qemu/initrd-proof.cpio,addr=0x44100000,force-raw=on
+==> serial quiet 45s; stopping
+==> serial log 5660 bytes; tail:
+[    0.000000][    T0] Initmem setup node 0 [mem 0x0000000040000000-0x00000000bfdfffff]
+[    0.000000][    T0] On node 0, zone DMA32: 512 pages in unavailable ranges
+[    0.000000][    T0] cma: Reserved 16 MiB at 0x00000000bc800000
+[    0.000000][    T0] psci: probing for conduit method from DT.
+[    0.000000][    T0] psci: PSCIv2.0 detected in firmware.
+[    0.000000][    T0] psci: Using standard PSCI v0.2 function IDs
+[    0.000000][    T0] psci: Trusted OS migration not required
+[    0.000000][    T0] psci: SMC Calling Convention v1.0
+[    0.000000][    T0] 'bootconfig' found on command line, but no bootconfig found
+[    0.000000][    T0] percpu: Embedded 30 pages/cpu s85544 r8192 d29144 u122880
+[    0.000000][    T0] Detected PIPT I-cache on CPU0
+[    0.000000][    T0] CPU features: SYS_ID_AA64MMFR1_EL1[11:8]: forced to 0
+[    0.000000][    T0] Internal error: Oops - Undefined instruction: 0000000002000000 [#1] PREEMPT SMP
+[    0.000000][    T0] Modules linked in:
+[    0.000000][    T0] CPU: 0 PID: 0 Comm: swapper Not tainted 6.1.79-g2dca19b0a7e6-dirty #1
+[    0.000000][    T0] Hardware name: aether,android-partition (DT)
+[    0.000000][    T0] pstate: 004000c5 (nzcv daIF +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[    0.000000][    T0] pc : sme_kernel_enable+0x4/0x40
+[    0.000000][    T0] lr : read_smcr_features+0x14/0x40
+[    0.000000][    T0] sp : ffffffdb24a33d80
+[    0.000000][    T0] x29: ffffffdb24a33d80 x28: 0000000000000018 x27: 0000000000000020
+[    0.000000][    T0] x26: 0000000000000001 x25: ffffffdb2453c550 x24: ffffffdb241355e8
+[    0.000000][    T0] x23: ffffffdb24a4eb20 x22: ffffffdb241330a8 x21: ffffffdb24132e18
+[    0.000000][    T0] x20: 0000000000000027 x19: ffffffdb24c14148 x18: ffffffffffffffff
+[    0.000000][    T0] x17: 000000000001e000 x16: 0000000000000000 x15: ffffffdb24a33820
+[    0.000000][    T0] x14: 0000000000000000 x13: 8000000000000000 x12: 0000000000000000
+[    0.000000][    T0] x11: 0000000000000000 x10: 0000000000000000 x9 : 0000000000000000
+[    0.000000][    T0] x8 : 0000000000000000 x7 : 0000000000000000 x6 : 0000000000000000
+[    0.000000][    T0] x5 : ffffffdb2463d020 x4 : ffffffdb232244c0 x3 : 0000000000000010
+[    0.000000][    T0] x2 : 0000000000000027 x1 : 0000000000180420 x0 : 0000000000000000
+[    0.000000][    T0] Call trace:
+[    0.000000][    T0]  sme_kernel_enable+0x4/0x40
+[    0.000000][    T0]  init_cpu_features+0x270/0x2fc
+[    0.000000][    T0]  cpuinfo_store_boot_cpu+0x4c/0x5c
+[    0.000000][    T0]  smp_prepare_boot_cpu+0x30/0x40
+[    0.000000][    T0]  start_kernel+0x474/0x9e0
+[    0.000000][    T0]  __primary_switched+0xbc/0xc4
+[    0.000000][    T0] Code: 17fffff4 d503201f d503201f d503233f (d5381280) 
+[    0.000000][    T0] ---[ end trace 0000000000000000 ]---
+[    0.000000][    T0] Kernel panic - not syncing: Oops - Undefined instruction: Fatal exception

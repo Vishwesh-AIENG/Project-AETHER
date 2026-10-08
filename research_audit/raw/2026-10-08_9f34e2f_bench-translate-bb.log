@@ -1,0 +1,10 @@
+# cmd: aether-dbt-bench translate bb_*.txt (native linux x86_64, release opt-level=s lto)
+# host: Model name: Intel(R) Xeon(R) Processor @ 2.10GHz, nproc=4, date=2026-10-08T09:50:17Z
+corpus_files=13 distinct_blocks=4958 arm_insns=26332 mean_insns_per_block=5.31
+translate_ok=4879 translate_failed=79 stat_blocks_translated=4879 decode_fail=294 lift_fail=0 lower_fail=0 x86_bytes_live=1789855 warm_hits=4879 warm_hit_rate=0.9841
+expansion_x86_bytes_per_arm_insn=69.05 (approx: code_buf may reset when full)
+cold_translate_blocks_per_s: N=5 mean=566468.3 median=580400.3 min=515064.8 max=613695.7 sd=38585.1 [blocks/s]
+cold_translate_arm_insns_per_s: N=5 mean=3008520.3 median=3082513.3 min=2735515.7 max=3259345.3 sd=204925.8 [insns/s]
+cold_translate_ns_per_block: N=5 mean=1772.0 median=1722.9 min=1629.5 max=1941.5 sd=122.6 [ns]
+warm_cache_hit_ns_per_lookup: N=5 mean=37.3 median=33.2 min=31.9 max=50.9 sd=8.0 [ns]
+warm_cache_hit_lookups_per_s: N=5 mean=27679543.6 median=30108702.3 min=19654480.7 max=31343840.3 sd=4957410.3 [lookups/s]

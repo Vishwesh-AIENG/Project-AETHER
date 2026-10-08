@@ -1,0 +1,24 @@
+UEFI firmware (version 2024.02-2ubuntu0.10 built at 15:40:28 on Sep 23 2026)
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0)
+BdsDxe: starting Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0)
+
+======================================
+  AETHER Hypervisor starting...      
+======================================
+  CurrentEL: EL2
+  EL2 detected
+  ExitBootServices...
+  ExitBootServices: OK
+  EL2 page tables: AETHER-owned at 0x000000013c75b000 (firmware SCTLR_EL2=0x000000000000100d)
+  Conventional RAM: 4090 MiB
+  Largest region PA: 0x00000000c0000000  size: 1991 MiB
+  Stage 2 tables: OK
+  S2 root PA: 0x00000000c0000000
+  Exception vectors: OK
+  HCR_EL2   = 0x00000008807d663f
+  VTTBR_EL2 = 0x00010000c0000000
+  VTCR_EL2  = 0x0000000080053558
+  GIC via ACPI MADT — GICD=0x0000000008000000 GICR=0x00000000080a0000
+  CPUs: 8 (MADT enabled GICC entries)
+
+[EL2] FAULT AT EL2  ESR=0x0000000096000010 EC=0x0000000000000025 ELR=0x000000013c71e648 SPSR=0x00000000800003c9 FAR=0x00000000080c0014

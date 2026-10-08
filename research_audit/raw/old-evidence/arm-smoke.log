@@ -1,0 +1,29 @@
+UEFI firmware (version edk2-stable202408-prebuilt.qemu.org built at 16:28:50 on Sep 12 2024)
+ArmTrngLib could not be correctly initialized.
+Error: Image at 0013FD66000 start failed: Not Found
+Error: Image at 0013FC8E000 start failed: Unsupported
+Error: Image at 0013FC13000 start failed: Not Found
+Tpm2SubmitCommand - Tcg2 - Not Found
+Tpm2GetCapabilityPcrs fail!
+Tpm2SubmitCommand - Tcg2 - Not Found
+Image type X64 can't be loaded on AARCH64 UEFI system.
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI Misc Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,003E000A00000000)
+ConvertPages: failed to find range 140000000 - 14002EFFF
+BdsDxe: starting Boot0001 "UEFI Misc Device" from VenHw(837DCA9E-E874-4D82-B29A-23FE0E23D1E2,003E000A00000000)
+
+======================================
+  AETHER Hypervisor starting...      
+======================================
+  CurrentEL: EL2
+  EL2 detected
+  ExitBootServices...
+  ExitBootServices: OK
+  Conventional RAM: 4090 MiB
+  Largest region PA: 0x0000000048000000  size: 3910 MiB
+  Stage 2 tables: OK
+  S2 root PA: 0x0000000048000000
+  Exception vectors: OK
+  HCR_EL2   = 0x00000008807d663f
+  VTTBR_EL2 = 0x0001000048000000
+  VTCR_EL2  = 0x0000000080053558
+  GIC via ACPI MADT — GICD=0x0000000008000000 GICR=0x00000000080a0000

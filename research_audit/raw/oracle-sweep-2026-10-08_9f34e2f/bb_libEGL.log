@@ -1,0 +1,53 @@
+=== AETHER dbt-oracle — 48 block(s) ===
+    reference engine: hand-written ARM64 interpreter (independent of DBT)
+
+[SKIP  ] bb_libEGL_21b6c_c0           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_21b6c_c1           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_21b6c_c2           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_21b8c_c0           reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libEGL_21b8c_c1           reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libEGL_21b8c_c2           reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libEGL_21ccc_c0           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_21ccc_c1           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_21ccc_c2           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_21cec_c0           reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libEGL_21cec_c1           reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libEGL_21cec_c2           reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libEGL_233f0_c0           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libEGL_233f0_c1           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libEGL_233f0_c2           reference: unsupported insn 0x9e6702c0
+[PASS  ] bb_libEGL_234b8_c0           (266 bytes x86)
+[PASS  ] bb_libEGL_234b8_c1           (266 bytes x86)
+[PASS  ] bb_libEGL_234b8_c2           (266 bytes x86)
+[SKIP  ] bb_libEGL_234e4_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libEGL_234e4_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libEGL_234e4_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libEGL_2354c_c0           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libEGL_2354c_c1           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libEGL_2354c_c2           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libEGL_26d0c_c0           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libEGL_26d0c_c1           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libEGL_26d0c_c2           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libEGL_27324_c0           reference: unsupported insn 0x9e670320
+[SKIP  ] bb_libEGL_27324_c1           reference: unsupported insn 0x9e670320
+[SKIP  ] bb_libEGL_27324_c2           reference: unsupported insn 0x9e670320
+[PASS  ] bb_libEGL_2749c_c0           (266 bytes x86)
+[PASS  ] bb_libEGL_2749c_c1           (266 bytes x86)
+[PASS  ] bb_libEGL_2749c_c2           (266 bytes x86)
+[SKIP  ] bb_libEGL_274c8_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libEGL_274c8_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libEGL_274c8_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libEGL_27540_c0           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libEGL_27540_c1           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libEGL_27540_c2           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libEGL_38ed4_c0           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_38ed4_c1           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_38ed4_c2           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_39168_c0           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_39168_c1           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_39168_c2           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_3949c_c0           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_3949c_c1           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libEGL_3949c_c2           reference: unsupported insn 0x9e670100
+
+summary: 6 PASS, 0 FAIL, 42 SKIP, 0 DBTERR

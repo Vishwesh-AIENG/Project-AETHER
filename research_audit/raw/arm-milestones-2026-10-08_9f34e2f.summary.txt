@@ -1,0 +1,48 @@
+mode=aether smp=4 runs=5
+  aether_start   reached 5/5  median=  5.801s  min=  5.796  max=  6.357
+  el2_detected   reached 5/5  median=  5.801s  min=  5.796  max=  6.358
+  stage2_ok      reached 5/5  median=  5.809s  min=  5.796  max=  6.358
+  hyp_ready      reached 5/5  median=  5.809s  min=  5.796  max=  6.358
+  eret_to_el1    reached 5/5  median=  5.854s  min=  5.809  max=  6.358
+  kernel_entry   reached 5/5  median=  5.904s  min=  5.860  max=  6.408
+  smp_up         reached 5/5  median=  8.379s  min=  8.023  max=  8.679
+  free_initmem   reached 5/5  median= 11.717s  min= 11.013  max= 12.464
+  userspace      reached 5/5  median= 11.818s  min= 11.164  max= 12.564
+  online_cpus    reached 5/5  median= 11.818s  min= 11.164  max= 12.564
+  proof_done     reached 5/5  median= 12.979s  min= 12.275  max= 13.681
+mode=direct smp=4 runs=5
+  aether_start   reached 0/5
+  el2_detected   reached 0/5
+  stage2_ok      reached 0/5
+  hyp_ready      reached 0/5
+  eret_to_el1    reached 0/5
+  kernel_entry   reached 5/5  median=  0.202s  min=  0.152  max=  0.203
+  smp_up         reached 5/5  median=  1.612s  min=  1.511  max=  1.663
+  free_initmem   reached 5/5  median=  4.844s  min=  4.642  max=  5.817
+  userspace      reached 5/5  median=  4.995s  min=  4.743  max=  5.969
+  online_cpus    reached 5/5  median=  4.995s  min=  4.794  max=  5.969
+  proof_done     reached 5/5  median=  6.156s  min=  5.958  max=  7.131
+mode=aether smp=1 runs=5
+  aether_start   reached 5/5  median=  5.706s  min=  5.696  max=  5.799
+  el2_detected   reached 5/5  median=  5.706s  min=  5.696  max=  5.799
+  stage2_ok      reached 5/5  median=  5.746s  min=  5.698  max=  5.850
+  hyp_ready      reached 5/5  median=  5.756s  min=  5.698  max=  5.850
+  eret_to_el1    reached 5/5  median=  5.756s  min=  5.698  max=  5.850
+  kernel_entry   reached 5/5  median=  5.756s  min=  5.746  max=  5.900
+  smp_up         reached 5/5  median=  6.412s  min=  6.303  max=  6.557
+  free_initmem   reached 5/5  median=  9.785s  min=  9.630  max=  9.985
+  userspace      reached 5/5  median=  9.835s  min=  9.731  max= 10.086
+  online_cpus    reached 5/5  median=  9.835s  min=  9.731  max= 10.137
+  proof_done     reached 5/5  median= 10.945s  min= 10.840  max= 11.196
+mode=direct smp=1 runs=5
+  aether_start   reached 0/5
+  el2_detected   reached 0/5
+  stage2_ok      reached 0/5
+  hyp_ready      reached 0/5
+  eret_to_el1    reached 0/5
+  kernel_entry   reached 5/5  median=  0.152s  min=  0.152  max=  0.205
+  smp_up         reached 5/5  median=  0.557s  min=  0.555  max=  0.706
+  free_initmem   reached 5/5  median=  4.544s  min=  4.188  max=  4.598
+  userspace      reached 5/5  median=  4.695s  min=  4.339  max=  4.750
+  online_cpus    reached 5/5  median=  4.695s  min=  4.390  max=  4.750
+  proof_done     reached 5/5  median=  5.856s  min=  5.501  max=  5.909

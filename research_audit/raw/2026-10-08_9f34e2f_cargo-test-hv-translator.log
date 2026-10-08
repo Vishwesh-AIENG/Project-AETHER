@@ -1,0 +1,2256 @@
+# cmd: cargo +nightly test -p hypervisor -p aether-translator
+# tree: aether-files dump == sandbox/aether-translator@9f34e2f (+untracked)
+# host: Linux 6.18.44-fc-v80 x86_64; Model name: Intel(R) Xeon(R) Processor @ 2.10GHz; nproc=4
+# rustc: rustc 1.101.0-nightly (1d81eb4ad 2026-10-07)
+# start: 2026-10-08T09:38:39Z
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded autocfg v1.5.0
+  Downloaded errno v0.3.14
+  Downloaded rand_xorshift v0.4.0
+  Downloaded unarray v0.1.4
+  Downloaded rand_core v0.9.5
+  Downloaded quick-error v1.2.3
+  Downloaded wait-timeout v0.2.1
+  Downloaded bit-set v0.8.0
+  Downloaded cfg-if v1.0.4
+  Downloaded fastrand v2.4.1
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded fnv v1.0.7
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded rand_chacha v0.9.0
+  Downloaded shlex v1.3.0
+  Downloaded static_assertions v1.1.0
+  Downloaded bit-vec v0.8.0
+  Downloaded bitflags v2.11.1
+  Downloaded tempfile v3.27.0
+  Downloaded capstone v0.14.0
+  Downloaded num-traits v0.2.19
+  Downloaded once_cell v1.21.4
+  Downloaded rusty-fork v0.3.1
+  Downloaded getrandom v0.3.4
+  Downloaded getrandom v0.4.2
+  Downloaded cc v1.2.62
+  Downloaded rand v0.9.4
+  Downloaded proptest v1.11.0
+  Downloaded zerocopy v0.8.48
+  Downloaded regex-syntax v0.8.10
+  Downloaded rustix v1.1.4
+  Downloaded libc v0.2.186
+  Downloaded linux-raw-sys v0.12.1
+  Downloaded capstone-sys v0.18.0
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling find-msvc-tools v0.1.9
+   Compiling zerocopy v0.8.48
+   Compiling rustix v1.1.4
+   Compiling shlex v1.3.0
+   Compiling getrandom v0.4.2
+   Compiling cc v1.2.62
+   Compiling linux-raw-sys v0.12.1
+   Compiling bitflags v2.11.1
+   Compiling autocfg v1.5.0
+   Compiling num-traits v0.2.19
+   Compiling rand_core v0.9.5
+   Compiling capstone-sys v0.18.0
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.4.1
+   Compiling wait-timeout v0.2.1
+   Compiling tempfile v3.27.0
+   Compiling bit-vec v0.8.0
+   Compiling quick-error v1.2.3
+   Compiling fnv v1.0.7
+   Compiling aether-translator v0.0.1 (/home/user/aether-files/aether-translator)
+   Compiling bit-set v0.8.0
+   Compiling rusty-fork v0.3.1
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling static_assertions v1.1.0
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.10
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling hypervisor v0.1.0 (/home/user/aether-files/hypervisor)
+   Compiling proptest v1.11.0
+   Compiling capstone v0.14.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.67s
+     Running unittests src/lib.rs (target/debug/build/aether-translator/0efb66eccd7fef47/out/aether_translator-0efb66eccd7fef47)
+
+running 120 tests
+test backend::code_buf::at15_tests::at15_commit_promotes_to_rx ... ok
+test backend::code_buf::at15_tests::at15_alloc_block_then_commit_makes_block_committed ... ok
+test backend::code_buf::at15_tests::at15_capacity_at_least_as_large_as_requested ... ok
+test backend::code_buf::at15_tests::at15_committed_bytes_match_emitted ... ok
+test backend::code_buf::at15_tests::at15_dirty_after_emit ... ok
+test backend::code_buf::at15_tests::at15_emit_after_commit_returns_to_rw ... ok
+test backend::code_buf::at15_tests::at15_emit_bytes_advances_written_len ... ok
+test backend::code_buf::at15_tests::at15_executable_after_commit ... ok
+test backend::code_buf::at15_tests::at15_initial_protection_is_rw ... ok
+test backend::code_buf::at15_tests::at15_invalidate_increments_generation ... ok
+test backend::code_buf::at15_tests::at15_invalidate_marks_block_uncommitted ... ok
+test backend::code_buf::at15_tests::at15_invalidate_nonexistent_pc_is_noop ... ok
+test backend::code_buf::at15_tests::at15_lookup_guest_pc_finds_committed_block ... ok
+test backend::code_buf::at15_tests::at15_mfence_encoding_survives_commit ... ok
+test backend::code_buf::at15_tests::at15_multiple_blocks_lookup ... ok
+test backend::code_buf::at15_tests::at15_new_buf_is_empty ... ok
+test backend::code_buf::at15_tests::at15_not_executable_when_dirty ... ok
+test backend::code_buf::at15_tests::at15_overflow_returns_error ... ok
+test backend::code_buf::at15_tests::at15_reinject_after_invalidate_succeeds ... ok
+test backend::code_buf::at15_tests::at15_reset_allows_fresh_emit ... ok
+test backend::code_buf::at15_tests::at15_reset_clears_all_state ... ok
+test backend::code_buf::at15_tests::at15_smc_1m_iterations_structural ... ignored
+test backend::code_buf::at15_tests::at15_not_dirty_after_commit ... ok
+test backend::code_buf::at15_tests::at15_smc_generation_advances_after_cycle ... ok
+test backend::code_buf::at15_tests::at15_smc_single_cycle_succeeds ... ok
+test backend::code_buf::at15_tests::at15_uncommitted_block_not_returned_by_lookup ... ok
+test backend::code_buf::at15_tests::at15_two_blocks_committed ... ok
+test backend::encode::tests::fma3_vfmadd213ps_vex_encoding ... ok
+test backend::code_buf::at15_tests::at15_xor_rax_rax_ret_survives_commit ... ok
+test backend::encode::tests::fma3_vfmadd213ss_vex_encoding ... ok
+test decoder::branch_sys::tests::drps_is_not_eret ... ok
+test backend::encode::tests::strb_high_reg_forces_rex ... ok
+test decoder::branch_sys::tests::eret_decodes ... ok
+test decoder::branch_sys::tests::ret_still_decodes ... ok
+test decoder::branch_sys::tests::retaa_retab_target_implicit_x30 ... ok
+test decoder::sysreg::tests::known_named_regs ... ok
+test decoder::sysreg::tests::packed_id_roundtrip ... ok
+test decoder::sysreg::tests::unknown_named_returns_other_known ... ok
+test lift::tests::lift_add_imm_x1_x1_1 ... ok
+test lift::tests::lift_and_imm_sp_dest_writes_sp ... ok
+test decoder::branch_sys::tests::eretaa_is_not_plain_eret ... ok
+test lift::tests::lift_b_writes_pc ... ok
+test lift::tests::lift_bl_sets_x30 ... ok
+test lift::tests::lift_eret_emits_eret_runtime_call ... ok
+test lift::tests::lift_ldaprb_zero_extending_load ... ok
+test lift::tests::lift_ldr_byte_fp_lands_in_vreg_not_gpr ... ok
+test lift::tests::lift_ldr_x0_x1 ... ok
+test lift::tests::lift_ngc_decodes_and_preserves_nzcv ... ok
+test lift::tests::lift_nop_emits_hint ... ok
+test lift::tests::lift_str_half_fp_extracts_lane_not_gpr ... ok
+test lift::tests::lift_subs_xzr_x1_1_sets_flags ... ok
+test lift::tests::lift_svc_stages_return_pc_then_svc ... ok
+test lift::tests::lift_swp_sp_base_reads_sp_not_xzr ... ok
+test runtime::crypto_rt::tests::crc32_iso_is_incremental ... ok
+test runtime::crypto_rt::tests::crc32_iso_matches_bit_serial_reference ... ok
+test runtime::crypto_rt::tests::sha256_abc_via_crypto_ops ... ok
+test lift::tests::lift_ldar_sp_base_reads_sp_not_xzr ... ok
+test runtime::crypto_rt::tests::schedule_via_su0_su1_matches_reference ... ok
+test runtime::exceptions::tests::abort_ec_follows_source_el_not_far ... ok
+test runtime::exceptions::tests::eret_to_el0_then_entry_banks_sp ... ok
+test runtime::exceptions::tests::eret_to_el1h_no_swap_restores_pstate ... ok
+test runtime::exceptions::tests::inject_fixes_abort_ec_for_source_el ... ok
+test runtime::exceptions::tests::inject_data_abort_sets_every_field ... ok
+test runtime::exceptions::tests::inject_irq_uses_irq_vector ... ok
+test runtime::exceptions::tests::inject_then_eret_roundtrips_pc_and_nzcv ... ok
+test runtime::exceptions::tests::inject_then_full_eret_roundtrips ... ok
+test runtime::exceptions::tests::irq_mask_gate ... ok
+test runtime::exceptions::tests::svc_enter_injects_sync_with_ec_0x15 ... ok
+test runtime::exceptions::tests::take_pending_abort_consumes_and_clears ... ok
+test runtime::exceptions::tests::vector_offset_selects_group_and_type ... ok
+test runtime::gic::tests::disabled_or_wrong_group_not_signalled ... ok
+test runtime::gic::tests::eoimode_split_requires_dir_to_deactivate ... ok
+test runtime::gic::tests::group1_enable_gates_signalling ... ok
+test runtime::gic::tests::highest_priority_wins_among_pending ... ok
+test runtime::gic::tests::nothing_signalled_when_idle ... ok
+test runtime::gic::tests::pmr_masks_lower_priority ... ok
+test runtime::gic::tests::raise_then_signal_ack_eoi_lifecycle ... ok
+test runtime::mmu::tests::clamp_rejects_out_of_window_leaf ... ok
+test runtime::mmu::tests::clamp_rejects_out_of_window_table_base ... ok
+test runtime::mmu::tests::esr_with_ec_rewrites_only_ec ... ok
+test runtime::mmu::tests::fault_invalid_descriptor ... ok
+test runtime::mmu::tests::fault_permission_on_write ... ok
+test runtime::mmu::tests::fault_access_flag ... ok
+test runtime::mmu::tests::fetch_fault_records_instruction_abort_esr ... ok
+test runtime::mmu::tests::fetch_flat_when_mmu_off ... ok
+test runtime::mmu::tests::fetch_walks_va_to_pa_and_reads_mapped_bytes ... ok
+test runtime::mmu::tests::flat_mmu_off_access_outside_window_faults_not_wild_rw ... ok
+test runtime::mmu::tests::walk_1g_block ... ok
+test runtime::mmu::tests::walk_2m_block ... ok
+test runtime::mmu::tests::walk_39bit_3level_start_l1 ... ok
+test runtime::mmu::tests::walk_4k_page ... ok
+test runtime::mmu::tests::walk_tbi_tagged_va_resolves_like_untagged ... ok
+test runtime::mmu::tests::xlate_flat_when_mmu_off ... ok
+test runtime::mmu::tests::xlate_spanning_contiguous_pages_ok ... ok
+test runtime::mmu::tests::xlate_spanning_discontiguous_load_gathers ... ok
+test runtime::mmu::tests::fault_unsupported_granule ... ok
+test runtime::mmu::tests::xlate_spanning_discontiguous_store_scatters ... ok
+test runtime::mmu::tests::xlate_tbi_tagged_and_untagged_share_tlb_entry ... ok
+test runtime::mmu::tests::xlate_ttbr0_asid_tag_isolates_forked_child ... ok
+test runtime::mmu::tests::xlate_walks_and_caches_then_faults_pending ... ok
+test runtime::psci::tests::affinity_info_boot_on_others_off ... ok
+test runtime::psci::tests::cpu_on_secondary_yields_action_and_already_on_for_boot ... ok
+test runtime::psci::tests::features_reports_supported_and_unsupported ... ok
+test runtime::psci::tests::migrate_info_type_is_mp ... ok
+test runtime::psci::tests::negative_codes_sign_extend_into_x0 ... ok
+test runtime::psci::tests::system_off_and_reset_actions ... ok
+test runtime::psci::tests::unknown_func_is_not_supported ... ok
+test runtime::psci::tests::version_is_1_1 ... ok
+test runtime::sysreg_rt::tests::cntvct_advances_with_set_now ... ok
+test runtime::sysreg_rt::tests::icc_sre_reads_as_set ... ok
+test runtime::sysreg_rt::tests::pending_irq_fires_when_timer_expires_and_gic_armed ... ok
+test runtime::sysreg_rt::tests::timer_ctl_cval_tval_roundtrip ... ok
+test runtime::timer::tests::condition_is_wrap_correct ... ok
+test runtime::timer::tests::disabled_timer_never_fires ... ok
+test runtime::timer::tests::fires_when_count_reaches_cval ... ok
+test runtime::timer::tests::imask_suppresses_irq_but_not_istatus ... ok
+test runtime::timer::tests::istatus_clears_when_cval_reprogrammed_ahead ... ok
+test runtime::timer::tests::tval_is_cval_minus_now_signed ... ok
+test runtime::mmu::tests::ttbr1_selected_by_va55 ... ok
+test backend::code_buf::at15_tests::at15_smc_1k_iterations_structural_fast ... ok
+
+test result: ok. 119 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/aes_block_ud2.rs (target/debug/build/aether-translator/5f59a0eaabc6aa19/out/aes_block_ud2-5f59a0eaabc6aa19)
+
+running 4 tests
+test aes_ctr_drbg_block_no_ud2 ... ok
+test fmov_high_half_decodes ... ok
+test ghash_block_no_ud2 ... ok
+test aes_ctr_block_no_ud2 ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at10_mem_order.rs (target/debug/build/aether-translator/4b4a6ec324b40655/out/at10_mem_order-4b4a6ec324b40655)
+
+running 9 tests
+test at10_dmb_ish_becomes_mfence ... ok
+test at10_dmb_ld_elided ... ok
+test at10_dmb_st_elided ... ok
+test at10_dmb_sy_becomes_mfence ... ok
+test at10_dsb_sy_becomes_mfence ... ok
+test at10_isb_becomes_cpuid ... ok
+test at10_load_acquire_becomes_plain_load ... ok
+test at10_store_release_gets_mfence ... ok
+test at10_sb_elided ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at11_encoder.rs (target/debug/build/aether-translator/2ec433c53709f2c5/out/at11_encoder-2ec433c53709f2c5)
+
+running 68 tests
+test at11_add_rax_imm8 ... ok
+test at11_add_rax_rcx ... ok
+test at11_addpd ... ok
+test at11_addps ... ok
+test at11_aesenc ... ok
+test at11_and_rsi_rdi ... ok
+test at11_bswap_rax ... ok
+test at11_bswap_r9 ... ok
+test at11_cmov_e_rax_rcx ... ok
+test at11_cmp_rax_rcx ... ok
+test at11_cpuid ... ok
+test at11_cqo ... ok
+test at11_isb_sequence ... ok
+test at11_jcc_z_rel32 ... ok
+test at11_jmp_r64 ... ok
+test at11_imul_rax_rcx ... ok
+test at11_lock_cmpxchg_mem64 ... ok
+test at11_jmp_r8 ... ok
+test at11_jmp_rel32_forward ... ok
+test at11_lock_xadd_mem64 ... ok
+test at11_lfence ... ok
+test at11_lzcnt_rax_rcx ... ok
+test at11_m4b6_byte_exact ... ok
+test at11_mfence ... ok
+test at11_mov_mem_r64_nodisp ... ok
+test at11_mov_r64_mem_disp8 ... ok
+test at11_mov_r64_mem_rax_nodisp ... ok
+test at11_mov_r64_rbp_nodisp ... ok
+test at11_mov_r64_rsp_mem ... ok
+test at11_mov_r8_rax ... ok
+test at11_mov_rax_imm32_42 ... ok
+test at11_mov_rax_imm32_zero ... ok
+test at11_mov_rax_r9 ... ok
+test at11_mov_rax_rcx ... ok
+test at11_mov_rcx_imm64 ... ok
+test at11_mov_rcx_rax ... ok
+test at11_movdqa_rr ... ok
+test at11_movsx_r64_r32 ... ok
+test at11_movzx_r64_mem8 ... ok
+test at11_movzx_r64_r8 ... ok
+test at11_mov_r10_imm64 ... ok
+test at11_mul_rsi ... ok
+test at11_neg_rbp ... ok
+test at11_nop ... ok
+test at11_not_rax ... ok
+test at11_or_r11_r12 ... ok
+test at11_pclmulqdq ... ok
+test at11_opcode_coverage_100pct ... ok
+test at11_pmulld ... ok
+test at11_paddd ... ok
+test at11_pshufb ... ok
+test at11_pxor ... ok
+test at11_ret ... ok
+test at11_ror_rcx_cl ... ok
+test at11_sar_rbx_cl ... ok
+test at11_setcc_z_al ... ok
+test at11_sfence ... ok
+test at11_shl_rax_cl ... ok
+test at11_shl_rax_imm8_3 ... ok
+test at11_shr_rdx_cl ... ok
+test at11_test_rdx_rdx ... ok
+test at11_sub_rcx_imm32 ... ok
+test at11_sub_rdx_rbx ... ok
+test at11_xchg_r64_mem64 ... ok
+test at11_xor_rax_rax ... ok
+test at11_xor_zero_r9d ... ok
+test at11_xor_zero_rax ... ok
+test at11_ud2 ... ok
+
+test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at12_int_lower.rs (target/debug/build/aether-translator/376846384e6c7a19/out/at12_int_lower-376846384e6c7a19)
+
+running 20 tests
+test at12_add_different_dst ... ok
+test at12_add_two_regs ... ok
+test at12_branch_patches_collected ... ok
+test at12_cbz_emits_test_jz ... ok
+test at12_cmp_flags ... ok
+test at12_const_i64_large ... ok
+test at12_hello_world_const_42 ... ok
+test at12_cpuid_passthrough ... ok
+test at12_hello_world_const_zero ... ok
+test at12_hello_world_full_pipeline ... ok
+test at12_load_spilled_addr_reloads_from_slot ... ok
+test at12_load_u64 ... ok
+test at12_load_u8_zero_extend ... ok
+test at12_mfence_passthrough ... ok
+test at12_neg ... ok
+test at12_sext_32_to_64 ... ok
+test at12_shr_imm_pipeline ... ok
+test at12_store_u64 ... ok
+test at12_sub ... ok
+test at12_xor_rax_rax ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at13_simd_ctx.rs (target/debug/build/aether-translator/e91898e368e316da/out/at13_simd_ctx-e91898e368e316da)
+
+running 36 tests
+test cnt_byte_no_ud2 ... ok
+test dup_general_broadcasts_no_ud2 ... ok
+test ext_extract_no_ud2 ... ok
+test fmov_d_from_x_no_ud2 ... ok
+test fmov_x_from_d_no_ud2 ... ok
+test ins_general_no_ud2 ... ok
+test fmov_s_from_w_no_ud2 ... ok
+test fp_scalar_no_ud2 ... ok
+test ld1r_replicate_no_ud2 ... ok
+test ldp_q_targets_fpr_not_gpr ... ok
+test init_block_simd_ops_no_ud2 ... ok
+test m4b6_add_v0_4s_byte_exact ... ok
+test m4b6_and_8b_dform_fixup ... ok
+test m4b6_cmeq_4s_uses_pcmpeqd ... ok
+test m4b6_cmgt_4s_uses_pcmpgtd ... ok
+test m4b6_cmhi_unsigned_byte_no_ud2 ... ok
+test m4b6_dc_zva_zeroes_block ... ok
+test m4b6_dc_cvac_stays_noop ... ok
+test m4b6_cmge_4s_invert_pcmpgt ... ok
+test m4b6_ldr_q0_x1 ... ok
+test m4b6_mul_8h_uses_pmullw ... ok
+test m4b6_str_q0_x1 ... ok
+test m4b6_orr_16b_uses_por ... ok
+test movi_resolves_immediate ... ok
+test m4b6_sub_2d_uses_psubq ... ok
+test mla_mls_no_ud2 ... ok
+test mul_long_no_translatefail_no_ud2 ... ok
+test rev64_no_ud2 ... ok
+test sha256_crypto_lifts_to_cryptosha256 ... ok
+test smov_x_byte_no_ud2 ... ok
+test stp_d_reads_fpr_not_gpr ... ok
+test strchr_block_ops_decode ... ok
+test umov_w_word_no_ud2 ... ok
+test umov_x_dword_no_ud2 ... ok
+test ushll_shift_left_long_no_ud2 ... ok
+test uaddlv_byte_no_ud2 ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at16_block_cache.rs (target/debug/build/aether-translator/8172c87282b82391/out/at16_block_cache-8172c87282b82391)
+
+running 9 tests
+test at16_flush_all_clears_both_generations ... ok
+test at16_generational_eviction_promotes_active ... ok
+test at16_insert_and_hit ... ok
+test at16_invalidate_removes_entry ... ok
+test at16_miss_returns_none ... ok
+test at16_load_factor_below_threshold_before_rotation ... ok
+test at16_stat_counters_monotone ... ok
+test at16_update_existing_entry ... ok
+test at16_hit_rate_gate_99pct ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/at17_dispatcher.rs (target/debug/build/aether-translator/d740ec6839a872f7/out/at17_dispatcher-d740ec6839a872f7)
+
+running 7 tests
+test at17_guest_pc_out_of_range ... ok
+test at17_cold_path_translates_nop ... ok
+test at17_cold_then_hot_hit ... ok
+test at17_hit_rate_after_many_lookups ... ok
+test at17_hot_path_max_branches_constant ... ok
+test at17_invalidate_forces_retranslation ... ok
+test at17_p99_latency_structural_gate ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at18_branch_chain.rs (target/debug/build/aether-translator/4f6174cafec1c768/out/at18_branch_chain-4f6174cafec1c768)
+
+running 7 tests
+test at18_gate_passes_when_all_settled_are_patchable ... ok
+test at18_direct_dispatches_counted_after_settle ... ok
+test at18_multiple_call_sites_independent ... ok
+test at18_settle_after_threshold ... ok
+test at18_target_change_resets_counter ... ok
+test at18_settle_threshold_value ... ok
+test at18_patchable_after_offsets_set ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at19_context.rs (target/debug/build/aether-translator/72bb0989c3a305fa/out/at19_context-72bb0989c3a305fa)
+
+running 17 tests
+test at19_bytes_as_slice_correct_size ... ok
+test at19_gpr_offset_zero ... ok
+test at19_gpr_read_write ... ok
+test at19_layout_constants_correct ... ok
+test at19_epilogue_contains_mov_opcode ... ok
+test at19_nzcv_offset ... ok
+test at19_pc_offset ... ok
+test at19_prologue_contains_mov_opcode ... ok
+test at19_restore_epilogue_non_empty ... ok
+test at19_round_trip_all_registers ... ok
+test at19_save_prologue_non_empty ... ok
+test at19_sp_offset ... ok
+test at19_sp_pc_nzcv_fields ... ok
+test at19_total_size ... ok
+test at19_vec_offset ... ok
+test at19_vec_read_write ... ok
+test at19_prologue_has_rex_w_prefix ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at1_canned_1000.rs (target/debug/build/aether-translator/abc84b0328ffd1f8/out/at1_canned_1000-abc84b0328ffd1f8)
+
+running 1 test
+test at1_canned_1000_vectors ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at1_capstone_fuzz.rs (target/debug/build/aether-translator/1a9b85827d51d48e/out/at1_capstone_fuzz-1a9b85827d51d48e)
+
+running 5 tests
+test at1_capstone_full_parity_smoke ... ignored, AT-1 full parity; un-ignore when lift fills + mnemonic formatter land
+test at1_capstone_no_panic_10k ... ok
+test at1_capstone_no_false_positives_5k ... ok
+test at1_capstone_validates_anchors ... ok
+test at1_capstone_coverage_report ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/at20_exception_forward.rs (target/debug/build/aether-translator/8659985a1aab6b7a/out/at20_exception_forward-8659985a1aab6b7a)
+
+running 16 tests
+test at20_align_gate_passes ... ok
+test at20_align_fault_produces_correct_iss ... ok
+test at20_bp_is_software_breakpoint ... ok
+test at20_db_is_breakpoint ... ok
+test at20_de_is_unknown ... ok
+test at20_esr_il_bit_set ... ok
+test at20_fault_vector_numbers ... ok
+test at20_esr_ec_field_correct_for_data_abort ... ok
+test at20_gp_is_data_abort ... ok
+test at20_esr_iss_preserved ... ok
+test at20_pf_data_gate_passes ... ok
+test at20_pf_instruction_fetch_is_insn_abort ... ok
+test at20_pf_present_write_is_permission_abort ... ok
+test at20_ss_is_data_abort ... ok
+test at20_ud_is_unknown ... ok
+test at20_pf_not_present_data_is_data_abort ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at21_aot.rs (target/debug/build/aether-translator/066ac61ab71cb25b/out/at21_aot-066ac61ab71cb25b)
+
+running 19 tests
+test at21_gate_fails_if_no_frames_recorded ... ok
+test at21_default_library_count_is_21 ... ok
+test at21_blocks_pretranslated_counter_increments ... ok
+test at21_config_aether_defaults_valid ... ok
+test at21_init_pipeline_succeeds ... ok
+test at21_gate_passes_after_good_frames ... ok
+test at21_library_list_contains_libvulkan ... ok
+test at21_library_list_contains_libart ... ok
+test at21_library_list_no_duplicates ... ok
+test at21_p99_99th_percentile_correct ... ok
+test at21_p99_gate_fails_above_target ... ok
+test at21_p99_gate_passes_below_target ... ok
+test at21_p99_no_samples_returns_max ... ok
+test at21_p99_single_sample ... ok
+test at21_p99_target_constant ... ok
+test at21_queue_capacity_constant ... ok
+test at21_queue_enqueue_and_pop ... ok
+test at21_queue_full_returns_error ... ok
+test at21_queue_invalid_lib_idx_returns_error ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at22_cache_persist.rs (target/debug/build/aether-translator/da0063e48c436ac6/out/at22_cache_persist-da0063e48c436ac6)
+
+running 19 tests
+test at22_config_zero_queue_depth_invalid ... ok
+test at22_crc32_deterministic ... ok
+test at22_config_aether_defaults_valid ... ok
+test at22_crc32_empty_input ... ok
+test at22_entry_new_fields ... ok
+test at22_gate_fails_below_reduction_target ... ok
+test at22_init_pipeline_succeeds ... ok
+test at22_nvme_lba_base_nonzero ... ok
+test at22_queue_depth_constant ... ok
+test at22_reduction_pct_100_pct ... ok
+test at22_crc32_known_value ... ok
+test at22_reduction_pct_80_pct ... ok
+test at22_spill_accumulates_block_count ... ok
+test at22_reduction_pct_zero_when_no_baseline ... ok
+test at22_reduction_pct_below_target ... ok
+test at22_spill_queue_enqueue_and_drain ... ok
+test at22_spill_queue_full_returns_error ... ok
+test at22_spill_then_restore_gate ... ok
+test at22_target_reduction_constant ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at23_smc_handler.rs (target/debug/build/aether-translator/d3594d96fda57672/out/at23_smc_handler-d3594d96fda57672)
+
+running 15 tests
+test at23_gate_fails_after_stale_execution ... ok
+test at23_init_pipeline_phase ... ok
+test at23_gate_passes_after_range_registered_and_no_stale ... ok
+test at23_config_aether_defaults_wx_strict ... ok
+test at23_range_count_correct ... ok
+test at23_rx_range_contains_pa ... ok
+test at23_rx_range_add_guest_pc_dedup ... ok
+test at23_rx_range_overlaps ... ok
+test at23_watcher_bind_to_nonexistent_range_fails ... ok
+test at23_watcher_bind_block_to_range ... ok
+test at23_watcher_duplicate_range_returns_error ... ok
+test at23_watcher_fault_outside_range_no_invalidation ... ok
+test at23_watcher_register_and_fault ... ok
+test at23_watcher_stale_execution_recorded ... ok
+test at23_write_fault_returns_pcs_and_clears_range ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at24_dbt_ffi.rs (target/debug/build/aether-translator/a08416255726cb79/out/at24_dbt_ffi-a08416255726cb79)
+
+running 25 tests
+test at24_check_dbt_present_detects_missing ... ok
+test at24_check_fex_absent_clean_input ... ok
+test at24_check_dbt_present_all_present ... ok
+test at24_audit_fails_when_fex_symbol_present ... ok
+test at24_check_fex_absent_detects_fex_init ... ok
+test at24_config_bump_arena_too_small_invalid ... ok
+test at24_config_jit_cache_too_small_invalid ... ok
+test at24_config_unaligned_jit_cache_invalid ... ok
+test at24_config_aether_defaults_valid ... ok
+test at24_config_overlapping_regions_invalid ... ok
+test at24_dbt_required_symbols_count ... ok
+test at24_dbt_symbols_all_prefixed ... ok
+test at24_fex_forbidden_symbols_count ... ok
+test at24_fex_symbols_all_prefixed ... ok
+test at24_gate_passes_after_elf_and_audit ... ok
+test at24_init_pipeline_phase_advances ... ok
+test at24_stub_load_elf_rejects_zero_pa ... ok
+test at24_stub_load_elf_rejects_zero_size ... ok
+test at24_stub_load_elf_valid_descriptor ... ok
+test at24_stub_shutdown_returns_ok ... ok
+test at24_translate_block_returns_ok_on_valid_arm64 ... ok
+test at24_stub_init_returns_ok ... ok
+test at24_dispatch_block_returns_ok_on_cached ... ok
+test at24_translate_block_fails_on_unknown_encoding ... ok
+test at24_version_nonzero ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/at25_forbidden_symbols.rs (target/debug/build/aether-translator/3d0a2e610801f5e7/out/at25_forbidden_symbols-3d0a2e610801f5e7)
+
+running 22 tests
+test at25_forbidden_list_contains_exit ... ok
+test at25_forbidden_list_contains_libc_start_main ... ok
+test at25_forbidden_list_contains_mmap ... ok
+test at25_forbidden_list_contains_malloc ... ok
+test at25_clean_nm_output_no_violations ... ok
+test at25_forbidden_list_contains_fopen ... ok
+test at25_forbidden_list_contains_pthread_create ... ok
+test at25_forbidden_list_nonempty ... ok
+test at25_forbidden_list_size_matches_ch52 ... ok
+test at25_gate_passes_clean_archive ... ok
+test at25_gate_struct_fails_on_malloc ... ok
+test at25_gate_struct_passes_on_clean_output ... ok
+test at25_gate_fails_dirty_archive ... ok
+test at25_nm_with_fopen_detected ... ok
+test at25_nm_with_malloc_detected ... ok
+test at25_no_false_positive_on_aether_write ... ok
+test at25_nm_with_multiple_violations_detected ... ok
+test at25_no_false_positive_on_malloc_trim ... ok
+test at25_nm_with_pthread_create_detected ... ok
+test at25_run_gate_clean_succeeds ... ok
+test at25_run_gate_empty_input_fails ... ok
+test at25_run_gate_dirty_fails ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at26_hello_world.rs (target/debug/build/aether-translator/6c90c90c87eee324/out/at26_hello_world-6c90c90c87eee324)
+
+running 20 tests
+test at26_config_aether_defaults_valid ... ok
+test at26_config_zero_jit_base_invalid ... ok
+test at26_config_tiny_cache_invalid ... ok
+test at26_block_limit_nonzero ... ok
+test at26_expected_uart_lines_four_entries ... ok
+test at26_gate_fails_with_libc_symbol ... ok
+test at26_gate_fails_without_hello ... ok
+test at26_gate_from_log_full_sequence ... ok
+test at26_gate_from_log_libc_symbol_fails ... ok
+test at26_gate_from_log_no_hello_fails ... ok
+test at26_gate_passes_after_full_sequence ... ok
+test at26_hello_world_expected_string ... ok
+test at26_init_pipeline_succeeds ... ok
+test at26_init_starts_with_clean_no_libc_flag ... ok
+test at26_mark_hello_observed_advances_phase ... ok
+test at26_process_block_translated_line ... ok
+test at26_process_dispatcher_start_line ... ok
+test at26_process_hello_world_line ... ok
+test at26_record_block_increments_counter ... ok
+test at26_uart_sigs_non_empty ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at27_bionic_libart.rs (target/debug/build/aether-translator/4068ec00dd6f1b70/out/at27_bionic_libart-4068ec00dd6f1b70)
+
+running 20 tests
+test at27_config_aether_defaults_valid ... ok
+test at27_default_config_interpret_only ... ok
+test at27_config_tiny_cache_invalid ... ok
+test at27_gate_fails_without_dalvikvm ... ok
+test at27_gate_fails_without_hello ... ok
+test at27_config_unaligned_jit_base_invalid ... ok
+test at27_gate_from_log_full ... ok
+test at27_gate_from_log_missing_hello ... ok
+test at27_gate_passes_after_full_sequence ... ok
+test at27_hello_dex_class_name ... ok
+test at27_hello_dex_classpath ... ok
+test at27_hello_dex_expected_output ... ok
+test at27_init_pipeline_succeeds ... ok
+test at27_mark_dalvikvm_started ... ok
+test at27_mark_hello_observed_triggers_gate ... ok
+test at27_mark_libart_loaded ... ok
+test at27_process_dalvikvm_start_line ... ok
+test at27_process_hello_line ... ok
+test at27_uart_sigs_non_empty ... ok
+test at27_process_libart_init_line ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at28_zygote_launch.rs (target/debug/build/aether-translator/6cf1f62794adc6be/out/at28_zygote_launch-6cf1f62794adc6be)
+
+running 20 tests
+test at28_config_aether_defaults_valid ... ok
+test at28_boot_completed_prop_name ... ok
+test at28_boot_timeout_nonzero ... ok
+test at28_config_zero_timeout_invalid ... ok
+test at28_fork_count_increments_per_zygote_line ... ok
+test at28_gate_fails_without_boot_completed ... ok
+test at28_gate_fails_without_logcat ... ok
+test at28_gate_fails_without_system_server ... ok
+test at28_gate_fails_without_zygote ... ok
+test at28_gate_from_log_empty_fails ... ok
+test at28_gate_from_log_full ... ok
+test at28_gate_from_log_missing_logcat_fails ... ok
+test at28_gate_passes_after_full_sequence ... ok
+test at28_init_pipeline_succeeds ... ok
+test at28_process_boot_completed_line ... ok
+test at28_process_logcat_alive_line ... ok
+test at28_process_system_server_line ... ok
+test at28_process_zygote_forked_line ... ok
+test at28_process_zygote_started_line ... ok
+test at28_uart_sigs_non_empty ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at29_app_compat_x86.rs (target/debug/build/aether-translator/d5648af5b97007e7/out/at29_app_compat_x86-d5648af5b97007e7)
+
+running 20 tests
+test at29_config_aether_defaults_valid ... ok
+test at29_attestation_only_bug_is_not_unresolved ... ok
+test at29_attestation_only_excluded_from_denominator ... ok
+test at29_config_min_pass_exceeds_total_invalid ... ok
+test at29_config_zero_total_invalid ... ok
+test at29_init_pipeline_succeeds ... ok
+test at29_gate_passes_after_full_run ... ok
+test at29_gate_fails_with_unresolved_bug ... ok
+test at29_gate_passes_after_resolving_bugs ... ok
+test at29_init_starts_with_no_unresolved_bugs ... ok
+test at29_min_pass_is_950 ... ok
+test at29_pass_rate_zero_with_no_tests ... ok
+test at29_process_app_pass_advances_phase ... ok
+test at29_process_harness_ready_line ... ok
+test at29_total_apps_is_1000 ... ok
+test at29_total_tested_counts_pass_plus_fail ... ok
+test at29_stats_pass_rate_949_fails ... ok
+test at29_stats_pass_rate_950_of_1000 ... ok
+test at29_uart_sigs_non_empty ... ok
+test at29_translation_failed_bug_is_not_attestation_only ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at2_ir_roundtrip.rs (target/debug/build/aether-translator/b8c259d0f3479229/out/at2_ir_roundtrip-b8c259d0f3479229)
+
+running 5 tests
+test at2_implemented_tags_unique ... ok
+test at2_every_implemented_variant_roundtrips ... ok
+test at2_tag_smoke ... ok
+test at2_every_variant_roundtrips ... ok
+test variant_tag_is_injective ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at30_perf_bench.rs (target/debug/build/aether-translator/29b14c873476b021/out/at30_perf_bench-29b14c873476b021)
+
+running 25 tests
+test at30_bench_score_fails_threshold ... ok
+test at30_bench_score_zero_native_returns_zero ... ok
+test at30_bench_score_ratio_exact ... ok
+test at30_bench_score_meets_threshold ... ok
+test at30_config_aether_defaults_valid ... ok
+test at30_config_threshold_above_one_invalid ... ok
+test at30_config_zero_baseline_invalid ... ok
+test at30_config_zero_int_threshold_invalid ... ok
+test at30_gate_fails_if_int_below_threshold ... ok
+test at30_gate_fails_without_suites_done ... ok
+test at30_gate_passes_after_all_three_suites ... ok
+test at30_init_pipeline_succeeds ... ok
+test at30_int_threshold_is_70_pct ... ok
+test at30_js_threshold_is_60_pct ... ok
+test at30_overall_geomean_zero_when_no_scores ... ok
+test at30_overall_geomean_all_at_threshold ... ok
+test at30_process_bench_start_line ... ok
+test at30_process_full_uart_sequence ... ok
+test at30_record_int_score_above_threshold ... ok
+test at30_record_js_score_above_threshold ... ok
+test at30_record_simd_score_above_threshold ... ok
+test at30_simd_threshold_is_80_pct ... ok
+test at30_record_int_score_below_threshold_fails_gate ... ok
+test at30_subtests_completed_counter ... ok
+test at30_uart_sigs_non_empty ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at3_neon_corpus.rs (target/debug/build/aether-translator/f647b88b30e358d0/out/at3_neon_corpus-f647b88b30e358d0)
+
+running 2 tests
+test at3_libcrypto_has_zero_unknowns ... ignored, AT-3 gate: needs corpus/libcrypto.so.aarch64 from a GSI extract; run with --features linux_corpus on a Linux host
+test at3_neon_compile_o_has_zero_unknowns ... ignored, AT-3 gate: needs aarch64-linux-gnu-gcc-compiled neon_compile.o; run with --features linux_corpus on a Linux host or via the corpus-gates CI lane
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at4_system_corpus.rs (target/debug/build/aether-translator/03a861ef64cabaa1/out/at4_system_corpus-03a861ef64cabaa1)
+
+running 2 tests
+test at4_bionic_libc_zero_unknowns ... ignored, AT-4 gate: needs corpus/libc.so.aarch64 from a GSI extract; run with --features linux_corpus on a Linux host
+test at4_vmlinux_zero_unknowns ... ignored, AT-4 gate: needs corpus/vmlinux-gki.aarch64 (decompressed GKI vmlinux); run with --features linux_corpus on a Linux host
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at5_aether_efi_corpus.rs (target/debug/build/aether-translator/400b99bc7f6d02bc/out/at5_aether_efi_corpus-400b99bc7f6d02bc)
+
+running 1 test
+test at5_audit_aether_arm64_efi ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at5_system_img.rs (target/debug/build/aether-translator/771d5ffffea0cb42/out/at5_system_img-771d5ffffea0cb42)
+
+running 1 test
+test at5_all_21_libs_zero_unknowns ... ignored, AT-5 gate: needs 21 AOT libs from a GSI extract; run scripts/fetch_gsi.sh then `cargo test --features linux_corpus`
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at6_ssa.rs (target/debug/build/aether-translator/bf751bc63d1159f0/out/at6_ssa-bf751bc63d1159f0)
+
+running 7 tests
+test at6_multiblock_def_reaches_successor ... ok
+test at6_corpus_no_reg_access ... ok
+test at6_nop_sequence ... ok
+test at6_verifier_accepts_empty_function ... ok
+test at6_single_block_no_reg_access_after_ssa ... ok
+test at6_load_store_sequence ... ok
+test at6_verifier_full_check ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at7_optimizer.rs (target/debug/build/aether-translator/df55fa83991788c3/out/at7_optimizer-df55fa83991788c3)
+
+running 9 tests
+test at7_const_fold_chain ... ok
+test at7_const_fold_add ... ok
+test at7_copy_prop_zext_same_width ... ok
+test at7_corpus_pipeline_non_increasing ... ok
+test at7_dce_removes_unused_const ... ok
+test at7_dce_keeps_side_effects ... ok
+test at7_semantic_equiv_const_fold ... ok
+test at7_pipeline_reduces_op_count ... ok
+test at7_semantic_equiv_dce_preserves_output ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at8_flag_elision.rs (target/debug/build/aether-translator/2bff8f351a72a7bd/out/at8_flag_elision-2bff8f351a72a7bd)
+
+running 4 tests
+test at8_flags_kept_when_consumed ... ok
+test at8_elision_flags_from_cmp_no_branch ... ok
+test at8_corpus_60pct_gate ... ok
+test at8_elision_on_straight_line_code ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at9_regalloc.rs (target/debug/build/aether-translator/6e284af99721232e/out/at9_regalloc-6e284af99721232e)
+
+running 5 tests
+test at9_empty_function_ok ... ok
+test at9_basic_allocation ... ok
+test at9_corpus_spill_gate ... ok
+test at9_every_value_assigned ... ok
+test at9_nop_sequence ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at_exec_proof.rs (target/debug/build/aether-translator/83fdb35108da8ca5/out/at_exec_proof-83fdb35108da8ca5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/at_step_a_pipeline.rs (target/debug/build/aether-translator/56e4d1bcdf8e8feb/out/at_step_a_pipeline-56e4d1bcdf8e8feb)
+
+running 8 tests
+test step_a_dispatch_cold_path_translates ... ok
+test step_a_counter_increments_per_block ... ok
+test step_a_dispatch_hits_cache_after_translate ... ok
+test step_a_rejects_empty_guest_mem ... ok
+test step_a_rejects_truncated_guest_mem ... ok
+test step_a_stops_at_branch_terminator ... ok
+test step_a_translates_a_single_ret ... ok
+test step_a_translates_arithmetic_then_ret ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/block_words.rs (target/debug/build/aether-translator/85e1c527980c0920/out/block_words-85e1c527980c0920)
+
+running 1 test
+test scan_block ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/leak_probe.rs (target/debug/build/aether-translator/edc246779d4a6140/out/leak_probe-edc246779d4a6140)
+
+running 8 tests
+test bisect_decode_only ... ok
+test bisect_decode_lift_reused ... ok
+test codebuf_alloc_block_is_bounded ... ok
+test bisect_codebuf_alloc_block ... ok
+test words_decode_ok ... ok
+test bisect_through_regalloc ... ok
+test bisect_through_encode ... ok
+test translate_block_leak_per_cold ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/phase_e_cgroup_unsafe.rs (target/debug/build/aether-translator/da7ec51dab194066/out/phase_e_cgroup_unsafe-da7ec51dab194066)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/phase_e_second_unsafe.rs (target/debug/build/aether-translator/1ecd5fb66002ad43/out/phase_e_second_unsafe-1ecd5fb66002ad43)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scan_libcrypto.rs (target/debug/build/aether-translator/417d4ea95f49afc3/out/scan_libcrypto-417d4ea95f49afc3)
+
+running 1 test
+test scan ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/build/hypervisor/09117abdeeb07e81/out/hypervisor-09117abdeeb07e81)
+
+running 1330 tests
+test acpi::tests::test_acpi_error_variants_distinct ... ok
+test acpi::tests::test_arm_timer_out_of_ppi_range_rejected ... ok
+test acpi::tests::test_compute_checksum_zero_for_zero_input ... ok
+test acpi::tests::test_fadt_arm_psci_hvc_flags_set ... ok
+test acpi::tests::test_end_to_end_table_set_all_checksums_valid ... ok
+test acpi::tests::test_arm_timer_default_validates ... ok
+test acpi::tests::test_fadt_build_valid_checksum ... ok
+test acpi::tests::test_fadt_hardware_reduced_flag_set ... ok
+test acpi::tests::test_fadt_total_length ... ok
+test acpi::tests::test_finalize_length_mismatch ... ok
+test acpi::tests::test_finalize_table_sets_checksum ... ok
+test acpi::tests::test_gic_its_entry_size_and_type ... ok
+test acpi::tests::test_gicc_entry_size_and_type ... ok
+test acpi::tests::test_gicc_mpidr_field_at_offset_68 ... ok
+test acpi::tests::test_gicd_entry_gic_v3 ... ok
+test acpi::tests::test_gicd_entry_invalid_version_rejected ... ok
+test acpi::tests::test_gicr_entry_size_and_type ... ok
+test acpi::tests::test_compute_checksum_makes_sum_zero ... ok
+test acpi::tests::test_gtdt_build_valid_checksum ... ok
+test acpi::tests::test_gtdt_timer_gsivs_round_trip ... ok
+test acpi::tests::test_gtdt_total_length ... ok
+test acpi::tests::test_iort_build_valid_checksum ... ok
+test acpi::tests::test_iort_min_length_constant ... ok
+test acpi::tests::test_madt_build_4_cores_valid ... ok
+test acpi::tests::test_madt_entry_lengths_match_spec ... ok
+test acpi::tests::test_madt_size_formula ... ok
+test acpi::tests::test_rsdp_both_checksums_valid ... ok
+test acpi::tests::test_rsdp_buffer_too_small ... ok
+test acpi::tests::test_rsdp_corrupted_extended_checksum_detected ... ok
+test acpi::tests::test_rsdp_signature_and_length ... ok
+test acpi::tests::test_rsdp_xsdt_address_round_trip ... ok
+test acpi::tests::test_signature_constants_are_4_chars ... ok
+test acpi::tests::test_table_set_size_4_cores ... ok
+test acpi::tests::test_table_set_too_many_cores_fails ... ok
+test acpi::tests::test_table_set_validate_passes ... ok
+test acpi::tests::test_table_set_zero_cores_fails ... ok
+test acpi::tests::test_verify_checksum_fail ... ok
+test acpi::tests::test_verify_checksum_pass ... ok
+test acpi::tests::test_write_header_basic_fields ... ok
+test acpi::tests::test_xsdt_addresses_round_trip ... ok
+test acpi::tests::test_xsdt_build_and_verify ... ok
+test acpi::tests::test_xsdt_null_address_rejected ... ok
+test acpi::tests::test_xsdt_size_matches_formula ... ok
+test adreno_render::tests::aether_defaults_validates_ok ... ok
+test adreno_render::tests::aosp_build_vars_has_board_gpu_drivers ... ok
+test adreno_render::tests::aosp_build_vars_has_drm_hwcomposer ... ok
+test adreno_render::tests::aosp_product_packages_has_gralloc_v2_service ... ok
+test adreno_render::tests::aosp_product_packages_has_vulkan_freedreno ... ok
+test adreno_render::tests::contains_bytes_empty_haystack_nonempty_needle ... ok
+test adreno_render::tests::contains_bytes_empty_needle ... ok
+test adreno_render::tests::contains_bytes_exact_match ... ok
+test adreno_render::tests::contains_bytes_needle_longer_than_haystack ... ok
+test adreno_render::tests::contains_bytes_not_found ... ok
+test adreno_render::tests::contains_bytes_prefix ... ok
+test adreno_render::tests::contains_bytes_substring ... ok
+test adreno_render::tests::defconfig_fb_is_disabled ... ok
+test adreno_render::tests::defconfig_has_dmabuf_heaps_required ... ok
+test adreno_render::tests::defconfig_has_drm_msm_required ... ok
+test adreno_render::tests::defconfig_has_sync_file_required ... ok
+test adreno_render::tests::defconfig_no_empty_silent_failures ... ok
+test adreno_render::tests::empty_dma_heap_rejected ... ok
+test adreno_render::tests::empty_render_node_rejected ... ok
+test adreno_render::tests::gate_all_true_passes ... ok
+test adreno_render::tests::gate_gpu_visible_requires_vulkan ... ok
+test adreno_render::tests::gate_not_started_all_false ... ok
+test adreno_render::tests::gate_not_started_does_not_pass ... ok
+test adreno_render::tests::gate_two_of_three_does_not_pass ... ok
+test adreno_render::tests::gate_vulkan_only_does_not_pass ... ok
+test adreno_render::tests::gralloc_defaults_dma_heap ... ok
+test adreno_render::tests::gralloc_defaults_render_node ... ok
+test adreno_render::tests::gralloc_defaults_version_aidl2 ... ok
+test adreno_render::tests::icd_json_in_vendor_accepted ... ok
+test adreno_render::tests::icd_json_not_in_vendor_rejected ... ok
+test adreno_render::tests::init_pipeline_defaults_ok ... ok
+test adreno_render::tests::init_pipeline_invalid_config_errors ... ok
+test adreno_render::tests::phase_ordering_monotone ... ok
+test adreno_render::tests::process_drm_bound_advances_phase ... ok
+test adreno_render::tests::process_gate_passed_when_all_criteria_met ... ok
+test adreno_render::tests::process_gpu_compositing_advances_to_rendering_active ... ok
+test adreno_render::tests::process_gralloc_ready_advances_phase ... ok
+test adreno_render::tests::process_unknown_line_does_not_advance_phase ... ok
+test adreno_render::tests::process_vulkan_ready_sets_gate_flag ... ok
+test adreno_render::tests::proprietary_driver_rejected ... ok
+test adreno_render::tests::proprietary_hwc_with_open_driver_rejected ... ok
+test adreno_render::tests::selinux_all_rules_have_silent_failure ... ok
+test adreno_render::tests::selinux_has_gralloc_default_gpu_device ... ok
+test adreno_render::tests::software_fallback_hwc_rejected ... ok
+test adreno_render::tests::vulkan_api_0_x_rejected ... ok
+test adreno_render::tests::vulkan_api_1_0_rejected ... ok
+test adreno_render::tests::vulkan_api_1_1_accepted ... ok
+test adreno_render::tests::vulkan_defaults_icd_path ... ok
+test adreno_render::tests::vulkan_defaults_library_path ... ok
+test adreno_render::tests::vulkan_defaults_version_is_1_3 ... ok
+test adreno_render::tests::vulkan_library_not_in_vendor_rejected ... ok
+test aether_installer::tests::check_safety_blocks_apply_on_read_only ... ok
+test aether_installer::tests::check_safety_requires_apply_for_destructive ... ok
+test aether_installer::tests::defaults_validate ... ok
+test aether_installer::tests::destructive_classification ... ok
+test aether_installer::tests::gate_requires_all_six ... ok
+test aether_installer::tests::install_steps_are_strictly_ordered ... ok
+test aether_installer::tests::phase_is_monotonic ... ok
+test aether_installer::tests::safety_mode_byte_roundtrip ... ok
+test aether_installer::tests::step_count_matches_enum ... ok
+test aether_installer::tests::uart_scanner_walks_to_gate ... ok
+test aether_installer::tests::subcommand_name_roundtrip ... ok
+test aether_installer::tests::uart_signatures_are_unique ... ok
+test adreno_render::tests::process_hwc_ready_advances_phase ... ok
+test aether_installer::tests::validate_rejects_default_apply ... ok
+test aether_installer::tests::validate_rejects_network_allowed ... ok
+test aether_installer::tests::validate_rejects_tiny_disk_threshold ... ok
+test aether_manager::tests::check_manifest_accepts_aether_defaults ... ok
+test aether_manager::tests::check_manifest_accepts_non_aether_perm ... ok
+test aether_manager::tests::check_manifest_rejects_unknown_aether_perm ... ok
+test aether_manager::tests::check_manifest_rejects_wrong_install_path ... ok
+test aether_manager::tests::check_manifest_rejects_wrong_package ... ok
+test aether_manager::tests::check_manifest_rejects_wrong_sdk ... ok
+test aether_manager::tests::defaults_validate ... ok
+test aether_manager::tests::full_gate_walks_to_pass ... ok
+test aether_manager::tests::selinux_validation_rejects_missing_hvc ... ok
+test aether_manager::tests::selinux_validation_rejects_network_leak ... ok
+test android_boot::tests::finds_header_at_later_page ... ok
+test android_boot::tests::finds_header_at_offset_zero ... ok
+test android_boot::tests::rejects_too_small ... ok
+test android_boot::tests::not_found_when_no_magic ... ok
+test android_handoff::tests::constants_are_2mib_aligned ... ok
+test android_handoff::tests::default_dtb_config_validates ... ok
+test android_handoff::tests::dtb_memory_matches_mapped_region ... ok
+test android_handoff::tests::default_dtb_fits_in_guest_dtb_size ... ok
+test android_handoff::tests::handoff_error_conversion_covers_all_android_errors ... ok
+test android_handoff::tests::default_dtb_config_builds ... ok
+test android_handoff::tests::fex_initial_regs_match_arm64_boot_protocol ... ok
+test android_runtime::tests::feed_uart_byte_is_noop_when_not_initialised ... ok
+test android_handoff::tests::handoff_region_is_contiguous ... ok
+test android_runtime::tests::init_global_is_idempotent_and_drives_through_global ... ok
+test android_runtime::tests::lifecycle_gate_default_does_not_pass ... ok
+test android_runtime::tests::line_buffer_accumulates_then_yields_on_newline ... ok
+test android_runtime::tests::line_buffer_marks_overflow_beyond_capacity ... ok
+test android_runtime::tests::line_buffer_strips_trailing_cr ... ok
+test android_runtime::tests::runtime_counters_increment ... ok
+test android_runtime::tests::runtime_feeds_through_to_boot_state ... ok
+test android_runtime::tests::runtime_three_signals_pass_phase6_boot_gate ... ok
+test android_x86_userspace::tests::board_config_lists_all_three_gpu_drivers ... ok
+test android_x86_userspace::tests::board_config_requires_gralloc4_and_hwc2 ... ok
+test android_x86_userspace::tests::classify_amd_radeon ... ok
+test android_x86_userspace::tests::classify_intel_integrated_routes_to_unsupported ... ok
+test android_x86_userspace::tests::classify_non_display_device_unsupported ... ok
+test android_x86_userspace::tests::classify_nvidia_discrete ... ok
+test android_x86_userspace::tests::config_defaults_validate ... ok
+test android_x86_userspace::tests::config_rejects_missing_amdgpu ... ok
+test android_x86_userspace::tests::config_rejects_missing_gralloc4 ... ok
+test android_x86_userspace::tests::config_rejects_missing_icds ... ok
+test android_x86_userspace::tests::config_rejects_missing_manifests ... ok
+test android_x86_userspace::tests::config_rejects_missing_nouveau ... ok
+test android_x86_userspace::tests::config_rejects_missing_selinux ... ok
+test android_x86_userspace::tests::config_rejects_missing_xe ... ok
+test android_x86_userspace::tests::config_rejects_non_user_build ... ok
+test android_x86_userspace::tests::classify_intel_arc_3d_subclass ... ok
+test android_x86_userspace::tests::contains_bytes_matches_in_middle ... ok
+test android_x86_userspace::tests::contains_bytes_rejects_empty_needle ... ok
+test android_x86_userspace::tests::contains_bytes_rejects_when_too_short ... ok
+test android_x86_userspace::tests::defconfig_disables_legacy_console_and_fb ... ok
+test android_x86_userspace::tests::defconfig_documents_silent_failure_for_every_entry ... ok
+test android_x86_userspace::tests::defconfig_includes_all_three_drm_drivers ... ok
+test android_x86_userspace::tests::drm_kernel_driver_kconfig_symbols ... ok
+test android_x86_userspace::tests::drm_kernel_driver_module_names ... ok
+test android_x86_userspace::tests::drm_kernel_driver_per_vendor ... ok
+test android_x86_userspace::tests::gate_requires_all_six_criteria ... ok
+test android_x86_userspace::tests::icd_api_versions_are_vulkan_1_3 ... ok
+test android_x86_userspace::tests::icd_paths_under_vendor_partition ... ok
+test android_x86_userspace::tests::icd_selector_or_fail_propagates_unknown ... ok
+test android_x86_userspace::tests::icd_selector_round_trip ... ok
+test android_x86_userspace::tests::gate_graphics_stack_live_partial ... ok
+test android_x86_userspace::tests::init_rejects_integrated_intel ... ok
+test android_x86_userspace::tests::init_rejects_non_display_device ... ok
+test android_x86_userspace::tests::init_rejects_unknown_vendor ... ok
+test android_x86_userspace::tests::init_rejects_when_kernel_missing_driver ... ok
+test android_x86_userspace::tests::init_succeeds_for_amd ... ok
+test android_x86_userspace::tests::init_succeeds_for_intel_arc ... ok
+test android_x86_userspace::tests::init_succeeds_for_nvidia ... ok
+test android_x86_userspace::tests::mesa_icds_present_for_all_three_vendors ... ok
+test android_x86_userspace::tests::passthrough_hook_safe_after_ack ... ok
+test android_x86_userspace::tests::passthrough_hook_starts_unsafe ... ok
+test android_x86_userspace::tests::pci_bdf_clamps_oversize_device ... ok
+test android_x86_userspace::tests::pci_bdf_round_trip ... ok
+test android_x86_userspace::tests::pci_display_class_is_three ... ok
+test android_x86_userspace::tests::pre_flight_summary_counts_match_tables ... ok
+test android_x86_userspace::tests::process_line_advances_through_full_boot ... ok
+test android_x86_userspace::tests::process_line_counts_avc_denials ... ok
+test android_x86_userspace::tests::invalidation_kind_mnemonics_distinct ... ok
+test android_x86_userspace::tests::product_packages_bundle_all_three_vulkan_icds ... ok
+test android_x86_userspace::tests::selinux_rules_document_silent_failure ... ok
+test android_x86_userspace::tests::product_packages_include_drm_hwcomposer ... ok
+test android_x86_userspace::tests::selinux_rules_cover_gpu_device ... ok
+test android_x86_userspace::tests::state_invalidation_accounting ... ok
+test android_x86_userspace::tests::vendor_ids_match_pci_sig ... ok
+test aosp::tests::aosp_device_config_art_valid ... ok
+test android_x86_userspace::tests::state_invalidation_missing_breaks_isolation_invariant ... ok
+test aosp::tests::aosp_device_config_default_128gb_validates ... ok
+test aosp::tests::aosp_device_config_manifest_has_all_required ... ok
+test aosp::tests::art_config_limit_exceeds_max_rejected ... ok
+test aosp::tests::aosp_device_config_properties_have_user_build_type ... ok
+test aosp::tests::art_config_min_free_exceeds_max_free_rejected ... ok
+test aosp::tests::art_config_phone_12gb_validates ... ok
+test aosp::tests::art_config_phone_8gb_validates ... ok
+test aosp::tests::art_config_start_exceeds_limit_rejected ... ok
+test aosp::tests::art_config_util_over_100_rejected ... ok
+test aosp::tests::art_config_zero_util_rejected ... ok
+test aosp::tests::build_type_as_bytes ... ok
+test aosp::tests::build_type_user_invariant_enforced ... ok
+test aosp::tests::build_type_user_is_production ... ok
+test aosp::tests::default_layout_total_bytes_const_matches_computed ... ok
+test aosp::tests::default_layout_validates_against_128gb ... ok
+test aosp::tests::device_properties_adb_secure ... ok
+test aosp::tests::device_properties_adb_insecure_rejected ... ok
+test aosp::tests::device_properties_from_defaults_validates ... ok
+test aosp::tests::device_properties_full_rejected ... ok
+test aosp::tests::device_properties_missing_build_type_rejected ... ok
+test aosp::tests::device_properties_get_missing_returns_none ... ok
+test aosp::tests::device_properties_ro_build_type_is_user ... ok
+test aosp::tests::device_properties_ro_debuggable_off ... ok
+test aosp::tests::device_properties_ro_secure ... ok
+test aosp::tests::device_properties_secure_off_rejected ... ok
+test aosp::tests::device_properties_userdebug_rejected ... ok
+test aosp::tests::hal_interface_aidl_fields ... ok
+test aosp::tests::hal_interface_hidl_hwbinder_fields ... ok
+test aosp::tests::hal_interface_passthrough_transport ... ok
+test aosp::tests::opengles_version_is_gles_31_or_32 ... ok
+test aosp::tests::partition_kind_ab_flags ... ok
+test aosp::tests::partition_kind_labels_non_empty ... ok
+test aosp::tests::partition_layout_boot_too_small ... ok
+test aosp::tests::partition_layout_empty_valid_against_large_ns ... ok
+test aosp::tests::partition_layout_full_rejected ... ok
+test aosp::tests::partition_layout_overflow_rejected ... ok
+test aosp::tests::partition_layout_system_too_small ... ok
+test aosp::tests::partition_layout_unaligned_rejected ... ok
+test aosp::tests::partition_layout_vendor_too_small ... ok
+test aosp::tests::partition_spec_total_bytes_ab_doubled ... ok
+test aosp::tests::partition_spec_total_bytes_non_ab_unchanged ... ok
+test aosp::tests::ram_size_round_number ... ok
+test aosp::tests::selinux_enforcing_property_present ... ok
+test aosp::tests::treble_manifest_contains_required_hals ... ok
+test aosp::tests::treble_manifest_count ... ok
+test aosp::tests::treble_manifest_full_rejected ... ok
+test aosp::tests::treble_manifest_default_validates ... ok
+test aosp::tests::treble_manifest_missing_hal_rejected ... ok
+test aosp::tests::verified_boot_state_green ... ok
+test aosp_build::tests::android_bp_from_defaults_validates ... ok
+test aosp_build::tests::android_bp_full_rejected ... ok
+test aosp_build::tests::android_bp_has_radio_hal ... ok
+test aosp_build::tests::android_bp_has_sensor_hal ... ok
+test aosp_build::tests::android_bp_missing_module_rejected ... ok
+test aosp_build::tests::aosp_build_config_board_is_arm64 ... ok
+test aosp_build::tests::aosp_build_config_default_validates ... ok
+test aosp_build::tests::aosp_build_config_lunch_target_is_user ... ok
+test aosp_build::tests::aosp_build_config_microg_enabled ... ok
+test aosp_build::tests::aosp_build_config_userdebug_rejected ... ok
+test aosp_build::tests::avb_enabled_invariant ... ok
+test aosp_build::tests::board_config_avb_disabled_rejected ... ok
+test aosp_build::tests::board_config_non_arm64_rejected ... ok
+test aosp_build::tests::board_config_default_validates ... ok
+test aosp_build::tests::board_partition_sizes_default_validates ... ok
+test aosp_build::tests::board_config_permissive_selinux_rejected ... ok
+test aosp_build::tests::board_partition_sizes_vbmeta_64kib ... ok
+test aosp_build::tests::board_partition_sizes_zero_boot_rejected ... ok
+test aosp_build::tests::build_variant_suffix_bytes ... ok
+test aosp_build::tests::board_partition_sizes_too_large_rejected ... ok
+test aosp_build::tests::build_variant_user_is_production ... ok
+test aosp_build::tests::device_mk_copy_files_non_empty ... ok
+test aosp_build::tests::device_mk_from_defaults_validates ... ok
+test aosp_build::tests::device_mk_has_fakestore ... ok
+test aosp_build::tests::device_mk_has_gmscore ... ok
+test aosp_build::tests::device_mk_has_gralloc ... ok
+test aosp_build::tests::device_mk_missing_package_rejected ... ok
+test aosp_build::tests::device_mk_package_list_full_rejected ... ok
+test aosp_build::tests::device_mk_property_adb_secure ... ok
+test aosp_build::tests::device_mk_property_ro_build_type_user ... ok
+test aosp_build::tests::gate_fails_when_avb_not_verified ... ok
+test aosp_build::tests::gate_fails_when_image_empty ... ok
+test aosp_build::tests::gate_not_built_does_not_pass ... ok
+test aosp_build::tests::gate_passes_when_all_images_produced ... ok
+test aosp_build::tests::lunch_target_aether_arm64_user_is_production ... ok
+test aosp_build::tests::lunch_target_product_name ... ok
+test aosp_build::tests::lunch_target_variant_is_user ... ok
+test aosp_build::tests::microg_component_module_names ... ok
+test aosp_build::tests::microg_component_package_names ... ok
+test aosp_build::tests::microg_component_source_paths_under_vendor ... ok
+test aosp_build::tests::microg_integration_default_validates ... ok
+test aosp_build::tests::microg_integration_gmscore_disabled_rejected ... ok
+test aosp_build::tests::microg_integration_spoofing_disabled_rejected ... ok
+test aosp_build::tests::output_image_filenames ... ok
+test aosp_build::tests::output_image_required_set ... ok
+test aosp_build::tests::ram_size_round_number_in_property_overrides ... ok
+test aosp_build::tests::ro_build_type_user_invariant ... ok
+test aosp_build::tests::selinux_enforcing_invariant ... ok
+test aosp_build::tests::target_arch_arm64_as_bytes ... ok
+test aosp_build::tests::target_arch_is_arm64_only ... ok
+test app_compat::tests::all_fix_variants_have_nonempty_description ... ok
+test app_compat::tests::all_known_bugs_are_resolved ... ok
+test app_compat::tests::attestation_required_is_attestation_only ... ok
+test app_compat::tests::build_type_user_line_sets_flag ... ok
+test app_compat::tests::bugs_resolved_line_sets_bugs_resolved ... ok
+test app_compat::tests::category_count_matches_list_length ... ok
+test app_compat::tests::compat_harness_is_in_package_list ... ok
+test app_compat::tests::category_labels_are_nonempty ... ok
+test app_compat::tests::consecutive_timeout_tracking ... ok
+test app_compat::tests::contains_bytes_empty_needle_always_true ... ok
+test app_compat::tests::contains_bytes_exact_match ... ok
+test app_compat::tests::contains_bytes_needle_longer_than_haystack ... ok
+test app_compat::tests::contains_bytes_not_found ... ok
+test app_compat::tests::contains_bytes_prefix ... ok
+test app_compat::tests::contains_bytes_substring ... ok
+test app_compat::tests::critical_and_major_must_be_resolved ... ok
+test app_compat::tests::default_config_validates ... ok
+test app_compat::tests::attestation_failures_excluded_from_denominator ... ok
+test app_compat::tests::gate_fails_with_unresolved_bugs ... ok
+test app_compat::tests::gate_fails_without_report_target ... ok
+test app_compat::tests::gate_fails_without_user_build ... ok
+test app_compat::tests::gate_pass_line_sets_gate_passed_phase ... ok
+test app_compat::tests::full_gate_passes_with_all_conditions_met ... ok
+test app_compat::tests::gpu_intensive_categories ... ok
+test app_compat::tests::init_with_defaults_succeeds ... ok
+test app_compat::tests::health_fitness_and_maps_use_sensors ... ok
+test app_compat::tests::init_with_zero_apps_fails ... ok
+test app_compat::tests::installed_line_advances_to_apks_installed ... ok
+test app_compat::tests::known_bug_fix_count_matches_table_length ... ok
+test app_compat::tests::mark_harness_ready_advances_phase ... ok
+test app_compat::tests::minor_and_cosmetic_do_not_block_gate ... ok
+test app_compat::tests::new_state_has_correct_initial_values ... ok
+test app_compat::tests::no_known_bug_is_attestation_only ... ok
+test app_compat::tests::non_attestation_failures_require_fix ... ok
+test app_compat::tests::non_passed_outcomes_need_triage ... ok
+test app_compat::tests::only_banking_payment_is_attestation_sensitive ... ok
+test app_compat::tests::pass_line_resets_consecutive_timeouts ... ok
+test app_compat::tests::pass_rate_over_1000_rejected ... ok
+test app_compat::tests::passed_is_passing ... ok
+test app_compat::tests::passing_gate_passes ... ok
+test app_compat::tests::phase_ordering_is_monotonic ... ok
+test app_compat::tests::process_attest_line_increments_attestation ... ok
+test app_compat::tests::process_fail_line_increments_failing ... ok
+test app_compat::tests::process_pass_line_increments_passing ... ok
+test app_compat::tests::product_package_count_matches_table_length ... ok
+test app_compat::tests::product_packages_have_nonempty_names ... ok
+test app_compat::tests::resolved_record_does_not_need_resolution ... ok
+test app_compat::tests::ninety_five_percent_pass_meets_gate_report_target ... ok
+test app_compat::tests::ninety_percent_fails_gate_report_target ... ok
+test app_compat::tests::selinux_rules_are_nonempty ... ok
+test app_compat::tests::selinux_rule_count_matches_table_length ... ok
+test app_compat::tests::smoke_sequence_ends_with_force_stop ... ok
+test app_compat::tests::severity_ordering ... ok
+test app_compat::tests::smoke_sequence_starts_with_launch ... ok
+test app_compat::tests::smoke_test_sequence_length_matches_constant ... ok
+test app_compat::tests::smoke_test_wait_ms_is_five_seconds ... ok
+test app_compat::tests::uart_attest_sig_is_found_in_attest_line ... ok
+test app_compat::tests::uart_fail_sig_is_found_in_fail_line ... ok
+test app_compat::tests::uart_gate_pass_sig_is_distinct_from_app_pass ... ok
+test app_compat::tests::uart_pass_sig_is_found_in_pass_line ... ok
+test app_compat::tests::unresolved_critical_needs_resolution ... ok
+test app_compat::tests::unresolved_minor_does_not_need_resolution ... ok
+test app_compat::tests::zero_app_count_rejected ... ok
+test app_compat::tests::zero_pass_rate_rejected ... ok
+test app_compat::tests::zero_smoke_timeout_rejected ... ok
+test app_compat::tests::zero_timeout_limit_rejected ... ok
+test boot::placement_tests::non_conventional_ignored_and_low_piece_usable ... ok
+test boot::placement_tests::observed_qemu_layout_is_clipped_above_the_guest_window ... ok
+test boot::placement_tests::overlap_guard ... ok
+test boot::placement_tests::region_entirely_inside_window_is_never_chosen ... ok
+test boot_x86_avb::tests::boot_img_offsets_correct ... ok
+test boot_x86_avb::tests::load_boot_img_dev_no_vbmeta ... ok
+test boot_x86_avb::tests::load_boot_img_locked_requires_vbmeta ... ok
+test boot_x86_avb::tests::load_boot_img_rejects_bad_magic ... ok
+test boot_x86_avb::tests::load_boot_img_rejects_misaligned_ram ... ok
+test boot_x86_esp::tests::ascii_to_utf16z_rejects_too_small_buffer ... ok
+test boot_x86_esp::tests::ascii_to_utf16z_roundtrip ... ok
+test boot_x86_esp::tests::boot_img_path_is_uefi_style ... ok
+test boot_x86_esp::tests::guids_match_uefi_spec ... ok
+test bootloader::tests::avb_algorithm_hash_sizes ... ok
+test bootloader::tests::bcb_bad_magic ... ok
+test bootloader::tests::bcb_no_bootable_slot ... ok
+test bootloader::tests::bcb_select_slot_a_higher_priority ... ok
+test bootloader::tests::bcb_select_slot_b_higher_priority ... ok
+test bootloader::tests::bcb_select_slot_equal_priority_prefers_a ... ok
+test bootloader::tests::bootloader_config_locked_zero_addr_fails ... ok
+test bootloader::tests::bootloader_config_unlocked_fails ... ok
+test bootloader::tests::bootloader_state_happy_path ... ok
+test bootloader::tests::bootloader_state_rejects_verification_disabled ... ok
+test bootloader::tests::cmdline_append_kv ... ok
+test bootloader::tests::cmdline_buffer_overflow ... ok
+test bootloader::tests::kernel_launch_params_misaligned_entry ... ok
+test bootloader::tests::kernel_launch_params_valid ... ok
+test bootloader::tests::parse_header_bad_magic ... ok
+test bootloader::tests::parse_header_bad_size ... ok
+test bootloader::tests::parse_header_bad_version ... ok
+test bootloader::tests::parse_v3_header_ok ... ok
+test bootloader::tests::parse_vbmeta_bad_magic ... ok
+test bootloader::tests::parse_vbmeta_bad_major ... ok
+test bootloader::tests::parse_vbmeta_ok ... ok
+test bootloader::tests::rollback_store_accept ... ok
+test bootloader::tests::rollback_store_monotonic ... ok
+test bootloader::tests::rollback_store_reject_downgrade ... ok
+test bootloader::tests::slot_suffix ... ok
+test bootloader::tests::vbmeta_verification_disabled_flag ... ok
+test build_system::tests::android_and_windows_can_parallelize ... ok
+test build_system::tests::android_build_depends_on_hypervisor ... ok
+test build_system::tests::android_eng_variant_rejected ... ok
+test build_system::tests::android_misaligned_boot_partition_rejected ... ok
+test build_system::tests::android_misaligned_system_partition_rejected ... ok
+test build_system::tests::android_userdebug_variant_rejected ... ok
+test build_system::tests::android_variant_build_type_strings ... ok
+test build_system::tests::android_zero_boot_partition_rejected ... ok
+test build_system::tests::android_zero_system_partition_rejected ... ok
+test build_system::tests::android_zero_userdata_partition_rejected ... ok
+test build_system::tests::arm_debug_validates_ok ... ok
+test build_system::tests::arm_efi_arch_is_aarch64 ... ok
+test build_system::tests::arm_production_android_validates_ok ... ok
+test build_system::tests::arm_production_config_fails_without_secure_boot ... ok
+test build_system::tests::arm_production_config_validates_ok_with_secure_boot ... ok
+test build_system::tests::arm_release_efi_format_validates_ok ... ok
+test build_system::tests::arm_release_validates_ok ... ok
+test build_system::tests::arm_tier_cargo_target ... ok
+test build_system::tests::arm_tier_does_not_require_dbt ... ok
+test build_system::tests::arm_tier_native_android_execution ... ok
+test build_system::tests::arm_tier_runs_at_el2 ... ok
+test build_system::tests::build_steps_ends_with_package ... ok
+test build_system::tests::build_steps_starts_with_hypervisor ... ok
+test build_system::tests::build_steps_table_has_four_entries ... ok
+test build_system::tests::build_summary_all_ready ... ok
+test build_system::tests::build_summary_partial_fails ... ok
+test build_system::tests::debug_profile_cargo_flag ... ok
+test build_system::tests::eng_variant_not_production_safe ... ok
+test build_system::tests::fully_configured_can_build_all ... ok
+test build_system::tests::fully_configured_toolchain_validates_ok ... ok
+test build_system::tests::hypervisor_build_std_mem_required ... ok
+test build_system::tests::hypervisor_build_std_required ... ok
+test build_system::tests::hypervisor_cannot_parallelize_with_android ... ok
+test build_system::tests::hypervisor_has_no_prerequisite ... ok
+test build_system::tests::hypervisor_only_toolchain_can_build_hypervisor ... ok
+test build_system::tests::hypervisor_only_toolchain_cannot_build_all ... ok
+test build_system::tests::hypervisor_only_toolchain_fails_full_validation ... ok
+test build_system::tests::hypervisor_only_toolchain_passes_hypervisor_validation ... ok
+test build_system::tests::hypervisor_output_name_debug ... ok
+test build_system::tests::hypervisor_output_name_release ... ok
+test build_system::tests::missing_cross_toolchain_fails ... ok
+test build_system::tests::missing_rust_nightly_fails_first ... ok
+test build_system::tests::missing_rust_src_fails ... ok
+test build_system::tests::missing_uefi_target_fails_second ... ok
+test build_system::tests::not_efi_application_rejected ... ok
+test build_system::tests::not_pe32_plus_rejected ... ok
+test build_system::tests::package_depends_on_windows_config ... ok
+test build_system::tests::partition_unit_bytes_identity ... ok
+test build_system::tests::partition_unit_kibibytes_conversion ... ok
+test build_system::tests::partition_unit_mebibytes_conversion ... ok
+test build_system::tests::partition_unit_overflow_returns_none ... ok
+test build_system::tests::release_profile_cargo_flag ... ok
+test build_system::tests::release_profile_is_production_ready ... ok
+test build_system::tests::release_profile_lto_enabled ... ok
+test build_system::tests::tier_architecture_mismatch_rejected ... ok
+test build_system::tests::user_variant_is_production_safe ... ok
+test build_system::tests::userdebug_variant_not_production_safe ... ok
+test build_system::tests::windows_config_depends_on_hypervisor ... ok
+test build_system::tests::windows_default_with_secure_boot_validates_ok ... ok
+test build_system::tests::windows_default_without_secure_boot_fails ... ok
+test build_system::tests::windows_namespace_equal_to_ram_validates_ok ... ok
+test build_system::tests::windows_namespace_smaller_than_ram_rejected ... ok
+test build_system::tests::x86_efi_arch_is_x86_64 ... ok
+test build_system::tests::x86_release_efi_format_validates_ok ... ok
+test build_system::tests::x86_release_validates_ok ... ok
+test build_system::tests::x86_tier_cargo_target ... ok
+test build_system::tests::x86_tier_requires_dbt ... ok
+test configuration_app::tests::defaults_validate ... ok
+test configuration_app::tests::gate_requires_all_four ... ok
+test configuration_app::tests::init_advances_to_defaults_loaded ... ok
+test configuration_app::tests::key_ordinal_roundtrip ... ok
+test configuration_app::tests::phase_is_monotonic ... ok
+test configuration_app::tests::set_clamps_above_max ... ok
+test configuration_app::tests::snapshot_with_is_pure ... ok
+test cpio::tests::alignment_handles_odd_name_and_data_lengths ... ok
+test cpio::tests::archive_len_stops_at_trailer_inside_larger_buffer ... ok
+test cpio::tests::bad_magic_rejected ... ok
+test cpio::tests::entry_count_excludes_trailer ... ok
+test cpio::tests::find_init_finds_init_by_three_names ... ok
+test cpio::tests::find_init_returns_none_when_absent ... ok
+test cpio::tests::parse_minimal_archive ... ok
+test cpio::tests::phase_f_gate_fails_when_init_is_symlink ... ok
+test cpio::tests::phase_f_gate_fails_when_init_missing ... ok
+test cpio::tests::phase_f_gate_passes_on_synthetic_initramfs ... ok
+test boot_x86_avb::tests::load_boot_img_rejects_too_small_guest_ram ... ok
+test cpio::tests::truncated_header_rejected ... ok
+test dbt_dispatch::tests::arming_sets_pc_and_x0_from_handoff ... ok
+test dbt_dispatch::tests::classify_amd_routes_hlt_and_npf ... ok
+test dbt_dispatch::tests::classify_intel_routes_hlt_and_ept_violation ... ok
+test dbt_dispatch::tests::dispatch_advances_pc_by_4_in_stub_mode ... ok
+test dbt_dispatch::tests::dispatch_without_arm_fails ... ok
+test dbt_dispatch::tests::handle_mmio_read_lands_in_xt ... ok
+test dbt_dispatch::tests::handle_mmio_uart_dr_is_handled ... ok
+test dbt_dispatch::tests::mmio_request_empty_is_not_sane ... ok
+test dbt_dispatch::tests::mmio_request_rejects_bad_size ... ok
+test dbt_dispatch::tests::mmio_request_rejects_bad_xt ... ok
+test dbt_dispatch::tests::mmio_request_xt31_is_sane_xzr_discard ... ok
+test dbt_dispatch::tests::new_state_is_not_armed ... ok
+test dbt_dispatch::tests::vmexit_halt_halts ... ok
+test dbt_dispatch::tests::vmexit_mmio_addr_mismatch_falls_back_to_synthesis ... ok
+test dbt_dispatch::tests::vmexit_mmio_consumes_request_record_when_valid ... ok
+test dbt_dispatch::tests::vmexit_mmio_request_read_writes_value_into_xt ... ok
+test dbt_dispatch::tests::vmexit_mmio_uses_fallback_synthesis_without_request ... ok
+test dbt_dispatch::tests::vmexit_translate_reenter ... ok
+test dbt_dispatch::tests::vmexit_unhandled_halts ... ok
+test dbt_dispatch::tests::vmexit_unknown_mmio_addr_halts ... ok
+test dbt_dispatch::tests::vmexit_virtio_mmio_with_no_backend_halts ... ok
+test dbt_integration::tests::aot_queue_completion_tracking ... ok
+test dbt_integration::tests::aot_queue_loads_defaults ... ok
+test dbt_integration::tests::arm64_binary_parse_rejects_no_executable ... ok
+test dbt_integration::tests::arm64_binary_parse_rejects_no_load ... ok
+test dbt_integration::tests::arm64_binary_parse_succeeds ... ok
+test dbt_integration::tests::block_hash_insert_and_lookup ... ok
+test dbt_integration::tests::block_hash_insert_updates_existing ... ok
+test dbt_integration::tests::block_hash_lookup_miss ... ok
+test dbt_integration::tests::config_defaults_validate ... ok
+test dbt_integration::tests::config_rejects_host_userland ... ok
+test dbt_integration::tests::config_rejects_overlapping_regions ... ok
+test dbt_integration::tests::config_rejects_unaligned_bump ... ok
+test dbt_integration::tests::config_rejects_unaligned_jit ... ok
+test dbt_integration::tests::config_rejects_undersized_jit ... ok
+test dbt_integration::tests::elf64_header_accepts_arm64_executable ... ok
+test dbt_integration::tests::elf64_header_rejects_bad_magic ... ok
+test dbt_integration::tests::elf64_header_rejects_short_input ... ok
+test dbt_integration::tests::elf64_header_rejects_x86_machine ... ok
+test dbt_integration::tests::elf_magic_is_seven_f_e_l_f ... ok
+test dbt_integration::tests::em_aarch64_is_183 ... ok
+test dbt_integration::tests::fex_symbols_not_forbidden ... ok
+test dbt_integration::tests::gate_hypervisor_side_ready_partial ... ok
+test dbt_integration::tests::gate_requires_all_six_criteria ... ok
+test dbt_integration::tests::host_bindings_alloc_respects_alignment ... ok
+test dbt_integration::tests::host_bindings_alloc_returns_none_when_exhausted ... ok
+test dbt_integration::tests::init_fex_on_non_x86_64_returns_not_x86_host ... ok
+test dbt_integration::tests::init_fex_on_x86_without_fex_linked_returns_fex_lib_not_linked ... ok
+test dbt_integration::tests::init_fex_rejects_invalid_config ... ok
+test dbt_integration::tests::jit_cache_allocate_aligns_to_16 ... ok
+test dbt_integration::tests::jit_cache_exhaustion_returns_none ... ok
+test dbt_integration::tests::jit_cache_starts_guest_invisible ... ok
+test dbt_integration::tests::jit_cache_utilization_percent ... ok
+test dbt_integration::tests::malloc_is_forbidden ... ok
+test dbt_integration::tests::phase_machine_strictly_ordered ... ok
+test dbt_integration::tests::process_elf_load_advances_phase ... ok
+test dbt_integration::tests::process_line_advances_on_hello_world ... ok
+test dbt_integration::tests::process_line_records_block_translation ... ok
+test dbt_integration::tests::process_line_records_stall ... ok
+test dbt_integration::tests::pt_load_is_one ... ok
+test dbt_integration::tests::spinlock_lock_and_unlock_round_trip ... ok
+test dbt_integration::tests::state_record_block_translation_updates_counters ... ok
+test development_workflow::tests::android_post_boot_snapshot_validates_ok ... ok
+test development_workflow::tests::aosp_checkbuild_far_exceeds_five_minutes ... ok
+test development_workflow::tests::aosp_checkbuild_is_nightly ... ok
+test development_workflow::tests::bisection_budget_zero_rejected ... ok
+test development_workflow::tests::bisection_contract_not_satisfied_rejected ... ok
+test development_workflow::tests::cargo_check_is_per_commit ... ok
+test development_workflow::tests::cargo_check_is_per_pr ... ok
+test development_workflow::tests::cargo_test_lib_is_per_pr ... ok
+test development_workflow::tests::debugger_default_port_is_1234 ... ok
+test development_workflow::tests::debugger_port_zero_rejected ... ok
+test development_workflow::tests::default_bisection_validates_ok ... ok
+test development_workflow::tests::default_debugger_validates_ok ... ok
+test development_workflow::tests::freeze_with_gdb_port_validates_ok ... ok
+test development_workflow::tests::freeze_without_gdb_port_rejected ... ok
+test development_workflow::tests::gicv3_is_required_for_aether ... ok
+test development_workflow::tests::hardware_breakpoint_gdb_command_prefix ... ok
+test development_workflow::tests::hardware_breakpoint_is_safe_before_mmu ... ok
+test development_workflow::tests::only_full_release_requires_real_hardware ... ok
+test development_workflow::tests::only_real_hardware_tier_requires_hardware ... ok
+test development_workflow::tests::only_tier1_supports_automated_bisection ... ok
+test development_workflow::tests::pipeline_budget_smaller_than_tier1_rejected ... ok
+test development_workflow::tests::pipeline_without_cargo_check_rejected ... ok
+test development_workflow::tests::pipeline_without_cargo_test_rejected ... ok
+test development_workflow::tests::pipeline_without_qemu_tier1_rejected ... ok
+test development_workflow::tests::pipeline_zero_budget_rejected ... ok
+test development_workflow::tests::qemu_gicv2_rejected ... ok
+test development_workflow::tests::qemu_tier1_is_per_pr ... ok
+test development_workflow::tests::qemu_tier1_stage_under_five_minutes ... ok
+test development_workflow::tests::qemu_virt_serial_validates_ok ... ok
+test development_workflow::tests::qemu_without_virtualization_rejected ... ok
+test development_workflow::tests::qemu_zero_ram_rejected ... ok
+test development_workflow::tests::recommended_pipeline_validates_ok ... ok
+test development_workflow::tests::recommended_workflow_validates_ok ... ok
+test development_workflow::tests::serial_baud_rate_zero_rejected ... ok
+test development_workflow::tests::serial_uart_base_is_pl011_qemu_virt ... ok
+test development_workflow::tests::serial_uart_base_zero_rejected ... ok
+test development_workflow::tests::snapshot_disabled_with_empty_name_ok ... ok
+test development_workflow::tests::snapshot_enabled_with_empty_name_rejected ... ok
+test development_workflow::tests::software_breakpoint_early_boot_rejected ... ok
+test development_workflow::tests::software_breakpoint_gdb_command_prefix ... ok
+test development_workflow::tests::software_breakpoint_not_safe_before_mmu ... ok
+test development_workflow::tests::tier1_ci_config_validates_ok ... ok
+test development_workflow::tests::tier1_debug_config_validates_ok ... ok
+test development_workflow::tests::tier1_duration_under_five_minutes ... ok
+test development_workflow::tests::tier1_is_per_commit_gate ... ok
+test development_workflow::tests::workflow_summary_all_ready ... ok
+test development_workflow::tests::workflow_summary_partial_not_ready ... ok
+test el2_mmu::tests::mmio_gib_is_device_and_execute_never ... ok
+test el2_mmu::tests::ram_gibs_are_normal_identity_and_executable ... ok
+test el2_mmu::tests::tcr_fields ... ok
+test hvc_paravirt_abi::tests::dispatch_bridge_set_rejects_out_of_range ... ok
+test hvc_paravirt_abi::tests::dispatch_get_version_returns_current ... ok
+test hvc_paravirt_abi::tests::dispatch_sensor_read_rejects_invalid_id ... ok
+test hvc_paravirt_abi::tests::dispatch_update_stage_rejects_out_of_range_slot ... ok
+test hvc_paravirt_abi::tests::fn_id_roundtrip ... ok
+test hvc_paravirt_abi::tests::fn_ids_are_in_vendor_range ... ok
+test hvc_paravirt_abi::tests::from_id_rejects_unknown ... ok
+test hvc_paravirt_abi::tests::sensor_id_roundtrip ... ok
+test hvc_paravirt_abi::tests::status_to_u64_sign_extends ... ok
+test hvc_paravirt_abi::tests::version_check ... ok
+test inflate::tests::gunzip_fixed_huffman_backref_roundtrip ... ok
+test inflate::tests::gunzip_stored_block ... ok
+test inflate::tests::output_overflow_is_caught ... ok
+test inflate::tests::rejects_non_gzip ... ok
+test kernel::tests::dtb_empty_tree_roundtrip ... ok
+test kernel::tests::dtb_end_node_without_begin_errors ... ok
+test kernel::tests::dtb_missing_end_node_errors ... ok
+test kernel::tests::dtb_nested_nodes ... ok
+test kernel::tests::dtb_output_too_small_errors ... ok
+test kernel::tests::dtb_prop_outside_node_errors ... ok
+test kernel::tests::dtb_prop_u32 ... ok
+test kernel::tests::dtb_string_interning_deduplicates ... ok
+test kernel::tests::gki_all_satisfied ... ok
+test kernel::tests::gki_first_missing_reported ... ok
+test kernel::tests::gki_record_unknown_option_ignored ... ok
+test kernel::tests::hex_u64_ffff ... ok
+test kernel::tests::hex_u64_full ... ok
+test kernel::tests::hex_u64_zero ... ok
+test kernel::tests::image_entry_ipa_nonzero_text_offset ... ok
+test kernel::tests::image_entry_ipa_zero_text_offset ... ok
+test kernel::tests::image_flag_big_endian ... ok
+test kernel::tests::image_page_size_hint_4k ... ok
+test kernel::tests::kernel_load_config_unaligned_ipa ... ok
+test kernel::tests::kernel_load_config_valid ... ok
+test kernel::tests::kernel_load_config_zero_dtb ... ok
+test kernel::tests::kernel_state_full_lifecycle ... ok
+test kernel::tests::kernel_state_incomplete_gki_rejected ... ok
+test kernel::tests::kernel_state_unaligned_ipa_rejected ... ok
+test kernel::tests::parse_image_bad_magic ... ok
+test kernel::tests::parse_image_too_small ... ok
+test kernel::tests::parse_valid_arm64_image ... ok
+test kernel_defconfig::tests::defconfig_critical_options_present ... ok
+test kernel_defconfig::tests::defconfig_disabled_options_correct ... ok
+test kernel_defconfig::tests::defconfig_entry_constructors ... ok
+test kernel_defconfig::tests::defconfig_no_duplicates ... ok
+test kernel_defconfig::tests::extras_defaults_validate ... ok
+test kernel_defconfig::tests::extras_initrd_range_invalid_rejected ... ok
+test kernel_defconfig::tests::extras_ramoops_size_not_power_of_two_rejected ... ok
+test kernel_defconfig::tests::extras_ramoops_too_small_rejected ... ok
+test kernel_defconfig::tests::extras_zero_initrd_not_checked ... ok
+test kernel_defconfig::tests::prod_dtb_builder_fdt_magic ... ok
+test kernel_defconfig::tests::production_dtb_builds_successfully ... ok
+test kernel_defconfig::tests::production_dtb_clock_frequency_present ... ok
+test kernel_defconfig::tests::production_dtb_contains_fstab_strings ... ok
+test kernel_defconfig::tests::production_dtb_contains_ramoops_compatible ... ok
+test kernel_defconfig::tests::production_dtb_gate_all_pass ... ok
+test kernel_defconfig::tests::production_dtb_gate_fails_missing_fstab ... ok
+test kernel_defconfig::tests::production_dtb_gate_fails_missing_ramoops ... ok
+test kernel_defconfig::tests::production_dtb_no_initrd_omits_initrd_props ... ok
+test kernel_defconfig::tests::uart_clock_emits_amba_primecell_description ... ok
+test kernel_defconfig::tests::validator_apply_satisfies_gki_required ... ok
+test kernel_defconfig::tests::validator_gate_fails_without_gki_options ... ok
+test kernel_defconfig::tests::validator_gate_passes_when_fully_satisfied ... ok
+test microg::tests::app_store_labels_non_empty ... ok
+test microg::tests::app_store_list_full_rejected ... ok
+test microg::tests::aurora_store_has_play_catalog ... ok
+test microg::tests::authentication_is_fully_covered ... ok
+test microg::tests::cloud_messaging_is_fully_covered ... ok
+test microg::tests::coverage_table_has_authentication_entry ... ok
+test microg::tests::coverage_table_has_play_integrity_entry ... ok
+test microg::tests::coverage_table_non_empty ... ok
+test microg::tests::default_config_has_fdroid ... ok
+test microg::tests::default_config_has_play_catalog_via_aurora ... ok
+test microg::tests::default_config_play_integrity_basic_only ... ok
+test microg::tests::default_config_signature_spoofing_enabled ... ok
+test microg::tests::default_config_validates ... ok
+test microg::tests::fdroid_is_freely_redistributable ... ok
+test microg::tests::gps_only_has_no_network_location ... ok
+test microg::tests::location_backend_labels_non_empty ... ok
+test microg::tests::ml_kit_is_not_implemented ... ok
+test microg::tests::no_app_store_rejected ... ok
+test microg::tests::pay_is_not_implemented ... ok
+test microg::tests::play_integrity_is_stub ... ok
+test microg::tests::service_usable_full_and_partial_only ... ok
+test microg::tests::signature_spoofing_disabled_rejected ... ok
+test microg::tests::stores_slice_length_matches_count ... ok
+test microg::tests::unknown_service_defaults_to_not_implemented ... ok
+test mmio_emu::tests::classify_routes_known_ranges ... ok
+test mmio_emu::tests::gicd_and_gicr_pidr2_report_gicv3_arch_rev ... ok
+test mmio_emu::tests::gicd_rejects_non_word_writes ... ok
+test mmio_emu::tests::gicd_typer_reports_full_intid_space ... ok
+test mmio_emu::tests::gicd_write_path_routes_spi_into_virtual_gic_and_delivers ... ok
+test mmio_emu::tests::gicr_isenabler0_decodes_ppi_bit ... ok
+test mmio_emu::tests::gicr_last_flag_set_in_typer ... ok
+test mmio_emu::tests::handle_routes_virtio_to_backend ... ok
+test mmio_emu::tests::pl011_dr_write_forwards_to_capture ... ok
+test mmio_emu::tests::pl011_fr_read_reports_rx_empty_tx_ready ... ok
+test mmio_emu::tests::pl011_hello_aether_phase5_gate ... ok
+test mmio_emu::tests::pl011_peripheral_id_returns_canonical_arm_values ... ok
+test mmio_emu::tests::unknown_addr_returns_unhandled ... ok
+test ota_update::tests::check_payload_accepts_complete ... ok
+test ota_update::tests::check_payload_rejects_missing_partition ... ok
+test ota_update::tests::check_payload_rejects_rollback ... ok
+test ota_update::tests::confirm_after_boot_closes_gate ... ok
+test ota_update::tests::defaults_validate ... ok
+test ota_update::tests::init_returns_idle ... ok
+test ota_update::tests::phase_byte_roundtrip ... ok
+test ota_update::tests::phase_is_monotonic ... ok
+test ota_update::tests::pipeline_drives_state_to_slot_switched ... ok
+test ota_update::tests::slot_byte_roundtrip ... ok
+test ota_update::tests::slot_other_is_involutory ... ok
+test ota_update::tests::uart_scanner_walks_to_gate ... ok
+test paravirt::tests::test_accel_noise_is_nonzero ... ok
+test paravirt::tests::test_accel_noise_sigma_matches_bmi160 ... ok
+test paravirt::tests::test_accel_z_near_gravity_at_rest ... ok
+test paravirt::tests::test_at_ati_contains_modem_id ... ok
+test paravirt::tests::test_at_bare_returns_ok ... ok
+test paravirt::tests::test_at_cgsn_returns_imei ... ok
+test paravirt::tests::test_at_cops_contains_operator ... ok
+test paravirt::tests::test_at_creg_returns_registration_state ... ok
+test paravirt::tests::test_at_csq_signal_in_range ... ok
+test paravirt::tests::test_at_invalid_prefix_returns_error ... ok
+test paravirt::tests::test_at_unknown_command_returns_error ... ok
+test paravirt::tests::test_bridge_mode_blocks_accel ... ok
+test paravirt::tests::test_bridge_mode_blocks_gyro ... ok
+test paravirt::tests::test_bridge_mode_blocks_mag ... ok
+test paravirt::tests::test_bridge_mode_toggle_restores_software ... ok
+test paravirt::tests::test_gaussian_mean_near_zero ... ok
+test paravirt::tests::test_gaussian_range_bounded ... ok
+test paravirt::tests::test_gaussian_variance_near_one ... ok
+test boot_x86_avb::tests::production_required_fails_in_dev_policy ... ok
+test paravirt::tests::test_gyro_at_rest_near_zero ... ok
+test paravirt::tests::test_imei_invalid_non_digit_byte ... ok
+test paravirt::tests::test_imei_invalid_space_byte ... ok
+test paravirt::tests::test_imei_invalid_wrong_check_digit ... ok
+test paravirt::tests::test_imei_valid_012345678901237 ... ok
+test paravirt::tests::test_imei_valid_490154203237518 ... ok
+test paravirt::tests::test_mag_near_earth_field ... ok
+test paravirt::tests::test_paravirt_state_invalid_imei_rejected ... ok
+test paravirt::tests::test_paravirt_state_valid_imei ... ok
+test paravirt::tests::test_prng_consecutive_values_differ ... ok
+test paravirt::tests::test_prng_f32_range ... ok
+test paravirt::tests::test_prng_output_nonzero ... ok
+test paravirt::tests::test_proximity_always_far ... ok
+test performance::tests::cpu_and_gpu_are_native ... ok
+test paravirt::tests::test_gyro_bias_drift_accumulates ... ok
+test performance::tests::exit_counter_gaming_threshold ... ok
+test performance::tests::exit_counter_record_and_total ... ok
+test performance::tests::exit_counter_reset ... ok
+test performance::tests::exit_counter_saturating_add ... ok
+test performance::tests::large_page_policy_force_small ... ok
+test performance::tests::large_page_policy_prefer_block ... ok
+test performance::tests::memory_is_negligible_overhead ... ok
+test performance::tests::paravirt_is_present_overhead ... ok
+test performance::tests::performance_summary_all_native ... ok
+test performance::tests::subsystem_perf_table_has_all_subsystems ... ok
+test play_store::tests::active_paths_count_matches_added_paths ... ok
+test play_store::tests::anonymous_proxy_has_proprietary_apps ... ok
+test play_store::tests::anonymous_proxy_is_tolerance_zone ... ok
+test play_store::tests::anonymous_proxy_ships_in_default_image ... ok
+test play_store::tests::aurora_path_has_tolerance_zone_standing ... ok
+test play_store::tests::default_config_aurora_anonymous ... ok
+test play_store::tests::default_config_has_aurora ... ok
+test play_store::tests::default_config_has_fdroid ... ok
+test play_store::tests::default_config_installer_spoof_disabled ... ok
+test play_store::tests::default_config_no_genuine_play_store ... ok
+test play_store::tests::default_config_validates ... ok
+test play_store::tests::duplicate_paths_are_idempotent ... ok
+test play_store::tests::fdroid_path_has_clear_legal_standing ... ok
+test play_store::tests::genuine_play_store_as_automatic_path_rejected ... ok
+test play_store::tests::genuine_play_store_does_not_ship_in_default_image ... ok
+test play_store::tests::genuine_play_store_has_proprietary_apps ... ok
+test play_store::tests::genuine_play_store_is_user_responsibility ... ok
+test play_store::tests::installer_spoof_with_aurora_is_valid ... ok
+test play_store::tests::installer_spoof_without_aurora_rejected ... ok
+test play_store::tests::manual_path_acknowledged_accepted ... ok
+test play_store::tests::manual_path_not_ready_without_disclaimer ... ok
+test play_store::tests::manual_path_ready_when_acknowledged ... ok
+test play_store::tests::manual_path_with_unacknowledged_disclaimer_rejected ... ok
+test play_store::tests::open_source_only_has_no_proprietary_apps ... ok
+test play_store::tests::open_source_only_is_clear ... ok
+test play_store::tests::open_source_only_ships_in_default_image ... ok
+test recovery_mode::tests::confirm_rejects_on_nondestructive ... ok
+test recovery_mode::tests::confirm_rejects_wrong_phrase ... ok
+test recovery_mode::tests::debug_trigger_accepted_when_allowed ... ok
+test recovery_mode::tests::debug_trigger_rejected_in_user_builds ... ok
+test recovery_mode::tests::full_destructive_flow ... ok
+test recovery_mode::tests::confirmation_phrases_are_distinct ... ok
+test recovery_mode::tests::non_destructive_actions_skip_confirmation ... ok
+test recovery_mode::tests::select_advances_phase ... ok
+test recovery_mode::tests::select_non_destructive_implicitly_confirms ... ok
+test recovery_mode::tests::uart_scanner_marks_menu_and_action ... ok
+test roadmap_phase1::tests::any_regressed_detects_a_regression ... ok
+test roadmap_phase1::tests::can_mark_not_started_or_regressed_without_prerequisite ... ok
+test roadmap_phase1::tests::cannot_advance_to_in_progress_without_prerequisite ... ok
+test roadmap_phase1::tests::cannot_advance_to_validated_without_prerequisite ... ok
+test roadmap_phase1::tests::config_rejects_gate_workaround ... ok
+test roadmap_phase1::tests::config_rejects_incomplete_research ... ok
+test roadmap_phase1::tests::config_rejects_regression ... ok
+test roadmap_phase1::tests::default_term_validates_ok ... ok
+test roadmap_phase1::tests::early_milestones_validate_in_qemu_minimal ... ok
+test roadmap_phase1::tests::every_other_milestone_has_a_prerequisite ... ok
+test roadmap_phase1::tests::final_milestone_requires_real_hardware ... ok
+test roadmap_phase1::tests::first_milestone_can_be_set_without_prerequisite ... ok
+test roadmap_phase1::tests::first_milestone_has_no_prerequisite ... ok
+test roadmap_phase1::tests::first_unvalidated_finds_the_blocker ... ok
+test roadmap_phase1::tests::linux_guest_in_qemu_uses_tier2 ... ok
+test roadmap_phase1::tests::linear_progression_validates_every_milestone ... ok
+test roadmap_phase1::tests::milestone_chain_is_linear ... ok
+test roadmap_phase1::tests::milestone_count_matches_list_length ... ok
+test roadmap_phase1::tests::milestone_labels_are_nonempty ... ok
+test roadmap_phase1::tests::missing_el2_boot_fails_gate ... ok
+test roadmap_phase1::tests::missing_gic_fails_gate ... ok
+test roadmap_phase1::tests::missing_nvme_fails_gate ... ok
+test roadmap_phase1::tests::new_tracker_all_not_started ... ok
+test roadmap_phase1::tests::no_regression_in_fresh_tracker ... ok
+test roadmap_phase1::tests::nonmonotonic_estimate_rejected ... ok
+test roadmap_phase1::tests::only_validated_state_is_validated ... ok
+test roadmap_phase1::tests::passing_config_validates_ok ... ok
+test roadmap_phase1::tests::passing_gate_passes ... ok
+test roadmap_phase1::tests::passing_gate_validates_ok ... ok
+test roadmap_phase1::tests::pessimistic_below_realistic_rejected ... ok
+test roadmap_phase1::tests::pessimistic_is_triple_optimistic ... ok
+test roadmap_phase1::tests::pessimistic_multiplier_is_three ... ok
+test roadmap_phase1::tests::phase1_summary_complete ... ok
+test roadmap_phase1::tests::phase1_summary_partial_not_complete ... ok
+test roadmap_phase1::tests::readme_upper_estimate_validates_ok ... ok
+test roadmap_phase1::tests::readme_estimate_validates_ok ... ok
+test roadmap_phase1::tests::realistic_is_double_optimistic ... ok
+test roadmap_phase1::tests::realistic_multiplier_is_two ... ok
+test roadmap_phase1::tests::research_complete_is_complete ... ok
+test roadmap_phase1::tests::research_missing_journal_is_not_complete ... ok
+test roadmap_phase1::tests::research_not_started_is_not_complete ... ok
+test roadmap_phase1::tests::research_validate_complete_ok ... ok
+test roadmap_phase1::tests::research_validate_not_started_rejected ... ok
+test roadmap_phase1::tests::term_weekly_hours_computed ... ok
+test roadmap_phase1::tests::vacation_hours_above_cap_rejected ... ok
+test roadmap_phase1::tests::vacation_weekly_hours_computed ... ok
+test roadmap_phase1::tests::weekday_hours_above_cap_rejected ... ok
+test roadmap_phase1::tests::weekend_hours_above_cap_rejected ... ok
+test roadmap_phase1::tests::workaround_fails_gate ... ok
+test roadmap_phase1::tests::zero_optimistic_rejected ... ok
+test roadmap_phase2::tests::app_category_count_matches ... ok
+test roadmap_phase2::tests::banking_attestation_is_not_hard_requirement ... ok
+test roadmap_phase2::tests::cannot_advance_without_prerequisite ... ok
+test roadmap_phase2::tests::config_rejects_incomplete_coverage ... ok
+test roadmap_phase2::tests::config_rejects_incomplete_phase1 ... ok
+test roadmap_phase2::tests::config_rejects_regression ... ok
+test roadmap_phase2::tests::config_rejects_unrecorded_phase1_gate ... ok
+test roadmap_phase2::tests::config_rejects_userdebug_build ... ok
+test roadmap_phase2::tests::device_integrity_claim_fails_gate ... ok
+test roadmap_phase2::tests::empty_coverage_does_not_pass ... ok
+test roadmap_phase2::tests::eng_fails_gate ... ok
+test roadmap_phase2::tests::every_other_category_is_hard_requirement ... ok
+test roadmap_phase2::tests::every_other_milestone_has_a_prerequisite ... ok
+test roadmap_phase2::tests::final_milestone_requires_real_hardware ... ok
+test roadmap_phase2::tests::first_milestone_can_be_set_without_prerequisite ... ok
+test roadmap_phase2::tests::first_milestone_has_no_prerequisite ... ok
+test roadmap_phase2::tests::first_unvalidated_finds_blocker ... ok
+test roadmap_phase2::tests::hard_requirements_preset_passes ... ok
+test roadmap_phase2::tests::linear_progression_validates_every_milestone ... ok
+test roadmap_phase2::tests::mark_passing_records_category ... ok
+test roadmap_phase2::tests::milestone_chain_is_linear ... ok
+test roadmap_phase2::tests::milestone_count_matches_list_length ... ok
+test roadmap_phase2::tests::milestone_labels_are_nonempty ... ok
+test roadmap_phase2::tests::missing_adreno_fails_gate ... ok
+test roadmap_phase2::tests::missing_basic_integrity_fails_gate ... ok
+test roadmap_phase2::tests::missing_communication_fails_coverage ... ok
+test roadmap_phase2::tests::missing_soak_fails_gate ... ok
+test roadmap_phase2::tests::new_tracker_all_not_started ... ok
+test roadmap_phase2::tests::nonmonotonic_rejected ... ok
+test roadmap_phase2::tests::other_milestones_use_qemu_linux_guest_tier ... ok
+test roadmap_phase2::tests::passing_gate_passes ... ok
+test roadmap_phase2::tests::passing_gate_validates ... ok
+test roadmap_phase2::tests::passing_phase2_config_validates ... ok
+test roadmap_phase2::tests::phase2_summary_complete ... ok
+test roadmap_phase2::tests::readme_lower_realistic_is_12_months ... ok
+test roadmap_phase2::tests::phase2_summary_partial_not_complete ... ok
+test roadmap_phase2::tests::readme_lower_validates_ok ... ok
+test roadmap_phase2::tests::readme_upper_pessimistic_is_27_months ... ok
+test roadmap_phase2::tests::readme_upper_validates_ok ... ok
+test roadmap_phase2::tests::regression_detected ... ok
+test roadmap_phase2::tests::userdebug_fails_gate ... ok
+test roadmap_phase2::tests::zero_optimistic_rejected ... ok
+test roadmap_phase3::tests::amd_production_validates ... ok
+test roadmap_phase3::tests::amd_uses_vmcb_and_npt ... ok
+test roadmap_phase3::tests::cannot_advance_without_prerequisite ... ok
+test roadmap_phase3::tests::config_rejects_host_userland_fex ... ok
+test roadmap_phase3::tests::config_rejects_incomplete_phase2 ... ok
+test roadmap_phase3::tests::config_rejects_regression ... ok
+test roadmap_phase3::tests::config_rejects_unrecorded_phase2_gate ... ok
+test roadmap_phase3::tests::every_other_milestone_has_a_prerequisite ... ok
+test roadmap_phase3::tests::fex_host_userland_rejected ... ok
+test roadmap_phase3::tests::fex_outside_hypervisor_fails_gate ... ok
+test roadmap_phase3::tests::fex_production_validates ... ok
+test roadmap_phase3::tests::final_milestone_requires_hardware ... ok
+test roadmap_phase3::tests::first_milestone_has_no_prerequisite ... ok
+test roadmap_phase3::tests::five_level_paging_rejected ... ok
+test roadmap_phase3::tests::host_userland_mode_is_rejected ... ok
+test roadmap_phase3::tests::in_hypervisor_mode_is_no_host_os_compatible ... ok
+test roadmap_phase3::tests::intel_production_validates ... ok
+test roadmap_phase3::tests::intel_uses_vmcs_and_ept ... ok
+test roadmap_phase3::tests::linear_progression_validates_every_milestone ... ok
+test roadmap_phase3::tests::milestone_chain_is_linear ... ok
+test roadmap_phase3::tests::milestone_count_matches ... ok
+test roadmap_phase3::tests::milestone_labels_are_nonempty ... ok
+test roadmap_phase3::tests::missing_amd_boot_fails_gate ... ok
+test roadmap_phase3::tests::missing_intel_boot_fails_gate ... ok
+test roadmap_phase3::tests::missing_invalidation_fails_gate ... ok
+test roadmap_phase3::tests::missing_invalidation_rejected ... ok
+test roadmap_phase3::tests::new_tracker_all_not_started ... ok
+test roadmap_phase3::tests::nonmonotonic_rejected ... ok
+test roadmap_phase3::tests::passing_gate_passes ... ok
+test roadmap_phase3::tests::passing_gate_validates ... ok
+test roadmap_phase3::tests::passing_phase3_config_validates ... ok
+test roadmap_phase3::tests::phase3_summary_partial_not_complete ... ok
+test roadmap_phase3::tests::readme_estimate_validates ... ok
+test roadmap_phase3::tests::readme_pessimistic_is_36_months ... ok
+test roadmap_phase3::tests::readme_realistic_is_24_months ... ok
+test roadmap_phase3::tests::regression_detected ... ok
+test roadmap_phase3::tests::workaround_fails ... ok
+test roadmap_phase3::tests::zero_optimistic_rejected ... ok
+test roadmap_phase4::tests::accel_reference_passes_tolerance ... ok
+test roadmap_phase3::tests::phase3_summary_complete ... ok
+test roadmap_phase4::tests::arm_over_target_rejected ... ok
+test roadmap_phase4::tests::arm_target_is_native ... ok
+test roadmap_phase4::tests::attestation_failures_excluded_from_pass_rate ... ok
+test roadmap_phase4::tests::arm_tier_frame_budget_under_one_frame ... ok
+test roadmap_phase4::tests::cannot_advance_without_prerequisite ... ok
+test roadmap_phase4::tests::cold_launch_target_validates ... ok
+test roadmap_phase4::tests::config_rejects_failed_compat ... ok
+test roadmap_phase4::tests::config_rejects_failed_perf_measurement ... ok
+test roadmap_phase4::tests::config_rejects_incomplete_phase3 ... ok
+test roadmap_phase4::tests::config_rejects_non_native_arm ... ok
+test roadmap_phase4::tests::config_rejects_sensor_out_of_tolerance ... ok
+test roadmap_phase4::tests::first_milestone_has_no_prerequisite ... ok
+test roadmap_phase4::tests::frame_time_target_validates ... ok
+test roadmap_phase4::tests::gyro_reference_passes_tolerance ... ok
+test roadmap_phase4::tests::linear_progression_works ... ok
+test roadmap_phase4::tests::mag_reference_passes_tolerance ... ok
+test roadmap_phase4::tests::measured_over_10_percent_fails ... ok
+test roadmap_phase4::tests::measured_under_10_percent_fails ... ok
+test roadmap_phase4::tests::measured_within_5_percent_passes ... ok
+test roadmap_phase4::tests::milestone_chain_is_linear ... ok
+test roadmap_phase4::tests::milestone_count_matches ... ok
+test roadmap_phase4::tests::missing_arm_native_fails ... ok
+test roadmap_phase4::tests::new_tracker_all_not_started ... ok
+test roadmap_phase4::tests::ninety_five_percent_meets_target ... ok
+test roadmap_phase4::tests::ninety_percent_fails_target ... ok
+test roadmap_phase4::tests::passing_exceeds_total_rejected ... ok
+test roadmap_phase4::tests::passing_gate_passes ... ok
+test roadmap_phase4::tests::passing_phase4_config_validates ... ok
+test roadmap_phase4::tests::perf_milestones_validate_on_real_hardware ... ok
+test roadmap_phase4::tests::perfect_report_meets_target ... ok
+test roadmap_phase4::tests::phase4_summary_complete ... ok
+test roadmap_phase4::tests::phase4_summary_partial_not_complete ... ok
+test roadmap_phase4::tests::readme_estimate_validates ... ok
+test roadmap_phase4::tests::readme_realistic_24_months ... ok
+test roadmap_phase4::tests::vm_exits_target_validates ... ok
+test roadmap_phase4::tests::within_target_measurement_validates ... ok
+test roadmap_phase4::tests::workaround_fails ... ok
+test roadmap_phase4::tests::x86_over_target_rejected ... ok
+test roadmap_phase4::tests::x86_target_cpu_is_present ... ok
+test roadmap_phase4::tests::x86_tier_frame_budget_is_at_most_2x_arm ... ok
+test roadmap_phase4::tests::x86_tighter_than_arm_rejected ... ok
+test roadmap_phase4::tests::zero_bound_rejected ... ok
+test roadmap_phase4::tests::zero_optimistic_rejected_p4 ... ok
+test roadmap_phase4::tests::zero_tolerance_rejected ... ok
+test roadmap_phase4::tests::zero_total_rejected ... ok
+test roadmap_phase5::tests::aosp_overlay_must_be_apache2 ... ok
+test roadmap_phase5::tests::both_channels_viable ... ok
+test roadmap_phase5::tests::cannot_advance_without_prerequisite ... ok
+test roadmap_phase5::tests::commercial_only_viable ... ok
+test roadmap_phase5::tests::config_rejects_incomplete_phase4 ... ok
+test roadmap_phase5::tests::config_rejects_proprietary_license ... ok
+test roadmap_phase5::tests::config_rejects_regression ... ok
+test roadmap_phase5::tests::config_rejects_software_trigger_switch ... ok
+test roadmap_phase5::tests::config_rejects_unrecorded_phase4_gate ... ok
+test roadmap_phase5::tests::config_rejects_unsustainable_plan ... ok
+test roadmap_phase5::tests::contributors_only_viable ... ok
+test roadmap_phase5::tests::hardware_trigger_inactive_rejected ... ok
+test roadmap_phase5::tests::first_milestone_has_no_prerequisite ... ok
+test roadmap_phase5::tests::installer_requires_hardware ... ok
+test roadmap_phase5::tests::linear_progression_works ... ok
+test roadmap_phase5::tests::milestone_chain_is_linear ... ok
+test roadmap_phase5::tests::milestone_count_matches ... ok
+test roadmap_phase5::tests::missing_ci_dashboard_rejected ... ok
+test roadmap_phase5::tests::milestone_labels_are_nonempty ... ok
+test roadmap_phase5::tests::missing_contributor_guide_rejected ... ok
+test roadmap_phase5::tests::missing_installer_fails ... ok
+test roadmap_phase5::tests::missing_phase6_roadmap_rejected ... ok
+test roadmap_phase5::tests::missing_secure_boot_rejected ... ok
+test roadmap_phase5::tests::missing_recovery_rejected ... ok
+test roadmap_phase5::tests::missing_security_disclosure_rejected ... ok
+test roadmap_phase5::tests::missing_security_mailbox_rejected ... ok
+test roadmap_phase5::tests::missing_sustainability_fails ... ok
+test roadmap_phase5::tests::missing_tier_detection_rejected ... ok
+test roadmap_phase5::tests::missing_user_manual_rejected ... ok
+test roadmap_phase5::tests::missing_xhci_reset_rejected ... ok
+test roadmap_phase5::tests::neither_channel_rejected ... ok
+test roadmap_phase5::tests::new_tracker_all_not_started ... ok
+test roadmap_phase5::tests::nonmonotonic_rejected_p5 ... ok
+test roadmap_phase5::tests::open_source_licenses_acceptable ... ok
+test roadmap_phase5::tests::passing_gate_passes ... ok
+test roadmap_phase5::tests::passing_phase5_config_validates ... ok
+test roadmap_phase5::tests::permissive_split ... ok
+test roadmap_phase5::tests::phase5_summary_complete ... ok
+test roadmap_phase5::tests::phase5_summary_partial_not_complete ... ok
+test roadmap_phase5::tests::production_input_switch_validates ... ok
+test roadmap_phase5::tests::proprietary_hypervisor_rejected ... ok
+test roadmap_phase5::tests::proprietary_installer_rejected ... ok
+test roadmap_phase5::tests::proprietary_not_acceptable ... ok
+test roadmap_phase5::tests::public_release_requires_hardware ... ok
+test roadmap_phase5::tests::readme_lower_validates ... ok
+test roadmap_phase5::tests::readme_upper_pessimistic_36_months ... ok
+test roadmap_phase5::tests::readme_upper_validates ... ok
+test roadmap_phase5::tests::recommended_assignment_validates ... ok
+test roadmap_phase5::tests::regression_detected ... ok
+test roadmap_phase5::tests::required_docs_complete ... ok
+test roadmap_phase5::tests::required_installer_complete ... ok
+test roadmap_phase5::tests::readme_lower_realistic_12_months ... ok
+test roadmap_phase5::tests::required_support_complete ... ok
+test roadmap_phase5::tests::smmu_not_required_rejected ... ok
+test roadmap_phase5::tests::software_trigger_allowed_rejected ... ok
+test roadmap_phase5::tests::workaround_fails ... ok
+test roadmap_phase5::tests::zero_optimistic_rejected_p5 ... ok
+test secure_boot::tests::all_zero_fingerprint_rejected ... ok
+test secure_boot::tests::contains_bytes_finds_needle ... ok
+test secure_boot::tests::defaults_validate ... ok
+test secure_boot::tests::disable_secure_boot_forbidden_error_is_distinct ... ok
+test secure_boot::tests::empty_mokmanager_path_rejected ... ok
+test secure_boot::tests::empty_shim_path_rejected ... ok
+test secure_boot::tests::full_happy_path_passes_gate ... ok
+test secure_boot::tests::gate_requires_all_four ... ok
+test secure_boot::tests::mok_enrollment_record_fingerprint_set ... ok
+test secure_boot::tests::nonzero_fingerprint_advances_phase ... ok
+test secure_boot::tests::phase_order_is_strict ... ok
+test secure_boot::tests::process_line_key_enrolled ... ok
+test secure_boot::tests::process_line_mokmanager_launched ... ok
+test secure_boot::tests::secure_boot_disabled_line_does_not_pass_gate ... ok
+test secure_boot::tests::signature_failure_does_not_advance_phase ... ok
+test secure_boot::tests::wrong_key_size_rejected ... ok
+test security::tests::attack_surface_entries_carry_data_correctly ... ok
+test security::tests::attack_surface_table_non_empty ... ok
+test security::tests::bhb_loop_nonzero_iterations_ok ... ok
+test security::tests::bhb_loop_zero_iterations_is_error ... ok
+test security::tests::clrbhb_config_ok ... ok
+test security::tests::guest_ipa_range_contains ... ok
+test security::tests::guest_ipa_range_contains_range ... ok
+test security::tests::guest_ipa_range_overflow_safe ... ok
+test security::tests::hvc_validator_in_range_ok ... ok
+test security::tests::hvc_validator_out_of_range_error ... ok
+test security::tests::security_configuration_smmu_absent_fails ... ok
+test security::tests::security_configuration_log_and_continue_fails ... ok
+test security::tests::security_configuration_smmu_pending_fails ... ok
+test security::tests::security_configuration_valid ... ok
+test security::tests::security_summary_all_secure ... ok
+test security::tests::security_summary_partial_fails ... ok
+test security::tests::smmu_active_is_enforcing ... ok
+test security::tests::smmu_fault_policy_production_safety ... ok
+test security::tests::tcb_const_contains_all_trusted_layers ... ok
+test security::tests::spectre_software_flush_variants ... ok
+test security::tests::tcb_descriptions_non_empty ... ok
+test security::tests::tcb_layers_trusted ... ok
+test security::tests::unsafe_audit_status_acceptable ... ok
+test security::tests::unsafe_audit_record_passes ... ok
+test setup_wizard::tests::aether_image_manifest_has_five_required ... ok
+test setup_wizard::tests::bridge_mode_roundtrip ... ok
+test setup_wizard::tests::check_image_manifest_passes_for_real_build ... ok
+test setup_wizard::tests::check_image_manifest_rejects_missing_required ... ok
+test setup_wizard::tests::defaults_validate ... ok
+test setup_wizard::tests::check_image_manifest_rejects_size_out_of_range ... ok
+test setup_wizard::tests::font_capital_a_has_known_shape ... ok
+test setup_wizard::tests::font_glyph_returns_none_for_nonprintable ... ok
+test setup_wizard::tests::font_glyph_returns_some_for_printable ... ok
+test setup_wizard::tests::font_has_all_printable_ascii ... ok
+test setup_wizard::tests::gate_requires_all_fields ... ok
+test setup_wizard::tests::image_entry_size_in_range ... ok
+test setup_wizard::tests::image_manifest_lookup_finds_known ... ok
+test setup_wizard::tests::init_returns_fresh_state ... ok
+test setup_wizard::tests::painter_clear_fills_buffer ... ok
+test setup_wizard::tests::painter_draw_glyph_writes_only_glyph_box ... ok
+test setup_wizard::tests::painter_draw_text_advances_by_8 ... ok
+test setup_wizard::tests::painter_encode_bgr_passthrough ... ok
+test setup_wizard::tests::painter_encode_rgb_swaps_r_and_b ... ok
+test setup_wizard::tests::painter_fill_rect_clips_to_bounds ... ok
+test setup_wizard::tests::painter_put_pixel_out_of_bounds_no_panic ... ok
+test setup_wizard::tests::phase_machine_is_monotonic ... ok
+test setup_wizard::tests::record_image_check_flips_gate ... ok
+test setup_wizard::tests::render_writes_title_bar_pixels ... ok
+test setup_wizard::tests::selections_accept_iana_timezone ... ok
+test setup_wizard::tests::selections_accept_known_keyboard ... ok
+test setup_wizard::tests::selections_accept_known_language ... ok
+test setup_wizard::tests::selections_reject_oversize_timezone ... ok
+test setup_wizard::tests::selections_reject_unknown_keyboard ... ok
+test setup_wizard::tests::selections_reject_unknown_language ... ok
+test setup_wizard::tests::sensor_profile_roundtrip ... ok
+test setup_wizard::tests::uart_scanner_advances_to_gate ... ok
+test setup_wizard::tests::uart_signatures_are_unique ... ok
+test setup_wizard::tests::validate_rejects_network_allowed ... ok
+test setup_wizard::tests::validate_rejects_zero_timeout ... ok
+test svm::tests::config_validate_alignment ... ok
+test svm::tests::efer_svme_bit ... ok
+test svm::tests::gate_passes_only_when_all_set ... ok
+test svm::tests::handle_vm_exit_hlt ... ok
+test svm::tests::handle_vm_exit_hlt_fallback_rip ... ok
+test svm::tests::handle_vm_exit_npf ... ok
+test svm::tests::intercept_hlt_bit_is_24 ... ok
+test svm::tests::intercept_vmrun_bit_is_0 ... ok
+test svm::tests::np_enable_bit ... ok
+test svm::tests::npf_decision_enters_when_translate_ok_and_safe ... ok
+test svm::tests::npf_decision_fails_when_translate_failed ... ok
+test svm::tests::npf_decision_fails_when_translate_ok_but_unsafe ... ok
+test svm::tests::npf_decision_never_enters_without_instr_fetch_even_if_safe ... ok
+test svm::tests::npf_decision_not_instr_fetch_short_circuits ... ok
+test setup_wizard::tests::render_screen_dispatches_by_phase ... ok
+test svm::tests::npt_entry_construction ... ok
+test svm::tests::npt_walker_flips_leaf_rw_to_rx ... ok
+test svm::tests::npt_walker_refuses_huge_pages ... ok
+test svm::tests::npt_walker_refuses_nonpresent ... ok
+test svm::tests::npt_walker_rejects_misaligned_pml4 ... ok
+test svm::tests::svm_exit_code_hlt_is_0x58 ... ok
+test svm::tests::svm_exit_code_npf_is_0x400 ... ok
+test svm::tests::vmcb_npt_tlb_flush ... ok
+test svm::tests::vmcb_offset_sanity ... ok
+test svm::tests::vmcb_rw_helpers ... ok
+test sysreg_trap::tests::classifies_trap_groups ... ok
+test sysreg_trap::tests::decode_roundtrips ... ok
+test sysreg_trap::tests::decodes_the_observed_kernel_trap ... ok
+test sysreg_trap::tests::sanitize_hides_only_unhosted_features ... ok
+test time::tests::aether_default_configuration_validates_ok ... ok
+test time::tests::cnthctl_default_raw_value ... ok
+test time::tests::cnthctl_default_validates_ok ... ok
+test time::tests::cnthctl_el1pcen_zero_fails ... ok
+test time::tests::cnthctl_el1pcten_zero_fails ... ok
+test time::tests::cnthctl_evnten_does_not_affect_validation ... ok
+test time::tests::cnthctl_raw_with_evnten ... ok
+test time::tests::cntpoff_large_nonzero_fails ... ok
+test time::tests::cntpoff_nonzero_fails ... ok
+test time::tests::cntpoff_zero_validates_ok ... ok
+test time::tests::configuration_bad_cnthctl_fails ... ok
+test time::tests::configuration_hypervisor_time_service_fails ... ok
+test time::tests::configuration_implausible_frequency_fails ... ok
+test time::tests::configuration_nonzero_cntpoff_fails ... ok
+test time::tests::configuration_trap_and_emulate_fails ... ok
+test time::tests::counter_frequency_hz ... ok
+test time::tests::counter_frequency_plausible_values ... ok
+test time::tests::counter_frequency_implausible_values ... ok
+test time::tests::counter_frequency_ticks_overflow_returns_none ... ok
+test time::tests::counter_frequency_ticks_per_us ... ok
+test time::tests::direct_passthrough_safe_for_static_partitioning ... ok
+test time::tests::hypervisor_provided_is_not_transparent ... ok
+test time::tests::platform_rtc_and_ntp_is_hypervisor_transparent ... ok
+test time::tests::timer_ppi_guest_classification ... ok
+test time::tests::timer_ppi_hypervisor_classification ... ok
+test time::tests::timer_ppi_intid_mapping ... ok
+test time::tests::timer_ppi_ppi_numbers ... ok
+test time::tests::timer_ppis_intids_in_ppi_range ... ok
+test time::tests::timer_ppis_table_has_four_entries ... ok
+test time::tests::timer_summary_all_ready ... ok
+test time::tests::timer_summary_partial_fails ... ok
+test time::tests::trap_and_emulate_not_safe_for_static_partitioning ... ok
+test uefi_boot_selector::tests::boot_target_round_trip ... ok
+test uefi_boot_selector::tests::contains_bytes_basic ... ok
+test uefi_boot_selector::tests::default_config_validates ... ok
+test uefi_boot_selector::tests::init_pipeline_succeeds ... ok
+test uefi_boot_selector::tests::phase_ordering ... ok
+test uefi_boot_selector::tests::rollback_guard_threshold ... ok
+test uefi_boot_selector::tests::rollback_reset_on_hypervisor_ready ... ok
+test uefi_boot_selector::tests::settings_cannot_be_default ... ok
+test uefi_boot_selector::tests::state_full_gate ... ok
+test uefi_boot_selector::tests::state_process_android_chainload ... ok
+test uefi_boot_selector::tests::timeout_31_rejected ... ok
+test uefi_boot_selector::tests::timeout_5_accepts ... ok
+test uefi_boot_selector::tests::zero_timeout_rejected ... ok
+test userspace_boot::tests::boot_state_processes_success_signatures ... ok
+test userspace_boot::tests::config_validate_rejects_misaligned_uart ... ok
+test userspace_boot::tests::config_validate_rejects_userdebug_build_type ... ok
+test userspace_boot::tests::contains_bytes_basic ... ok
+test userspace_boot::tests::gate_fails_without_build_type_user ... ok
+test userspace_boot::tests::gate_fails_without_home_screen ... ok
+test userspace_boot::tests::gate_passes_when_all_conditions_met ... ok
+test userspace_boot::tests::hal_name_critical_path ... ok
+test userspace_boot::tests::init_pipeline_validates_config ... ok
+test userspace_boot::tests::scan_uart_line_avc_gralloc ... ok
+test userspace_boot::tests::scan_uart_line_first_stage_fail ... ok
+test userspace_boot::tests::scan_uart_line_hal_failed ... ok
+test userspace_boot::tests::scan_uart_line_no_match ... ok
+test userspace_boot::tests::scan_uart_line_selinux_fail ... ok
+test userspace_boot::tests::selinux_fix_te_source_present_for_all_known_kinds ... ok
+test virtio::tests::desc_from_le_bytes_round_trip ... ok
+test virtio::tests::magic_value_is_ascii_virt ... ok
+test virtio::tests::region_size_is_one_page ... ok
+test virtio::tests::status_bits_distinct_and_monotonic_through_negotiation ... ok
+test virtio::tests::used_elem_to_le_bytes ... ok
+test virtio::tests::walker_follows_chain_of_three ... ok
+test virtio::tests::walker_rejects_head_out_of_range ... ok
+test virtio::tests::walker_rejects_indirect ... ok
+test virtio::tests::walker_rejects_loop ... ok
+test virtio::tests::walker_rejects_next_out_of_range ... ok
+test virtio_blk::tests::config_bytes_to_sectors_round_trip ... ok
+test virtio_blk::tests::device_features_advertises_required_modern_bits ... ok
+test virtio_blk::tests::device_id_is_two ... ok
+test virtio_blk::tests::failed_status_returns_error ... ok
+test virtio_blk::tests::gate_only_passes_with_all_four_bools ... ok
+test virtio_blk::tests::header_decode_round_trip ... ok
+test virtio_blk::tests::ipa_window_check ... ok
+test virtio_blk::tests::mmio_offset_out_of_range_rejected ... ok
+test virtio_blk::tests::mmio_reads_magic_and_device_id_flips_gates ... ok
+test virtio_blk::tests::negotiation_phase_advances_strictly ... ok
+test virtio_blk::tests::process_request_out_returns_unsupp_status ... ok
+test virtio_blk::tests::process_request_in_returns_ok_status_and_boot_magic_gate ... ok
+test virtio_blk::tests::status_zero_resets ... ok
+test vtx::tests::config_validate_alignment ... ok
+test vtx::tests::config_validate_zero_ram ... ok
+test vtx::tests::ept_leaf_entry_uc ... ok
+test vtx::tests::ept_leaf_entry_wb ... ok
+test vtx::tests::ept_walker_flips_leaf_rw_to_rx ... ok
+test vtx::tests::ept_walker_refuses_huge_pages ... ok
+test vtx::tests::ept_walker_refuses_nonpresent_intermediate ... ok
+test vtx::tests::ept_walker_rejects_misaligned_pml4 ... ok
+test vtx::tests::ept_walker_rejects_zero_pml4 ... ok
+test vtx::tests::eptp_encoding ... ok
+test vtx::tests::exit_reason_entry_failure_flag ... ok
+test vtx::tests::exit_reason_ept_violation_decode ... ok
+test vtx::tests::exit_reason_hlt_decode ... ok
+test vtx::tests::gate_fails_on_ept_violation ... ok
+test vtx::tests::gate_requires_both_hlt_and_vmresume ... ok
+test vtx::tests::state_record_hlt_exit_sets_gate ... ok
+test vtx::tests::vmcs_field_encoding_sanity ... ok
+test vtx::tests::vmcs_region_revision_id_clears_bit31 ... ok
+test vtx::tests::vmx_basic_msr_zero ... ok
+test vtx::tests::vmx_cpu_features_none ... ok
+test vtx::tests::vmxon_region_revision_id ... ok
+test windows::tests::test_config_bad_secure_boot_fails ... ok
+test windows::tests::test_config_insufficient_crash_dump_fails ... ok
+test windows::tests::test_config_no_cores_fails ... ok
+test windows::tests::test_config_no_memory_fails ... ok
+test windows::tests::test_config_valid_hyper_v ... ok
+test windows::tests::test_config_valid_neutral ... ok
+test windows::tests::test_crash_dump_exact_space ... ok
+test windows::tests::test_crash_dump_insufficient_fails ... ok
+test windows::tests::test_crash_dump_sufficient_space ... ok
+test windows::tests::test_custom_device_fails ... ok
+test windows::tests::test_enlightenment_all_has_all_enabled ... ok
+test windows::tests::test_enlightenment_none_has_no_enabled ... ok
+test windows::tests::test_enlightenment_partial ... ok
+test windows::tests::test_error_variants_distinct ... ok
+test windows::tests::test_hyper_v_compat_leaf_is_hyper_v ... ok
+test windows::tests::test_hyper_v_interface_constant ... ok
+test windows::tests::test_hyper_v_max_leaf ... ok
+test windows::tests::test_inbox_devices_all_valid ... ok
+test windows::tests::test_neutral_leaf_is_not_hyper_v ... ok
+test windows::tests::test_neutral_max_leaf ... ok
+test windows::tests::test_secure_boot_disabled_fails ... ok
+test windows::tests::test_secure_boot_enabled_but_missing_pk_fails ... ok
+test windows::tests::test_secure_boot_missing_windows_ca_fails ... ok
+test windows::tests::test_secure_boot_valid_passes ... ok
+test windows::tests::test_state_configure_invalid_rejects ... ok
+test windows::tests::test_state_cpuid_interface_leaf ... ok
+test windows::tests::test_state_cpuid_leaf_hyper_v_with_config ... ok
+test windows::tests::test_state_cpuid_leaf_neutral_without_config ... ok
+test windows::tests::test_state_mark_running ... ok
+test windows::tests::test_state_mark_running_without_config_fails ... ok
+test windows::tests::test_vendor_string_microsoft_hv_bytes ... ok
+test windows::tests::test_vendor_string_to_cpuid_regs_aether ... ok
+test windows::tests::test_vendor_string_to_cpuid_regs_microsoft ... ok
+test windows::tests::test_windows_partition_guest_id ... ok
+test x86_hw_validation::tests::amd_hw_targets_all_vendor_amd ... ok
+test x86_hw_validation::tests::amd_hw_targets_non_empty ... ok
+test x86_hw_validation::tests::amd_ryzen_9_zen4_is_family_0x19 ... ok
+test x86_hw_validation::tests::build_vars_document_both_platforms ... ok
+test x86_hw_validation::tests::build_vars_have_notes ... ok
+test x86_hw_validation::tests::build_vars_include_fex_in_hypervisor_flag ... ok
+test x86_hw_validation::tests::build_vars_include_validation_complete_flag ... ok
+test x86_hw_validation::tests::config_defaults_validate ... ok
+test x86_hw_validation::tests::config_rejects_amd_svm_not_passed ... ok
+test x86_hw_validation::tests::config_rejects_android_x86_amd_not_passed ... ok
+test x86_hw_validation::tests::config_rejects_android_x86_intel_not_passed ... ok
+test x86_hw_validation::tests::config_rejects_any_workaround_accepted ... ok
+test x86_hw_validation::tests::config_rejects_fex_not_in_hypervisor ... ok
+test x86_hw_validation::tests::config_rejects_intel_vtx_not_passed ... ok
+test x86_hw_validation::tests::config_rejects_non_user_build ... ok
+test x86_hw_validation::tests::config_rejects_ept_npt_invalidation_missing ... ok
+test x86_hw_validation::tests::contains_bytes_empty_needle_returns_false ... ok
+test x86_hw_validation::tests::contains_bytes_found_in_middle ... ok
+test x86_hw_validation::tests::contains_bytes_needle_longer_than_haystack ... ok
+test x86_hw_validation::tests::cpu_vendor_from_cpuid_string_amd ... ok
+test x86_hw_validation::tests::cpu_vendor_from_cpuid_string_intel ... ok
+test x86_hw_validation::tests::cpu_vendor_from_cpuid_string_too_short ... ok
+test x86_hw_validation::tests::cpu_vendor_from_cpuid_string_unknown ... ok
+test x86_hw_validation::tests::cpu_vendor_labels_distinct ... ok
+test x86_hw_validation::tests::cpu_vendor_string_round_trip ... ok
+test x86_hw_validation::tests::cpuid_vendor_amd_is_authentic_amd ... ok
+test x86_hw_validation::tests::cpuid_vendor_intel_is_genuine_intel ... ok
+test x86_hw_validation::tests::cpuid_vendor_strings_are_twelve_bytes ... ok
+test x86_hw_validation::tests::defconfig_disables_debug_overhead ... ok
+test x86_hw_validation::tests::defconfig_documents_silent_failure_for_every_entry ... ok
+test x86_hw_validation::tests::defconfig_has_hz_1000 ... ok
+test x86_hw_validation::tests::gate_fails_without_amd_even_if_intel_passes ... ok
+test x86_hw_validation::tests::gate_hypervisor_side_ready_partial ... ok
+test x86_hw_validation::tests::gate_requires_all_five_criteria ... ok
+test x86_hw_validation::tests::gate_starts_failing ... ok
+test x86_hw_validation::tests::hw_target_names_non_empty ... ok
+test x86_hw_validation::tests::init_gate_not_passed_after_init ... ok
+test x86_hw_validation::tests::init_phase_is_fex_mode_confirmed ... ok
+test x86_hw_validation::tests::init_rejects_invalid_config ... ok
+test x86_hw_validation::tests::init_rejects_workaround ... ok
+test x86_hw_validation::tests::init_succeeds_with_defaults ... ok
+test x86_hw_validation::tests::intel_core_ultra_is_family_6 ... ok
+test x86_hw_validation::tests::intel_hw_targets_all_vendor_intel ... ok
+test x86_hw_validation::tests::intel_hw_targets_non_empty ... ok
+test x86_hw_validation::tests::invalidation_ack_via_uart_signature ... ok
+test x86_hw_validation::tests::manual_invalidation_accounting_intel ... ok
+test x86_hw_validation::tests::pair_fails_without_android_boot ... ok
+test x86_hw_validation::tests::manual_invalidation_accounting_amd ... ok
+test x86_hw_validation::tests::pair_invalidation_accounting ... ok
+test x86_hw_validation::tests::pair_new_starts_invalid ... ok
+test x86_hw_validation::tests::pair_zero_mapping_changes_is_trivially_acked ... ok
+test x86_hw_validation::tests::pair_passes_when_all_criteria_met ... ok
+test x86_hw_validation::tests::phase_machine_strictly_ordered ... ok
+test x86_hw_validation::tests::process_line_advances_through_full_boot ... ok
+test x86_hw_validation::tests::process_line_amd_only_does_not_pass_gate ... ok
+test x86_hw_validation::tests::process_line_build_type_user_advances_gate_bit ... ok
+test x86_hw_validation::tests::process_line_intel_only_does_not_pass_gate ... ok
+test x86_hw_validation::tests::process_line_workaround_blocks_gate ... ok
+test x86_hw_validation::tests::process_line_phase_does_not_regress ... ok
+test x86_hw_validation::tests::uart_signatures_are_ascii_only ... ok
+test x86_hw_validation::tests::uart_signatures_distinct ... ok
+test android_handoff::tests::dump_dtb_for_inspection ... FAILED
+test cpio::tests::phase_f_gates_pass_on_real_initramfs ... ok
+
+failures:
+
+---- android_handoff::tests::dump_dtb_for_inspection stdout ----
+
+thread 'android_handoff::tests::dump_dtb_for_inspection' (7010) panicked at hypervisor/src/android_handoff.rs:694:62:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/1d81eb4ad9cd207e3e638bd32b17ec4fce8412a6/library/std/src/panicking.rs:676:5
+   1: core::panicking::panic_fmt
+             at /rustc/1d81eb4ad9cd207e3e638bd32b17ec4fce8412a6/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/1d81eb4ad9cd207e3e638bd32b17ec4fce8412a6/library/core/src/result.rs:1866:5
+   3: <core::result::Result<(), core::io::error::Error>>::unwrap
+             at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs:1232:23
+   4: hypervisor::android_handoff::tests::dump_dtb_for_inspection
+             at ./src/android_handoff.rs:694:62
+   5: hypervisor::android_handoff::tests::dump_dtb_for_inspection::{closure#0}
+             at ./src/android_handoff.rs:690:33
+   6: <hypervisor::android_handoff::tests::dump_dtb_for_inspection::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/1d81eb4ad9cd207e3e638bd32b17ec4fce8412a6/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    android_handoff::tests::dump_dtb_for_inspection
+
+test result: FAILED. 1329 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+error: test failed, to rerun pass `-p hypervisor --lib`
+# exit: 101 end: 2026-10-08T09:39:13Z wall_s=34

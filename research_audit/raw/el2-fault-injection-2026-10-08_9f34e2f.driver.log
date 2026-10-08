@@ -1,0 +1,18 @@
+== control:     Finished `release` profile [optimized] target(s) in 0.91s
+control_smp4	smp=4	rc=1	wall=54s	proof=[]	last=[[    0.015406][    T0] Kernel panic - not syncing: Oops - Undefined instruction: Fatal exception]
+control_smp1	smp=1	rc=1	wall=52s	proof=[]	last=[[    0.009499][    T0] Kernel panic - not syncing: Oops - Undefined instruction: Fatal exception]
+== FI1_eoimode0:     Finished `release` profile [optimized] target(s) in 8.71s
+FI1_eoimode0	smp=4	rc=1	wall=54s	proof=[]	last=[[    0.000085][    T0] sched_clock: 57 bits at 63MHz, resolution 16ns, wraps every 4398046511096ns]
+== FI2_pl011_no_amba:     Finished `release` profile [optimized] target(s) in 8.28s
+FI2_pl011_no_amba	smp=4	rc=1	wall=58s	proof=[]	last=[[    4.084445][   T72] sh (72) used greatest stack depth: 14400 bytes left]
+== FI3_psci_hvc:     Finished `release` profile [optimized] target(s) in 8.48s
+FI3_psci_hvc	smp=4	rc=1	wall=52s	proof=[]	last=[[EL2] FAULT AT EL2  ESR=0x000000005a000000 EC=0x0000000000000016 ELR=0x000000013c71caf0 SPSR=0x00000000800003c9 FAR=0x0000000000000000]
+== FI4_no_elr_advance:     Finished `release` profile [optimized] target(s) in 8.50s
+FI4_no_elr_advance	smp=4	rc=1	wall=52s	proof=[]	last=[  ERET to Linux kernel EL1...]
+== FI5_no_id_sanitize:     Finished `release` profile [optimized] target(s) in 8.74s
+FI5_no_id_sanitize	smp=4	rc=1	wall=54s	proof=[]	last=[[    0.000000][    T0] Kernel panic - not syncing: Oops - Undefined instruction: Fatal exception]
+== FI6_no_apk_api:     Finished `release` profile [optimized] target(s) in 8.29s
+FI6_no_apk_api	smp=4	rc=1	wall=54s	proof=[]	last=[[    0.013839][    T0] Kernel panic - not syncing: Oops - Undefined instruction: Fatal exception]
+== FI7_hardcoded_4cpus:     Finished `release` profile [optimized] target(s) in 8.31s
+FI7_hardcoded_4cpus	smp=1	rc=1	wall=52s	proof=[]	last=[[EL2] FAULT AT EL2  ESR=0x0000000096000010 EC=0x0000000000000025 ELR=0x000000013c71e648 SPSR=0x00000000800003c9 FAR=0x00000000080c0014]
+== restore:     Finished `release` profile [optimized] target(s) in 0.74s

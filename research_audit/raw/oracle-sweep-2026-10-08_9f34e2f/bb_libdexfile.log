@@ -1,0 +1,8 @@
+=== AETHER dbt-oracle — 3 block(s) ===
+    reference engine: hand-written ARM64 interpreter (independent of DBT)
+
+[PASS  ] bb_libdexfile_3369c_c0       (594 bytes x86)
+[PASS  ] bb_libdexfile_3369c_c1       (594 bytes x86)
+[PASS  ] bb_libdexfile_3369c_c2       (594 bytes x86)
+
+summary: 3 PASS, 0 FAIL, 0 SKIP, 0 DBTERR

@@ -1,0 +1,47 @@
+[
+ {
+  "kernel_entry": 0.205,
+  "smp_up": 0.609,
+  "free_initmem": 4.598,
+  "userspace": 4.75,
+  "online_cpus": 4.75,
+  "proof_done": 5.86,
+  "_cmd": "qemu-system-aarch64 -machine virt,gic-version=3 -cpu max -m 2G -smp 1 -kernel /home/user/aether-files/_kernel_new -initrd /home/user/aether-files/qemu/initrd-proof.cpio -append console=ttyAMA0 earlycon rdinit=/bin/sh -serial file:raw/arm-milestones-2026-10-08_9f34e2f/arm_direct_smp1_run0.serial.log -display none -monitor none -no-reboot"
+ },
+ {
+  "kernel_entry": 0.152,
+  "smp_up": 0.557,
+  "free_initmem": 4.4,
+  "userspace": 4.551,
+  "online_cpus": 4.551,
+  "proof_done": 5.661,
+  "_cmd": "qemu-system-aarch64 -machine virt,gic-version=3 -cpu max -m 2G -smp 1 -kernel /home/user/aether-files/_kernel_new -initrd /home/user/aether-files/qemu/initrd-proof.cpio -append console=ttyAMA0 earlycon rdinit=/bin/sh -serial file:raw/arm-milestones-2026-10-08_9f34e2f/arm_direct_smp1_run1.serial.log -display none -monitor none -no-reboot"
+ },
+ {
+  "kernel_entry": 0.152,
+  "smp_up": 0.555,
+  "free_initmem": 4.544,
+  "userspace": 4.695,
+  "online_cpus": 4.695,
+  "proof_done": 5.856,
+  "_cmd": "qemu-system-aarch64 -machine virt,gic-version=3 -cpu max -m 2G -smp 1 -kernel /home/user/aether-files/_kernel_new -initrd /home/user/aether-files/qemu/initrd-proof.cpio -append console=ttyAMA0 earlycon rdinit=/bin/sh -serial file:raw/arm-milestones-2026-10-08_9f34e2f/arm_direct_smp1_run2.serial.log -display none -monitor none -no-reboot"
+ },
+ {
+  "kernel_entry": 0.152,
+  "smp_up": 0.555,
+  "free_initmem": 4.188,
+  "userspace": 4.339,
+  "online_cpus": 4.39,
+  "proof_done": 5.501,
+  "_cmd": "qemu-system-aarch64 -machine virt,gic-version=3 -cpu max -m 2G -smp 1 -kernel /home/user/aether-files/_kernel_new -initrd /home/user/aether-files/qemu/initrd-proof.cpio -append console=ttyAMA0 earlycon rdinit=/bin/sh -serial file:raw/arm-milestones-2026-10-08_9f34e2f/arm_direct_smp1_run3.serial.log -display none -monitor none -no-reboot"
+ },
+ {
+  "kernel_entry": 0.202,
+  "smp_up": 0.706,
+  "free_initmem": 4.593,
+  "userspace": 4.748,
+  "online_cpus": 4.748,
+  "proof_done": 5.909,
+  "_cmd": "qemu-system-aarch64 -machine virt,gic-version=3 -cpu max -m 2G -smp 1 -kernel /home/user/aether-files/_kernel_new -initrd /home/user/aether-files/qemu/initrd-proof.cpio -append console=ttyAMA0 earlycon rdinit=/bin/sh -serial file:raw/arm-milestones-2026-10-08_9f34e2f/arm_direct_smp1_run4.serial.log -display none -monitor none -no-reboot"
+ }
+]

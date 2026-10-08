@@ -1,0 +1,17 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded rustc-literal-escaper v0.0.8
+  Downloaded getopts v0.2.24
+  Downloaded foldhash v0.2.0
+  Downloaded rustc-demangle v0.1.28
+  Downloaded r-efi v5.3.0
+  Downloaded r-efi-alloc v2.1.0
+  Downloaded hashbrown v0.17.1
+  Downloaded libc v0.2.189
+   Compiling compiler_builtins v0.1.160 (/root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins)
+   Compiling core v0.0.0 (/root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core)
+   Compiling hypervisor v0.1.0 (/home/user/aether-files/hypervisor)
+   Compiling alloc v0.0.0 (/root/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc)
+   Compiling aether-translator v0.0.1 (/home/user/aether-files/aether-translator)
+    Finished `release` profile [optimized] target(s) in 41.37s
+# exit 0 wall_s=42

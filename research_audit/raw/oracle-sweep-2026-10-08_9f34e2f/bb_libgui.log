@@ -1,0 +1,482 @@
+=== AETHER dbt-oracle — 477 block(s) ===
+    reference engine: hand-written ARM64 interpreter (independent of DBT)
+
+[SKIP  ] bb_libgui_90f98_c0           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libgui_90f98_c1           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libgui_90f98_c2           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libgui_91ad0_c0           reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libgui_91ad0_c1           reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libgui_91ad0_c2           reference: unsupported insn 0x1e260008
+[PASS  ] bb_libgui_94b9c_c0           (266 bytes x86)
+[PASS  ] bb_libgui_94b9c_c1           (266 bytes x86)
+[PASS  ] bb_libgui_94b9c_c2           (266 bytes x86)
+[SKIP  ] bb_libgui_94bb8_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_94bb8_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_94bb8_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_94c54_c0           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_94c54_c1           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_94c54_c2           reference: unsupported insn 0x9e6702c0
+[PASS  ] bb_libgui_955e4_c0           (266 bytes x86)
+[PASS  ] bb_libgui_955e4_c1           (266 bytes x86)
+[PASS  ] bb_libgui_955e4_c2           (266 bytes x86)
+[SKIP  ] bb_libgui_955f4_c0           reference: unsupported insn 0x9e670320
+[SKIP  ] bb_libgui_955f4_c1           reference: unsupported insn 0x9e670320
+[SKIP  ] bb_libgui_955f4_c2           reference: unsupported insn 0x9e670320
+[SKIP  ] bb_libgui_95698_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_95698_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_95698_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_95fc4_c0           reference: unsupported insn 0x9e290008
+[SKIP  ] bb_libgui_95fc4_c1           reference: unsupported insn 0x9e290008
+[SKIP  ] bb_libgui_95fc4_c2           reference: unsupported insn 0x9e290008
+[SKIP  ] bb_libgui_961ac_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_961ac_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_961ac_c2           reference: unsupported insn 0x9e290009
+[PASS  ] bb_libgui_96e2c_c0           (263 bytes x86)
+[PASS  ] bb_libgui_96e2c_c1           (263 bytes x86)
+[PASS  ] bb_libgui_96e2c_c2           (263 bytes x86)
+[SKIP  ] bb_libgui_96e48_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_96e48_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_96e48_c2           reference: unsupported insn 0x9e29000a
+[PASS  ] bb_libgui_98a8c_c0           (266 bytes x86)
+[PASS  ] bb_libgui_98a8c_c1           (266 bytes x86)
+[PASS  ] bb_libgui_98a8c_c2           (266 bytes x86)
+[SKIP  ] bb_libgui_98aa4_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_98aa4_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_98aa4_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_990c4_c0           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_990c4_c1           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_990c4_c2           reference: unsupported insn 0x9e670380
+[PASS  ] bb_libgui_99360_c0           (266 bytes x86)
+[PASS  ] bb_libgui_99360_c1           (266 bytes x86)
+[PASS  ] bb_libgui_99360_c2           (266 bytes x86)
+[SKIP  ] bb_libgui_99378_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_99378_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_99378_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_99548_c0           reference: unsupported insn 0x9e670280
+[SKIP  ] bb_libgui_99548_c1           reference: unsupported insn 0x9e670280
+[SKIP  ] bb_libgui_99548_c2           reference: unsupported insn 0x9e670280
+[SKIP  ] bb_libgui_99b48_c0           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_99b48_c1           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_99b48_c2           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_99c78_c0           reference: unsupported insn 0x9e670340
+[SKIP  ] bb_libgui_99c78_c1           reference: unsupported insn 0x9e670340
+[SKIP  ] bb_libgui_99c78_c2           reference: unsupported insn 0x9e670340
+[SKIP  ] bb_libgui_99d94_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_99d94_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_99d94_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9a554_c0           reference: unsupported insn 0x0e205800
+[SKIP  ] bb_libgui_9a554_c1           reference: unsupported insn 0x0e205800
+[SKIP  ] bb_libgui_9a554_c2           reference: unsupported insn 0x0e205800
+[SKIP  ] bb_libgui_9a8b4_c0           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_9a8b4_c1           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_9a8b4_c2           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_9ac48_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9ac48_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9ac48_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9af04_c0           reference: unsupported insn 0x9e670300
+[SKIP  ] bb_libgui_9af04_c1           reference: unsupported insn 0x9e670300
+[SKIP  ] bb_libgui_9af04_c2           reference: unsupported insn 0x9e670300
+[PASS  ] bb_libgui_9afbc_c0           (266 bytes x86)
+[PASS  ] bb_libgui_9afbc_c1           (266 bytes x86)
+[PASS  ] bb_libgui_9afbc_c2           (266 bytes x86)
+[SKIP  ] bb_libgui_9b00c_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9b00c_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9b00c_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9b1f4_c0           reference: unsupported insn 0x9e6702a0
+[SKIP  ] bb_libgui_9b1f4_c1           reference: unsupported insn 0x9e6702a0
+[SKIP  ] bb_libgui_9b1f4_c2           reference: unsupported insn 0x9e6702a0
+[SKIP  ] bb_libgui_9b29c_c0           reference: unsupported insn 0x9e670360
+[SKIP  ] bb_libgui_9b29c_c1           reference: unsupported insn 0x9e670360
+[SKIP  ] bb_libgui_9b29c_c2           reference: unsupported insn 0x9e670360
+[PASS  ] bb_libgui_9b36c_c0           (266 bytes x86)
+[PASS  ] bb_libgui_9b36c_c1           (266 bytes x86)
+[PASS  ] bb_libgui_9b36c_c2           (266 bytes x86)
+[SKIP  ] bb_libgui_9b3f0_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9b3f0_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9b3f0_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9b870_c0           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_9b870_c1           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_9b870_c2           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_9bce4_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9bce4_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9bce4_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9bf8c_c0           reference: unsupported insn 0x9e670300
+[SKIP  ] bb_libgui_9bf8c_c1           reference: unsupported insn 0x9e670300
+[SKIP  ] bb_libgui_9bf8c_c2           reference: unsupported insn 0x9e670300
+[PASS  ] bb_libgui_9c060_c0           (266 bytes x86)
+[PASS  ] bb_libgui_9c060_c1           (266 bytes x86)
+[PASS  ] bb_libgui_9c060_c2           (266 bytes x86)
+[SKIP  ] bb_libgui_9c4a4_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9c4a4_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9c4a4_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9e650_c0           reference: unsupported insn 0x9e670260
+[SKIP  ] bb_libgui_9e650_c1           reference: unsupported insn 0x9e670260
+[SKIP  ] bb_libgui_9e650_c2           reference: unsupported insn 0x9e670260
+[SKIP  ] bb_libgui_9e874_c0           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libgui_9e874_c1           reference: unsupported insn 0x9e6702e0
+[SKIP  ] bb_libgui_9e874_c2           reference: unsupported insn 0x9e6702e0
+[PASS  ] bb_libgui_9e92c_c0           (266 bytes x86)
+[PASS  ] bb_libgui_9e92c_c1           (266 bytes x86)
+[PASS  ] bb_libgui_9e92c_c2           (266 bytes x86)
+[SKIP  ] bb_libgui_9ebd8_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9ebd8_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9ebd8_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_9efec_c0           reference: unsupported insn 0x9e670320
+[SKIP  ] bb_libgui_9efec_c1           reference: unsupported insn 0x9e670320
+[SKIP  ] bb_libgui_9efec_c2           reference: unsupported insn 0x9e670320
+[SKIP  ] bb_libgui_9f00c_c0           reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libgui_9f00c_c1           reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libgui_9f00c_c2           reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libgui_9f568_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_9f568_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_9f568_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_a038c_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_a038c_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_a038c_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_a4a50_c0           reference: unsupported insn 0x9e670140
+[SKIP  ] bb_libgui_a4a50_c1           reference: unsupported insn 0x9e670140
+[SKIP  ] bb_libgui_a4a50_c2           reference: unsupported insn 0x9e670140
+[SKIP  ] bb_libgui_a4c18_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_a4c18_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_a4c18_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_a585c_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_a585c_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_a585c_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_a5a4c_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_a5a4c_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_a5a4c_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_a76bc_c0           reference: unsupported insn 0x6f00e401
+[SKIP  ] bb_libgui_a76bc_c1           reference: unsupported insn 0x6f00e401
+[SKIP  ] bb_libgui_a76bc_c2           reference: unsupported insn 0x6f00e401
+[SKIP  ] bb_libgui_aa8b4_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_aa8b4_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_aa8b4_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_abc68_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_abc68_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_abc68_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_ad578_c0           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_ad578_c1           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_ad578_c2           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_af054_c0           reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libgui_af054_c1           reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libgui_af054_c2           reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libgui_b07d8_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_b07d8_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_b07d8_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_b0f38_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_b0f38_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_b0f38_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_b2da0_c0           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_b2da0_c1           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_b2da0_c2           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_b32d4_c0           reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libgui_b32d4_c1           reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libgui_b32d4_c2           reference: unsupported insn 0x6f00e400
+[PASS  ] bb_libgui_b5a8c_c0           (227 bytes x86)
+[PASS  ] bb_libgui_b5a8c_c1           (227 bytes x86)
+[PASS  ] bb_libgui_b5a8c_c2           (227 bytes x86)
+[SKIP  ] bb_libgui_b73fc_c0           reference: unsupported insn 0x1e270120
+[SKIP  ] bb_libgui_b73fc_c1           reference: unsupported insn 0x1e270120
+[SKIP  ] bb_libgui_b73fc_c2           reference: unsupported insn 0x1e270120
+[SKIP  ] bb_libgui_b7414_c0           reference: unsupported insn 0x1e270121
+[SKIP  ] bb_libgui_b7414_c1           reference: unsupported insn 0x1e270121
+[SKIP  ] bb_libgui_b7414_c2           reference: unsupported insn 0x1e270121
+[SKIP  ] bb_libgui_b7b2c_c0           reference: unsupported insn 0x1e270100
+[SKIP  ] bb_libgui_b7b2c_c1           reference: unsupported insn 0x1e270100
+[SKIP  ] bb_libgui_b7b2c_c2           reference: unsupported insn 0x1e270100
+[SKIP  ] bb_libgui_bc3d8_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_bc3d8_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_bc3d8_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_bc760_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_bc760_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_bc760_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_bcef4_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_bcef4_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_bcef4_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_bde3c_c0           reference: unsupported insn 0x9e290014
+[SKIP  ] bb_libgui_bde3c_c1           reference: unsupported insn 0x9e290014
+[SKIP  ] bb_libgui_bde3c_c2           reference: unsupported insn 0x9e290014
+[SKIP  ] bb_libgui_c1258_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_c1258_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_c1258_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_c352c_c0           reference: unsupported insn 0x5e0c0613
+[SKIP  ] bb_libgui_c352c_c1           reference: unsupported insn 0x5e0c0613
+[SKIP  ] bb_libgui_c352c_c2           reference: unsupported insn 0x5e0c0613
+[SKIP  ] bb_libgui_c354c_c0           reference: unsupported insn 0x5e0c04f9
+[SKIP  ] bb_libgui_c354c_c1           reference: unsupported insn 0x5e0c04f9
+[SKIP  ] bb_libgui_c354c_c2           reference: unsupported insn 0x5e0c04f9
+[SKIP  ] bb_libgui_c356c_c0           reference: unsupported insn 0x5e1404fa
+[SKIP  ] bb_libgui_c356c_c1           reference: unsupported insn 0x5e1404fa
+[SKIP  ] bb_libgui_c356c_c2           reference: unsupported insn 0x5e1404fa
+[SKIP  ] bb_libgui_c36dc_c0           reference: unsupported insn 0x5e0c0619
+[SKIP  ] bb_libgui_c36dc_c1           reference: unsupported insn 0x5e0c0619
+[SKIP  ] bb_libgui_c36dc_c2           reference: unsupported insn 0x5e0c0619
+[SKIP  ] bb_libgui_c36fc_c0           reference: unsupported insn 0x5e140634
+[SKIP  ] bb_libgui_c36fc_c1           reference: unsupported insn 0x5e140634
+[SKIP  ] bb_libgui_c36fc_c2           reference: unsupported insn 0x5e140634
+[SKIP  ] bb_libgui_c371c_c0           reference: unsupported insn 0x5e14061a
+[SKIP  ] bb_libgui_c371c_c1           reference: unsupported insn 0x5e14061a
+[SKIP  ] bb_libgui_c371c_c2           reference: unsupported insn 0x5e14061a
+[SKIP  ] bb_libgui_c3794_c0           reference: unsupported insn 0x2f00e402
+[SKIP  ] bb_libgui_c3794_c1           reference: unsupported insn 0x2f00e402
+[SKIP  ] bb_libgui_c3794_c2           reference: unsupported insn 0x2f00e402
+[SKIP  ] bb_libgui_c37a0_c0           reference: unsupported insn 0x1e2e1005
+[SKIP  ] bb_libgui_c37a0_c1           reference: unsupported insn 0x1e2e1005
+[SKIP  ] bb_libgui_c37a0_c2           reference: unsupported insn 0x1e2e1005
+[SKIP  ] bb_libgui_c37b4_c0           reference: unsupported insn 0x2f00e400
+[SKIP  ] bb_libgui_c37b4_c1           reference: unsupported insn 0x2f00e400
+[SKIP  ] bb_libgui_c37b4_c2           reference: unsupported insn 0x2f00e400
+[SKIP  ] bb_libgui_c3808_c0           reference: unsupported insn 0x5e0c04d7
+[SKIP  ] bb_libgui_c3808_c1           reference: unsupported insn 0x5e0c04d7
+[SKIP  ] bb_libgui_c3808_c2           reference: unsupported insn 0x5e0c04d7
+[SKIP  ] bb_libgui_c3828_c0           reference: unsupported insn 0x5e0c04f1
+[SKIP  ] bb_libgui_c3828_c1           reference: unsupported insn 0x5e0c04f1
+[SKIP  ] bb_libgui_c3828_c2           reference: unsupported insn 0x5e0c04f1
+[SKIP  ] bb_libgui_c3848_c0           reference: unsupported insn 0x5e1404f2
+[SKIP  ] bb_libgui_c3848_c1           reference: unsupported insn 0x5e1404f2
+[SKIP  ] bb_libgui_c3848_c2           reference: unsupported insn 0x5e1404f2
+[SKIP  ] bb_libgui_c3868_c0           reference: unsupported insn 0x5e1c04e7
+[SKIP  ] bb_libgui_c3868_c1           reference: unsupported insn 0x5e1c04e7
+[SKIP  ] bb_libgui_c3868_c2           reference: unsupported insn 0x5e1c04e7
+[SKIP  ] bb_libgui_c38fc_c0           reference: unsupported insn 0x1e2c1003
+[SKIP  ] bb_libgui_c38fc_c1           reference: unsupported insn 0x1e2c1003
+[SKIP  ] bb_libgui_c38fc_c2           reference: unsupported insn 0x1e2c1003
+[PASS  ] bb_libgui_c3928_c0           (370 bytes x86)
+[PASS  ] bb_libgui_c3928_c1           (370 bytes x86)
+[PASS  ] bb_libgui_c3928_c2           (370 bytes x86)
+[PASS  ] bb_libgui_c3948_c0           (316 bytes x86)
+[PASS  ] bb_libgui_c3948_c1           (316 bytes x86)
+[PASS  ] bb_libgui_c3948_c2           (316 bytes x86)
+[SKIP  ] bb_libgui_c39b0_c0           reference: unsupported insn 0x5e0c04d1
+[SKIP  ] bb_libgui_c39b0_c1           reference: unsupported insn 0x5e0c04d1
+[SKIP  ] bb_libgui_c39b0_c2           reference: unsupported insn 0x5e0c04d1
+[SKIP  ] bb_libgui_c39d0_c0           reference: unsupported insn 0x5e1404d2
+[SKIP  ] bb_libgui_c39d0_c1           reference: unsupported insn 0x5e1404d2
+[SKIP  ] bb_libgui_c39d0_c2           reference: unsupported insn 0x5e1404d2
+[SKIP  ] bb_libgui_c39f0_c0           reference: unsupported insn 0x5e1c04c6
+[SKIP  ] bb_libgui_c39f0_c1           reference: unsupported insn 0x5e1c04c6
+[SKIP  ] bb_libgui_c39f0_c2           reference: unsupported insn 0x5e1c04c6
+[SKIP  ] bb_libgui_c4540_c0           reference: unsupported insn 0x9e670360
+[SKIP  ] bb_libgui_c4540_c1           reference: unsupported insn 0x9e670360
+[SKIP  ] bb_libgui_c4540_c2           reference: unsupported insn 0x9e670360
+[SKIP  ] bb_libgui_c49dc_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c49dc_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c49dc_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c4d0c_c0           reference: unsupported insn 0x9e670280
+[SKIP  ] bb_libgui_c4d0c_c1           reference: unsupported insn 0x9e670280
+[SKIP  ] bb_libgui_c4d0c_c2           reference: unsupported insn 0x9e670280
+[PASS  ] bb_libgui_c4de8_c0           (266 bytes x86)
+[PASS  ] bb_libgui_c4de8_c1           (266 bytes x86)
+[PASS  ] bb_libgui_c4de8_c2           (266 bytes x86)
+[SKIP  ] bb_libgui_c4f6c_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c4f6c_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c4f6c_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c55ac_c0           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_c55ac_c1           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_c55ac_c2           reference: unsupported insn 0x9e670380
+[SKIP  ] bb_libgui_c593c_c0           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_c593c_c1           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_c593c_c2           reference: unsupported insn 0x9e6702c0
+[SKIP  ] bb_libgui_c6230_c0           reference: unsupported insn 0x9e670280
+[SKIP  ] bb_libgui_c6230_c1           reference: unsupported insn 0x9e670280
+[SKIP  ] bb_libgui_c6230_c2           reference: unsupported insn 0x9e670280
+[SKIP  ] bb_libgui_c6380_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c6380_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c6380_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c648c_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c648c_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c648c_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c7148_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c7148_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c7148_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c7830_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c7830_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c7830_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c7cdc_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c7cdc_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c7cdc_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_c91c0_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_c91c0_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_c91c0_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_c94e4_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_c94e4_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_c94e4_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_cb54c_c0           reference: unsupported insn 0x1e270120
+[SKIP  ] bb_libgui_cb54c_c1           reference: unsupported insn 0x1e270120
+[SKIP  ] bb_libgui_cb54c_c2           reference: unsupported insn 0x1e270120
+[PASS  ] bb_libgui_ccc8c_c0           (84 bytes x86)
+[PASS  ] bb_libgui_ccc8c_c1           (84 bytes x86)
+[PASS  ] bb_libgui_ccc8c_c2           (84 bytes x86)
+[PASS  ] bb_libgui_ccc9c_c0           (84 bytes x86)
+[PASS  ] bb_libgui_ccc9c_c1           (84 bytes x86)
+[PASS  ] bb_libgui_ccc9c_c2           (84 bytes x86)
+[PASS  ] bb_libgui_cccac_c0           (84 bytes x86)
+[PASS  ] bb_libgui_cccac_c1           (84 bytes x86)
+[PASS  ] bb_libgui_cccac_c2           (84 bytes x86)
+[PASS  ] bb_libgui_cccbc_c0           (84 bytes x86)
+[PASS  ] bb_libgui_cccbc_c1           (84 bytes x86)
+[PASS  ] bb_libgui_cccbc_c2           (84 bytes x86)
+[PASS  ] bb_libgui_ccccc_c0           (84 bytes x86)
+[PASS  ] bb_libgui_ccccc_c1           (84 bytes x86)
+[PASS  ] bb_libgui_ccccc_c2           (84 bytes x86)
+[PASS  ] bb_libgui_ce538_c0           (637 bytes x86)
+[PASS  ] bb_libgui_ce538_c1           (637 bytes x86)
+[PASS  ] bb_libgui_ce538_c2           (637 bytes x86)
+[SKIP  ] bb_libgui_cf898_c0           reference: unsupported insn 0x9e670260
+[SKIP  ] bb_libgui_cf898_c1           reference: unsupported insn 0x9e670260
+[SKIP  ] bb_libgui_cf898_c2           reference: unsupported insn 0x9e670260
+[PASS  ] bb_libgui_d0b2c_c0           (266 bytes x86)
+[PASS  ] bb_libgui_d0b2c_c1           (266 bytes x86)
+[PASS  ] bb_libgui_d0b2c_c2           (266 bytes x86)
+[SKIP  ] bb_libgui_d0b9c_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d0b9c_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d0b9c_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d1910_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d1910_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d1910_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d2bfc_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d2bfc_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d2bfc_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d2c5c_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d2c5c_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d2c5c_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d7378_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d7378_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_d7378_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_da3a4_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_da3a4_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_da3a4_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_dae14_c0           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_dae14_c1           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_dae14_c2           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_dcd38_c0           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_dcd38_c1           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_dcd38_c2           reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_dcdf4_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_dcdf4_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_dcdf4_c2           reference: unsupported insn 0x9e29000a
+[PASS  ] bb_libgui_de2d4_c0           (162 bytes x86)
+[PASS  ] bb_libgui_de2d4_c1           (162 bytes x86)
+[PASS  ] bb_libgui_de2d4_c2           (162 bytes x86)
+[SKIP  ] bb_libgui_de2e0_c0           reference: unsupported insn 0x1e2e1000
+[SKIP  ] bb_libgui_de2e0_c1           reference: unsupported insn 0x1e2e1000
+[SKIP  ] bb_libgui_de2e0_c2           reference: unsupported insn 0x1e2e1000
+[PASS  ] bb_libgui_df6b4_c0           (544 bytes x86)
+[PASS  ] bb_libgui_df6b4_c1           (544 bytes x86)
+[PASS  ] bb_libgui_df6b4_c2           (544 bytes x86)
+[SKIP  ] bb_libgui_df6d4_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_df6d4_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_df6d4_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_e0120_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_e0120_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_e0120_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_e13d4_c0           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_e13d4_c1           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_e13d4_c2           reference: unsupported insn 0x9e290009
+[SKIP  ] bb_libgui_e3270_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_e3270_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_e3270_c2           reference: unsupported insn 0x9e29000a
+[PASS  ] bb_libgui_ecc50_c0           (96 bytes x86)
+[PASS  ] bb_libgui_ecc50_c1           (96 bytes x86)
+[PASS  ] bb_libgui_ecc50_c2           (96 bytes x86)
+[SKIP  ] bb_libgui_f1250_c0           reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libgui_f1250_c1           reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libgui_f1250_c2           reference: unsupported insn 0x6f00e400
+[SKIP  ] bb_libgui_f8e2c_c0           reference: unsupported insn 0x9e670120
+[SKIP  ] bb_libgui_f8e2c_c1           reference: unsupported insn 0x9e670120
+[SKIP  ] bb_libgui_f8e2c_c2           reference: unsupported insn 0x9e670120
+[SKIP  ] bb_libgui_f9d50_c0           reference: unsupported insn 0x9e660008
+[SKIP  ] bb_libgui_f9d50_c1           reference: unsupported insn 0x9e660008
+[SKIP  ] bb_libgui_f9d50_c2           reference: unsupported insn 0x9e660008
+[PASS  ] bb_libgui_fb3dc_c0           (219 bytes x86)
+[PASS  ] bb_libgui_fb3dc_c1           (219 bytes x86)
+[PASS  ] bb_libgui_fb3dc_c2           (219 bytes x86)
+[SKIP  ] bb_libgui_fb8f0_c0           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_fb8f0_c1           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_fb8f0_c2           reference: unsupported insn 0x9e29000a
+[SKIP  ] bb_libgui_fe660_c0           reference: unsupported insn 0x9e660008
+[SKIP  ] bb_libgui_fe660_c1           reference: unsupported insn 0x9e660008
+[SKIP  ] bb_libgui_fe660_c2           reference: unsupported insn 0x9e660008
+[SKIP  ] bb_libgui_102f80_c0          reference: unsupported insn 0x9e670320
+[SKIP  ] bb_libgui_102f80_c1          reference: unsupported insn 0x9e670320
+[SKIP  ] bb_libgui_102f80_c2          reference: unsupported insn 0x9e670320
+[PASS  ] bb_libgui_11aeac_c0          (181 bytes x86)
+[PASS  ] bb_libgui_11aeac_c1          (181 bytes x86)
+[PASS  ] bb_libgui_11aeac_c2          (181 bytes x86)
+[PASS  ] bb_libgui_11aed8_c0          (239 bytes x86)
+[PASS  ] bb_libgui_11aed8_c1          (239 bytes x86)
+[PASS  ] bb_libgui_11aed8_c2          (239 bytes x86)
+[PASS  ] bb_libgui_11b06c_c0          (148 bytes x86)
+[PASS  ] bb_libgui_11b06c_c1          (148 bytes x86)
+[PASS  ] bb_libgui_11b06c_c2          (148 bytes x86)
+[SKIP  ] bb_libgui_11b210_c0          reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libgui_11b210_c1          reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libgui_11b210_c2          reference: unsupported insn 0x1e260008
+[SKIP  ] bb_libgui_11b3e8_c0          reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_11b3e8_c1          reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_11b3e8_c2          reference: unsupported insn 0x9e670100
+[SKIP  ] bb_libgui_11e98c_c0          reference: unsupported insn 0x2f00e408
+[SKIP  ] bb_libgui_11e98c_c1          reference: unsupported insn 0x2f00e408
+[SKIP  ] bb_libgui_11e98c_c2          reference: unsupported insn 0x2f00e408
+[PASS  ] bb_libgui_11e9b8_c0          (420 bytes x86)
+[PASS  ] bb_libgui_11e9b8_c1          (420 bytes x86)
+[PASS  ] bb_libgui_11e9b8_c2          (420 bytes x86)
+[PASS  ] bb_libgui_12b03c_c0          (170 bytes x86)
+[PASS  ] bb_libgui_12b03c_c1          (170 bytes x86)
+[PASS  ] bb_libgui_12b03c_c2          (170 bytes x86)
+[PASS  ] bb_libgui_12b6f0_c0          (148 bytes x86)
+[PASS  ] bb_libgui_12b6f0_c1          (148 bytes x86)
+[PASS  ] bb_libgui_12b6f0_c2          (148 bytes x86)
+[PASS  ] bb_libgui_12b700_c0          (191 bytes x86)
+[PASS  ] bb_libgui_12b700_c1          (191 bytes x86)
+[PASS  ] bb_libgui_12b700_c2          (191 bytes x86)
+[PASS  ] bb_libgui_12b754_c0          (213 bytes x86)
+[PASS  ] bb_libgui_12b754_c1          (213 bytes x86)
+[PASS  ] bb_libgui_12b754_c2          (213 bytes x86)
+[SKIP  ] bb_libgui_12b768_c0          reference: unsupported insn 0x2f00e403
+[SKIP  ] bb_libgui_12b768_c1          reference: unsupported insn 0x2f00e403
+[SKIP  ] bb_libgui_12b768_c2          reference: unsupported insn 0x2f00e403
+[SKIP  ] bb_libgui_12b780_c0          reference: unsupported insn 0x2f00e403
+[SKIP  ] bb_libgui_12b780_c1          reference: unsupported insn 0x2f00e403
+[SKIP  ] bb_libgui_12b780_c2          reference: unsupported insn 0x2f00e403
+[SKIP  ] bb_libgui_12b798_c0          reference: unsupported insn 0x2f00e401
+[SKIP  ] bb_libgui_12b798_c1          reference: unsupported insn 0x2f00e401
+[SKIP  ] bb_libgui_12b798_c2          reference: unsupported insn 0x2f00e401
+[SKIP  ] bb_libgui_1314f0_c0          reference: unsupported insn 0x9e660008
+[SKIP  ] bb_libgui_1314f0_c1          reference: unsupported insn 0x9e660008
+[SKIP  ] bb_libgui_1314f0_c2          reference: unsupported insn 0x9e660008
+[SKIP  ] bb_libgui_131f50_c0          reference: unsupported insn 0x9e670120
+[SKIP  ] bb_libgui_131f50_c1          reference: unsupported insn 0x9e670120
+[SKIP  ] bb_libgui_131f50_c2          reference: unsupported insn 0x9e670120
+[PASS  ] bb_libgui_131fa0_c0          (263 bytes x86)
+[PASS  ] bb_libgui_131fa0_c1          (263 bytes x86)
+[PASS  ] bb_libgui_131fa0_c2          (263 bytes x86)
+[PASS  ] bb_libgui_131fcc_c0          (533 bytes x86)
+[PASS  ] bb_libgui_131fcc_c1          (533 bytes x86)
+[PASS  ] bb_libgui_131fcc_c2          (533 bytes x86)
+[SKIP  ] bb_libgui_131fec_c0          reference: unsupported insn 0x9e29000b
+[SKIP  ] bb_libgui_131fec_c1          reference: unsupported insn 0x9e29000b
+[SKIP  ] bb_libgui_131fec_c2          reference: unsupported insn 0x9e29000b
+[SKIP  ] bb_libgui_136ad8_c0          reference: unsupported insn 0x0e205800
+[SKIP  ] bb_libgui_136ad8_c1          reference: unsupported insn 0x0e205800
+[SKIP  ] bb_libgui_136ad8_c2          reference: unsupported insn 0x0e205800
+[SKIP  ] bb_libgui_136af8_c0          reference: unsupported insn 0x1e26000a
+[SKIP  ] bb_libgui_136af8_c1          reference: unsupported insn 0x1e26000a
+[SKIP  ] bb_libgui_136af8_c2          reference: unsupported insn 0x1e26000a
+[PASS  ] bb_libgui_1421a8_c0          (88 bytes x86)
+[PASS  ] bb_libgui_1421a8_c1          (88 bytes x86)
+[PASS  ] bb_libgui_1421a8_c2          (88 bytes x86)
+[PASS  ] bb_libgui_1485f4_c0          (88 bytes x86)
+[PASS  ] bb_libgui_1485f4_c1          (88 bytes x86)
+[PASS  ] bb_libgui_1485f4_c2          (88 bytes x86)
+[PASS  ] bb_libgui_148608_c0          (88 bytes x86)
+[PASS  ] bb_libgui_148608_c1          (88 bytes x86)
+[PASS  ] bb_libgui_148608_c2          (88 bytes x86)
+[PASS  ] bb_libgui_151338_c0          (88 bytes x86)
+[PASS  ] bb_libgui_151338_c1          (88 bytes x86)
+[PASS  ] bb_libgui_151338_c2          (88 bytes x86)
+[SKIP  ] bb_libgui_15ace8_c0          reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libgui_15ace8_c1          reference: unsupported insn 0x1e260009
+[SKIP  ] bb_libgui_15ace8_c2          reference: unsupported insn 0x1e260009
+
+summary: 114 PASS, 0 FAIL, 363 SKIP, 0 DBTERR

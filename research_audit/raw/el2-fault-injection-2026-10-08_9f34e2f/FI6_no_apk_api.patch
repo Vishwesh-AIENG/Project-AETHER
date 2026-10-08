@@ -1,0 +1,12 @@
+--- /tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/hypervisor/src/arm64/virt.rs.orig	2026-10-08 10:28:42.772228731 +0000
++++ /tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/hypervisor/src/arm64/virt.rs	2026-10-08 10:28:42.783397891 +0000
+@@ -166,8 +166,7 @@
+     /// Setting this (with VM=1) enables Stage 2 translation and routes all
+     /// exception types to EL2.
+     pub const GUEST_FLAGS: u64 = VM | SWIO | PTW | FMO | IMO | AMO | FB |
+-        BSU_IS | TWI | TWE | TID1 | TID3 | TSC | TIDCP | TACR | TSW | RW | TLOR |
+-        APK | API;
++        BSU_IS | TWI | TWE | TID1 | TID3 | TSC | TIDCP | TACR | TSW | RW | TLOR;
+ }
+ 
+ // ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,43 @@
+==> qemu-system-aarch64 -machine virt,gic-version=3,virtualization=on -cpu max -m 4G -smp 1 -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd -drive if=none,id=hd0,format=raw,file=fat:rw:/tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/qemu/efi -device virtio-blk-pci,drive=hd0,bootindex=0 -device loader,file=_kernel_new,addr=0x40800000,force-raw=on -serial file:/tmp/claude-0/-home-user-Project-AETHER/dcc244d9-4547-551d-a2fa-2a0f2e8d5155/scratchpad/fi/base/qemu/arm-serial.log -display none -monitor none -no-reboot -device loader,file=qemu/initrd-proof.cpio,addr=0x44100000,force-raw=on
+==> matched --until after 11.0s
+==> serial log 17514 bytes; tail:
+[    3.258612][    T1] ashmem: initialized
+[    3.262286][    T1] gnss: GNSS driver registered with major 506
+[    3.269542][    T1] usbcore: registered new interface driver snd-usb-audio
+[    3.277040][    T1] GACT probability NOT on
+[    3.277803][    T1] Mirror/redirect action on
+[    3.278837][    T1] netem: version 1.3
+[    3.281073][    T1] u32 classifier
+[    3.281432][    T1]     input device check on
+[    3.281779][    T1]     Actions configured
+[    3.321106][    T1] xt_time: kernel timezone is -0000
+[    3.324298][    T1] ipip: IPv4 and MPLS over IPv4 tunneling driver
+[    3.335818][    T1] gre: GRE over IPv4 demultiplexor driver
+[    3.336693][    T1] ip_gre: GRE over IPv4 tunneling driver
+[    3.358127][    T1] IPv4 over IPsec tunneling driver
+[    3.372906][    T1] Initializing XFRM netlink socket
+[    3.373822][    T1] IPsec XFRM device driver
+[    3.386159][    T1] NET: Registered PF_INET6 protocol family
+[    3.421397][    T1] Segment Routing with IPv6
+[    3.422512][    T1] In-situ OAM (IOAM) with IPv6
+[    3.427584][    T1] mip6: Mobile IPv6
+[    3.438057][    T1] sit: IPv6, IPv4 and MPLS over IPv4 tunneling driver
+[    3.451798][    T1] ip6_gre: GRE over IPv6 tunneling driver
+[    3.459353][    T1] NET: Registered PF_PACKET protocol family
+[    3.460142][    T1] NET: Registered PF_KEY protocol family
+[    3.481319][    T1] registered taskstats version 1
+[    3.483080][    T1] page_owner is disabled
+[    3.485994][    T1] Key type .fscrypt registered
+[    3.486425][    T1] Key type fscrypt-provisioning registered
+[    3.498454][    T1] ALSA device list:
+[    3.498862][    T1]   No soundcards found.
+[    3.512359][    T1] uart-pl011 9000000.serial: no DMA platform data
+[    3.547469][    T1] Freeing unused kernel memory: 3264K
+[    3.550177][    T1] Run /bin/sh as init process
+
+PROOF ch34 userspace=1 kernel=6.1.79-g2dca19b0a7e6-dirty machine=aarch64 pid=1
+PROOF ch35 online_cpus=1
+[    3.687104][   T48] sh (48) used greatest stack depth: 14432 bytes left
+PROOF ch36 cpu0 timer_delta=51
+PROOF ch36 ipi_delta=1
+PROOF done
