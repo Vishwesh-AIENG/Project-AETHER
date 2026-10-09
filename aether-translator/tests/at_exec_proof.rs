@@ -3299,8 +3299,8 @@ fn m4b_msr_sctlr_does_not_flush_tlb() {
 
 /// (g) BYTE PROOF (ch66 contract): `MSR TCR_EL1` bakes the
 /// `aether_mmu_flush_all` call (a translation-control change flushes the soft
-/// TLB); `MSR TTBR0_EL1` bakes only the user-half JIT block invalidate and
-/// `MSR TTBR1_EL1` the full one (the TLB is TTBR-tagged and needs no flush);
+/// TLB); `MSR TTBR0_EL1` bakes nothing (TLB and JIT blocks are TTBR0-keyed)
+/// and `MSR TTBR1_EL1` the full block invalidate (the TLB needs no flush);
 /// `MSR SCTLR_EL1` bakes neither.
 #[test]
 fn m4b_tcr_msr_emits_flush_call_ttbr0_invalidates_blocks_only() {
@@ -3318,8 +3318,8 @@ fn m4b_tcr_msr_emits_flush_call_ttbr0_invalidates_blocks_only() {
         .to_le_bytes();
     let ttbr1 = translate_straight_line(&[0xD518_2022u32], 0xF318); // MSR TTBR1_EL1,X2
     assert!(!has(&ttbr0, &flush_le), "TTBR0 MSR must NOT flush the TTBR-tagged soft TLB");
-    assert!(has(&ttbr0, &inval_low_le) && !has(&ttbr0, &inval_le),
-            "TTBR0 MSR must invalidate only the user-half (low VA) JIT blocks");
+    assert!(!has(&ttbr0, &inval_low_le) && !has(&ttbr0, &inval_le),
+            "TTBR0 MSR invalidates nothing: TLB and blocks are both TTBR0-keyed");
     assert!(!has(&ttbr1, &flush_le), "TTBR1 MSR must NOT flush the TTBR-tagged soft TLB");
     assert!(has(&ttbr1, &inval_le), "TTBR1 MSR must invalidate all JIT blocks");
     assert!(!has(&sctlr, &flush_le) && !has(&sctlr, &inval_le), "SCTLR MSR: no flush, no invalidate");
@@ -9479,4 +9479,102 @@ fn block_chaining_loop_executes_and_unlinks() {
     assert_eq!(rt.stat_chain_unlinks, rt.stat_chain_links, "invalidate_all undoes every link");
     let (x0, _) = run(&mut rt);
     assert_eq!(x0, 100, "re-translated after invalidate: still exact");
+}
+
+/// ch66 ADDRESS-SPACE-KEYED BLOCK CACHE: the same user VA holding different
+/// code in two address spaces (two TTBR0 values) must resolve to two distinct
+/// translations, and switching back must hit the first one again (no
+/// re-translation, no invalidation on a TTBR0 switch). Kernel (VA[55]=1) blocks
+/// are global: visible from any TTBR0.
+#[test]
+fn block_cache_keyed_by_ttbr0_space() {
+    let _serial = serial();
+    use aether_translator::dbt::{aether_dbt_set_space, AetherDbtResult, DbtRuntime};
+    let pc = 0x40_0000u64;
+    let a: Vec<u8> = 0xD280_0020u32.to_le_bytes().to_vec(); // mov x0,#1
+    let b: Vec<u8> = 0xD280_0040u32.to_le_bytes().to_vec(); // mov x0,#2
+    let mut rt = DbtRuntime::new();
+    aether_dbt_set_space(0x1111_0000_0000_1000);
+    assert_eq!(rt.translate_block(pc, &a), AetherDbtResult::Ok);
+    let off_a = rt.host_offset_for_pc(pc).unwrap().0;
+    aether_dbt_set_space(0x2222_0000_0000_2000);
+    assert!(rt.host_offset_for_pc(pc).is_none(), "other address space must miss");
+    assert_eq!(rt.translate_block(pc, &b), AetherDbtResult::Ok);
+    let off_b = rt.host_offset_for_pc(pc).unwrap().0;
+    assert_ne!(off_a, off_b, "two spaces, two translations");
+    aether_dbt_set_space(0x1111_0000_0000_1000);
+    assert_eq!(rt.host_offset_for_pc(pc).unwrap().0, off_a, "switch back hits space A's block");
+    let n = rt.stat_blocks_translated;
+    assert_eq!(rt.translate_block(pc, &a), AetherDbtResult::Ok);
+    assert_eq!(rt.stat_blocks_translated, n, "no re-translation after switching back");
+    // A kernel PC is global across spaces.
+    let kpc = 0xFFFF_FFC0_0800_0000u64;
+    assert_eq!(rt.translate_block(kpc, &a), AetherDbtResult::Ok);
+    aether_dbt_set_space(0x2222_0000_0000_2000);
+    assert!(rt.host_offset_for_pc(kpc).is_some(), "kernel block visible from any TTBR0");
+    aether_dbt_set_space(0);
+}
+
+/// ch66 JUMP CACHE: a BL/RET function called 50× from a loop. RET is an
+/// indirect branch, so it can only stay out of the dispatcher through the
+/// inline jump-cache probe. Result must be exact; the warm run must take only a
+/// handful of dispatches; after invalidate_all the probe must miss (cache
+/// cleared) and the run must still be exact.
+#[test]
+fn jump_cache_bl_ret_loop_executes() {
+    let _serial = serial();
+    use aether_translator::dbt::{aether_dbt_set_space, AetherDbtResult, DbtRuntime};
+    use aether_translator::runtime::context::{CHAIN_BUDGET_IDX, CHAIN_EXIT_IDX, SYSREG_SLOT0};
+    extern "system" {
+        fn VirtualProtect(a: *const core::ffi::c_void, s: usize, n: u32, o: *mut u32) -> i32;
+    }
+    // 0x20000 mov x1,#0 | 0x20004 bl f | add x1,x1,#1 | cmp x1,#50 | b.ne 0x20004
+    // 0x20014 b 0x20110 (stop) | 0x20018 f: add x0,x0,#3 | ret
+    let words: [u32; 8] = [0xD280_0001, 0x9400_0005, 0x9100_0421, 0xF100_C83F,
+                           0x54FF_FFA1, 0x1400_003F, 0x9100_0C00, 0xD65F_03C0];
+    let base: u64 = 0x20000;
+    let stop: u64 = 0x20110;
+    let mem: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    aether_dbt_set_space(0);
+    let mut rt = DbtRuntime::new();
+    let cb = rt.code_buf.base_ptr();
+    let mut old = 0u32;
+    // SAFETY: making the runtime's own code arena executable for in-place runs.
+    assert!(unsafe { VirtualProtect(cb as *const _, rt.code_buf.capacity(), 0x40, &mut old) } != 0);
+    let (exit_i, budget_i) = (SYSREG_SLOT0 + CHAIN_EXIT_IDX, SYSREG_SLOT0 + CHAIN_BUDGET_IDX);
+    let run = |rt: &mut DbtRuntime| -> (u64, u64) {
+        let mut ctx = vec![0u64; CTX_U64S];
+        ctx[PC_SLOT] = base;
+        let (mut d, mut pending) = (0u64, None::<(u64, u64)>);
+        while ctx[PC_SLOT] != stop {
+            let pc = ctx[PC_SLOT];
+            let off = match rt.host_offset_for_pc(pc) {
+                Some((o, _)) => o,
+                None => {
+                    assert_eq!(rt.translate_block(pc, &mem[(pc - base) as usize..]), AetherDbtResult::Ok);
+                    rt.host_offset_for_pc(pc).unwrap().0
+                }
+            };
+            if let Some((ex, ep)) = pending.take() { rt.chain_link(ex, ep, pc, off); }
+            ctx[exit_i] = 0;
+            ctx[budget_i] = 64;
+            let ep = rt.arena_epoch;
+            // SAFETY: RET-terminated translated block in the RWX arena.
+            unsafe { enter_block(cb.add(off), ctx.as_mut_ptr()) };
+            pending = Some((ctx[exit_i], ep));
+            d += 1;
+            assert!(d < 10_000, "runaway");
+        }
+        (ctx[0], d)
+    };
+    let (x0, d1) = run(&mut rt);
+    assert_eq!(x0, 150);
+    let (x0, d2) = run(&mut rt);
+    assert_eq!(x0, 150);
+    // 50 calls = 100 BL/RET transfers + 50 back-edges; with chaining + the jump
+    // cache the warm run needs only ~(150+50)/65 dispatches.
+    assert!(d2 <= 8, "warm BL/RET loop: {d2} dispatches (cold {d1})");
+    rt.invalidate_all();
+    let (x0, _) = run(&mut rt);
+    assert_eq!(x0, 150, "exact after invalidate_all (jump cache cleared)");
 }

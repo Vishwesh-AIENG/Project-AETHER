@@ -3465,6 +3465,9 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
         // Use the CACHED safety verdict (computed once at translation) instead
         // of rescanning the block bytes on every entry — the prior
         // `block_is_safe_to_enter` was O(len) softmmu reads per dispatch.
+        aether_translator::dbt::aether_dbt_set_space(
+            (*ptr::addr_of!(NPF_GUEST_CTX))[SYSREG_SLOT0 + aether_translator::runtime::mmu::SLOT_TTBR0],
+        );
         let (host_va, _len, safe) = aether_dbt_block_host_va_safe(pc)?;
         if !safe {
             return None;
@@ -5502,6 +5505,12 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                 break;
             }
             let pc = (*ptr::addr_of!(NPF_GUEST_CTX))[NPF_PC_SLOT];
+            // ch66: user-VA blocks are keyed by the live TTBR0 (address space);
+            // tell the translator which one is current before any lookup.
+            aether_translator::dbt::aether_dbt_set_space(
+                (*ptr::addr_of!(NPF_GUEST_CTX))[aether_translator::runtime::context::SYSREG_SLOT0
+                    + aether_translator::runtime::mmu::SLOT_TTBR0],
+            );
             last_pc = pc;
             // [vma] record the just-allocated vm_area_struct (x0) at vm_area_dup+0x2c
             // (the block after `bl kmem_cache_alloc`). At the fork-corruption fault

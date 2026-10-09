@@ -37,6 +37,11 @@ pub struct CachedBlock {
     /// ch66: address-space epoch at install time (see `BlockCache::epoch`). The
     /// entry is live only while it equals the current epoch of its VA half.
     pub epoch: u64,
+    /// ch66: address space the block was translated in — the live `TTBR0_EL1`
+    /// value (table base + ASID) for a low-half PC, 0 for a high-half (global
+    /// kernel) PC. Part of the key: the same user VA in two processes is two
+    /// entries, so a TTBR0 switch needs no invalidation at all.
+    pub space: u64,
 }
 
 /// Two-generation block cache.
@@ -112,8 +117,8 @@ impl BlockCache {
         (h >> (64 - self.capacity.trailing_zeros())) as usize
     }
 
-    /// Find the bucket index for `guest_pc` in `buckets`, or `None` if absent.
-    fn probe(buckets: &[Option<CachedBlock>], guest_pc: u64) -> Option<usize> {
+    /// Find the bucket index for `(guest_pc, space)` in `buckets`, or `None`.
+    fn probe(buckets: &[Option<CachedBlock>], guest_pc: u64, space: u64) -> Option<usize> {
         let cap = buckets.len();
         let mask = cap - 1;
         // Recompute bucket index inline (can't call &self.bucket here).
@@ -124,7 +129,7 @@ impl BlockCache {
         loop {
             match &buckets[i] {
                 None => return None,
-                Some(b) if b.guest_pc == guest_pc => return Some(i),
+                Some(b) if b.guest_pc == guest_pc && b.space == space => return Some(i),
                 _ => {}
             }
             i = (i + 1) & mask;
@@ -149,7 +154,7 @@ impl BlockCache {
                     buckets[i] = Some(entry);
                     return true;
                 }
-                Some(b) if b.guest_pc == entry.guest_pc => {
+                Some(b) if b.guest_pc == entry.guest_pc && b.space == entry.space => {
                     // Update existing entry.
                     buckets[i] = Some(entry);
                     return true;
@@ -170,9 +175,15 @@ impl BlockCache {
     /// Checks active generation first, then old generation (and promotes to
     /// active on an old-gen hit to prevent re-eviction).
     pub fn lookup(&mut self, guest_pc: u64) -> Option<&CachedBlock> {
+        self.lookup_in(guest_pc, 0)
+    }
+
+    /// ch66: look up `guest_pc` translated in address space `space` (see
+    /// [`CachedBlock::space`]).
+    pub fn lookup_in(&mut self, guest_pc: u64, space: u64) -> Option<&CachedBlock> {
         let ep = self.epoch_of(guest_pc);
         // Hot path: active generation.
-        if let Some(idx) = Self::probe(&self.active, guest_pc) {
+        if let Some(idx) = Self::probe(&self.active, guest_pc, space) {
             if self.active[idx].as_ref().map_or(false, |e| e.epoch == ep) {
                 self.stat_hits += 1;
                 return self.active[idx].as_ref();
@@ -186,17 +197,17 @@ impl BlockCache {
         // Cold path: old generation.
         // Old-gen is read-only (no deletions) to preserve linear-probe chains.
         // We promote to active by copying — old slot stays intact until rotation.
-        if let Some(idx) = Self::probe(&self.old, guest_pc)
+        if let Some(idx) = Self::probe(&self.old, guest_pc, space)
             .filter(|&i| self.old[i].as_ref().map_or(false, |e| e.epoch == ep && e.len != 0))
         {
             self.stat_old_hits += 1;
             let entry = self.old[idx].as_ref().unwrap().clone();
-            let already = Self::probe(&self.active, guest_pc).is_some();
+            let already = Self::probe(&self.active, guest_pc, space).is_some();
             if Self::insert_into(&mut self.active, entry) && !already {
                 self.active_count += 1;
             }
             // Re-probe active to return a stable reference.
-            if let Some(ai) = Self::probe(&self.active, guest_pc) {
+            if let Some(ai) = Self::probe(&self.active, guest_pc, space) {
                 self.stat_hits += 1;
                 return self.active[ai].as_ref();
             }
@@ -211,6 +222,11 @@ impl BlockCache {
     /// If the active generation is at the fill threshold, it is rotated: the
     /// active becomes old and a fresh active generation is allocated.
     pub fn insert(&mut self, guest_pc: u64, host_offset: usize, len: usize, safe: bool) {
+        self.insert_in(guest_pc, 0, host_offset, len, safe)
+    }
+
+    /// ch66: insert a block translated in address space `space`.
+    pub fn insert_in(&mut self, guest_pc: u64, space: u64, host_offset: usize, len: usize, safe: bool) {
         // Rotate generations if active is too full.
         let threshold = (self.capacity as u64 * self.fill_pct as u64 / 100) as usize;
         if self.active_count >= threshold {
@@ -224,10 +240,11 @@ impl BlockCache {
             safe,
             generation: self.generation,
             epoch: self.epoch_of(guest_pc),
+            space,
         };
 
         // Update count only if this is truly a new slot.
-        let already = Self::probe(&self.active, guest_pc).is_some();
+        let already = Self::probe(&self.active, guest_pc, space).is_some();
         if Self::insert_into(&mut self.active, entry) && !already {
             self.active_count += 1;
         }
@@ -240,14 +257,14 @@ impl BlockCache {
     /// cannot safely delete from it without breaking probe chains, so we mark
     /// the entry with a sentinel `host_offset = usize::MAX` so lookup skips it.
     pub fn invalidate(&mut self, guest_pc: u64) {
-        if let Some(idx) = Self::probe(&self.active, guest_pc) {
+        if let Some(idx) = Self::probe(&self.active, guest_pc, 0) {
             self.active[idx] = None;
             self.active_count = self.active_count.saturating_sub(1);
             // Rehash displaced entries to repair the probe chain.
             self.repair_chain_active(idx);
         }
         // Old gen: mark as invalid so future promotions skip it.
-        if let Some(idx) = Self::probe(&self.old, guest_pc) {
+        if let Some(idx) = Self::probe(&self.old, guest_pc, 0) {
             // Overwrite in place with a sentinel (len=0 signals invalid).
             if let Some(e) = &mut self.old[idx] {
                 e.len = 0; // sentinel: skip on promotion

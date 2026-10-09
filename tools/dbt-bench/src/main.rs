@@ -491,6 +491,9 @@ fn run_translated(name: &str, gbase: u64, aoff: usize, mmu: bool, hi: u64, ttbr:
             ctx[SYSREG_SLOT0 + SLOT_TCR] = 16 | (16 << 16) | (0b10 << 30); // T0SZ=T1SZ=16, TG0=4K, TG1=4K
         }
         aether_mmu_flush_all();
+        // The live dispatcher reports the guest's TTBR0 (address space) to the
+        // translator before lookups; mirror that.
+        aether_translator::dbt::aether_dbt_set_space(ctx[SYSREG_SLOT0 + SLOT_TTBR0]);
         let t = Instant::now();
         let mut nb = 0u64;
         // ch66 chaining protocol: seed the budget + clear the exit word before

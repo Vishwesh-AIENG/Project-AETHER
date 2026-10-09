@@ -115,6 +115,42 @@ pub const BLOCK_CACHE_CAPACITY: usize = 262144;
 /// must also seed `CHAIN_BUDGET` for chaining to take effect).
 pub static CHAIN_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 
+/// ch66: the live `TTBR0_EL1` of the guest context being dispatched. Low-half
+/// (user VA) blocks are keyed by it (see `CachedBlock::space`). The dispatcher
+/// MUST call [`aether_dbt_set_space`] with the context's TTBR0 before every
+/// lookup/translate; 0 (the default) is the right value for MMU-off / flat
+/// harnesses.
+static CUR_SPACE_LOW: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// ch66: set the current low-half address space (the guest's live TTBR0_EL1).
+#[inline]
+pub fn aether_dbt_set_space(ttbr0: u64) {
+    CUR_SPACE_LOW.store(ttbr0, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Address space a block at `pc` belongs to: the live TTBR0 for a low-half PC,
+/// 0 (global) for a kernel (VA[55]=1) PC.
+#[inline]
+fn space_of(pc: u64) -> u64 {
+    if BlockCache::half(pc) == 1 { 0 } else { CUR_SPACE_LOW.load(core::sync::atomic::Ordering::Relaxed) }
+}
+
+/// ch66 indirect-branch jump cache entry: `(guest pc, address space) -> host
+/// address of a SAFE translated block`. Probed inline by every chainable
+/// block's exit stub for targets it cannot chain statically (BR/BLR/RET and
+/// cross-page direct branches). 32 bytes; layout is baked into emitted code.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct JcEntry {
+    pub pc: u64,
+    pub space: u64,
+    pub host: u64,
+    _pad: u64,
+}
+/// Jump-cache size (power of two); index = (pc >> 2) & (JC_ENTRIES - 1).
+pub const JC_ENTRIES: usize = 4096;
+const JC_EMPTY: JcEntry = JcEntry { pc: u64::MAX, space: 0, host: 0, _pad: 0 };
+
 /// One chainable exit recorded while translating a block (block-local offsets).
 #[derive(Clone, Copy)]
 struct ChainExit {
@@ -189,6 +225,9 @@ pub struct DbtRuntime {
     pub arena_epoch: u64,
     pub stat_chain_links: u64,
     pub stat_chain_unlinks: u64,
+    /// ch66: per-runtime indirect-branch jump cache (fixed allocation; its
+    /// address is baked into this runtime's exit stubs, never reallocated).
+    jump_cache: alloc::vec::Vec<JcEntry>,
 }
 
 impl DbtRuntime {
@@ -215,6 +254,26 @@ impl DbtRuntime {
             arena_epoch: 0,
             stat_chain_links: 0,
             stat_chain_unlinks: 0,
+            jump_cache: alloc::vec![JC_EMPTY; JC_ENTRIES],
+        }
+    }
+
+    /// ch66: record a SAFE resolved block in the jump cache.
+    #[inline]
+    fn jc_fill(&mut self, pc: u64, off: usize) {
+        let i = ((pc >> 2) as usize) & (JC_ENTRIES - 1);
+        self.jump_cache[i] = JcEntry {
+            pc,
+            space: space_of(pc),
+            host: self.code_buf.base_ptr() as u64 + off as u64,
+            _pad: 0,
+        };
+    }
+
+    /// ch66: forget every jump-cache entry (invalidation / arena reset).
+    fn jc_clear(&mut self) {
+        for e in self.jump_cache.iter_mut() {
+            *e = JC_EMPTY;
         }
     }
 
@@ -289,10 +348,13 @@ impl DbtRuntime {
     /// ```
     /// The block already wrote its next PC; the stub only routes. Unpatched,
     /// each `jmp` falls through to the site report. Last byte is RET.
-    fn emit_chain_stub(enc: &mut X86Encoder, targets: &[u64], exits: &mut [ChainExit; 2]) {
-        use crate::runtime::context::{CHAIN_BUDGET_DISP, CHAIN_EXIT_DISP, PC_OFFSET};
+    fn emit_chain_stub(enc: &mut X86Encoder, targets: &[u64], exits: &mut [ChainExit; 2], jc: u64) {
+        use crate::runtime::context::{CHAIN_BUDGET_DISP, CHAIN_EXIT_DISP, PC_OFFSET, SYSREG_BASE};
         const RAX: u8 = 0;
         const RCX: u8 = 1;
+        const RDX: u8 = 2;
+        const R8: u8 = 8;
+        const R9: u8 = 9;
         const R15: u8 = 15;
         const JB: u8 = 0x2;
         const JNE: u8 = 0x5;
@@ -315,10 +377,37 @@ impl DbtRuntime {
             enc.emit_ret();
             exits[i] = ChainExit { rel_pos, imm_pos };
         }
-        let plain = enc.pos();
-        if let Some(j) = pending {
-            enc.patch_rel32(j, plain);
+        // Jump-cache probe for every other target (indirect / cross-page):
+        //   rdx = &jc[(pc >> 2) & (JC_ENTRIES-1)]
+        //   hit iff jc.pc == pc && jc.space == (pc[55] ? 0 : TTBR0) -> jmp jc.host
+        if let Some(j) = pending.take() {
+            let here = enc.pos();
+            enc.patch_rel32(j, here);
         }
+        enc.emit_mov_rr64(RCX, RAX);
+        enc.emit_shr_r64_imm8(RCX, 2);
+        enc.emit_and_r64_imm32(RCX, (JC_ENTRIES - 1) as i32);
+        enc.emit_shl_r64_imm8(RCX, 5);
+        enc.emit_mov_r64_imm64(RDX, jc as i64);
+        enc.emit_add_rr64(RDX, RCX);
+        enc.emit_mov_r64_mem(RCX, RDX, 0);
+        enc.emit_cmp_rr64(RCX, RAX);
+        let miss1 = enc.emit_jcc_rel32(JNE);
+        enc.emit_mov_r64_mem(RCX, R15, (SYSREG_BASE + crate::runtime::mmu::SLOT_TTBR0 * 8) as i32);
+        enc.emit_mov_rr64(R8, RAX);
+        enc.emit_shr_r64_imm8(R8, 55);
+        enc.emit_and_r64_imm32(R8, 1);
+        enc.emit_xor_zero_r32(R9);
+        enc.emit_test_rr64(R8, R8);
+        enc.emit_cmov_rr64(JNE, RCX, R9); // kernel half: space 0
+        enc.emit_mov_r64_mem(R8, RDX, 8);
+        enc.emit_cmp_rr64(RCX, R8);
+        let miss2 = enc.emit_jcc_rel32(JNE);
+        enc.emit_mov_r64_mem(RCX, RDX, 16);
+        enc.emit_jmp_r64(RCX);
+        let plain = enc.pos();
+        enc.patch_rel32(miss1, plain);
+        enc.patch_rel32(miss2, plain);
         enc.patch_rel32(jb_plain, plain);
         enc.emit_ret();
     }
@@ -457,7 +546,7 @@ impl DbtRuntime {
         // handle_alloc_error OOM panic (the silent HLT observed in QEMU). A
         // cache hit returns Ok immediately, matching the contract the loop and
         // the boot_x86 "cache hit returns Ok immediately" comment both assume.
-        if self.block_cache.lookup(pc).is_some() {
+        if self.block_cache.lookup_in(pc, space_of(pc)).is_some() {
             self.stat_blocks_dispatched_hit =
                 self.stat_blocks_dispatched_hit.saturating_add(1);
             return AetherDbtResult::Ok;
@@ -647,15 +736,16 @@ impl DbtRuntime {
         // (patchable direct jumps to its same-page successors); anything else
         // keeps the plain RET to the dispatcher.
         let mut chain_exits = [ChainExit { rel_pos: 0, imm_pos: 0 }; 2];
-        let (targets, n_targets) = if CHAIN_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
-            && Self::block_may_chain(&func.blocks[0].ops)
-        {
+        let may_chain = CHAIN_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && Self::block_may_chain(&func.blocks[0].ops);
+        let (targets, n_targets) = if may_chain {
             Self::chain_targets(pc, last_insn, ended_on_terminator, cur_pc)
         } else {
             ([0; 2], 0)
         };
-        if n_targets > 0 {
-            Self::emit_chain_stub(&mut enc, &targets[..n_targets], &mut chain_exits);
+        if may_chain {
+            let jc = self.jump_cache.as_ptr() as u64;
+            Self::emit_chain_stub(&mut enc, &targets[..n_targets], &mut chain_exits, jc);
         } else {
             enc.emit_ret();
         }
@@ -683,8 +773,9 @@ impl DbtRuntime {
                     self.stat_lower_failures.saturating_add(1);
                 self.code_buf.reset();
                 self.block_cache.clear();
-                // Every chain site died with the arena.
+                // Every chain site and jump-cache target died with the arena.
                 self.chain_sites.clear();
+                self.jc_clear();
                 self.arena_epoch = self.arena_epoch.wrapping_add(1);
                 match self.code_buf.alloc_block(pc, enc.as_bytes()) {
                     Ok(o) => o,
@@ -723,7 +814,7 @@ impl DbtRuntime {
         }
 
         self.block_cache
-            .insert(pc, host_offset, bytes_len, block_safe);
+            .insert_in(pc, space_of(pc), host_offset, bytes_len, block_safe);
         self.stat_blocks_translated =
             self.stat_blocks_translated.saturating_add(1);
         AetherDbtResult::Ok
@@ -734,7 +825,7 @@ impl DbtRuntime {
     /// before `dispatch_block`, but defensive cold-translate keeps callers
     /// that don't honour the contract safe.
     pub fn dispatch_block(&mut self, pc: u64, guest_mem: &[u8]) -> AetherDbtResult {
-        if self.block_cache.lookup(pc).is_some() {
+        if self.block_cache.lookup_in(pc, space_of(pc)).is_some() {
             self.stat_blocks_dispatched_hit =
                 self.stat_blocks_dispatched_hit.saturating_add(1);
             return AetherDbtResult::Ok;
@@ -752,14 +843,22 @@ impl DbtRuntime {
     /// dispatch loop reads this to compute the absolute host VA to jump into:
     ///   `host_va = jit_base + host_offset`
     pub fn host_offset_for_pc(&mut self, pc: u64) -> Option<(usize, usize)> {
-        self.block_cache.lookup(pc).map(|b| (b.host_offset, b.len))
+        let r = self.block_cache.lookup_in(pc, space_of(pc)).map(|b| (b.host_offset, b.len, b.safe));
+        if let Some((off, _, true)) = r {
+            self.jc_fill(pc, off);
+        }
+        r.map(|(o, l, _)| (o, l))
     }
 
     /// Like [`host_offset_for_pc`] but also returns the block's cached
     /// structural-safety verdict, so the dispatch hot path skips the per-entry
     /// byte rescan. `(host_offset, len, safe)`.
     pub fn host_offset_for_pc_safe(&mut self, pc: u64) -> Option<(usize, usize, bool)> {
-        self.block_cache.lookup(pc).map(|b| (b.host_offset, b.len, b.safe))
+        let r = self.block_cache.lookup_in(pc, space_of(pc)).map(|b| (b.host_offset, b.len, b.safe));
+        if let Some((off, _, true)) = r {
+            self.jc_fill(pc, off);
+        }
+        r
     }
 
     /// Invalidate the **entire** block cache (PC → host-offset lookup table).
@@ -782,6 +881,7 @@ impl DbtRuntime {
     /// cache entry only means the *next* dispatch of that PC retranslates.
     pub fn invalidate_all(&mut self) {
         self.unlink(true, true);
+        self.jc_clear();
         self.block_cache.flush_all();
     }
 
@@ -790,6 +890,7 @@ impl DbtRuntime {
     /// blocks and kernel chains survive it.
     pub fn invalidate_low(&mut self) {
         self.unlink(true, false);
+        self.jc_clear();
         self.block_cache.flush_low();
     }
 }

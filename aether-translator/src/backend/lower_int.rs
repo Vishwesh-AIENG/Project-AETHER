@@ -84,9 +84,10 @@ enum MsrMmuEffect {
     /// it needs no flush (ch66); the JIT block cache (keyed by VA only) still
     /// must be invalidated.
     InvalidateBlocks,
-    /// TTBR0_EL1 changed: as `InvalidateBlocks`, but only the low (user) half —
-    /// kernel blocks are unaffected by a user address-space switch.
-    InvalidateLowBlocks,
+    /// TTBR0_EL1 changed: nothing to do — the soft TLB and the JIT block cache
+    /// are both keyed by the live TTBR0 value, exactly like ASID-tagged
+    /// hardware TLBs (ch66). Kept as a distinct class for documentation/tests.
+    TtbrSwitchOnly,
 }
 
 /// Integer lowering pass.  Stateless; call [`IntLower::lower_block`] per block.
@@ -986,7 +987,7 @@ impl IntLower {
         // sysreg_read_idx and mmu.rs SLOT_SCTLR/TTBR0/TTBR1/TCR/MAIR are the same
         // 0..4 numbering by construction — see the comment in mmu.rs).
         match Self::sysreg_read_idx(reg) {
-            i if i == crate::runtime::mmu::SLOT_TTBR0 as i32 => MsrMmuEffect::InvalidateLowBlocks,
+            i if i == crate::runtime::mmu::SLOT_TTBR0 as i32 => MsrMmuEffect::TtbrSwitchOnly,
             i if i == crate::runtime::mmu::SLOT_TTBR1 as i32 => MsrMmuEffect::InvalidateBlocks,
             i if i == crate::runtime::mmu::SLOT_TCR as i32
                 || i == crate::runtime::mmu::SLOT_MAIR as i32 => MsrMmuEffect::FlushTlb,
@@ -2928,7 +2929,7 @@ impl IntLower {
                         Self::emit_dbt_invalidate_call(enc);
                     }
                     MsrMmuEffect::InvalidateBlocks => Self::emit_dbt_invalidate_call(enc),
-                    MsrMmuEffect::InvalidateLowBlocks => Self::emit_dbt_invalidate_low_call(enc),
+                    MsrMmuEffect::TtbrSwitchOnly => {}
                     MsrMmuEffect::None => {}
                 }
             }
