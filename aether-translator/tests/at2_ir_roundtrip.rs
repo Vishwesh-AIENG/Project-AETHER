@@ -426,7 +426,7 @@ fn variant_tag_is_injective() {
     // Sanity: the sample set must cover every variant exactly once. (198 is the
     // current IrOp variant count; bump this if a variant is added — and add its
     // sample above so the tag stays unique.)
-    assert_eq!(ops.len(), 199, "all_variants() must hold one of every IrOp variant");
+    assert_eq!(ops.len(), 200, "all_variants() must hold one of every IrOp variant");
 
     let mut by_tag: HashMap<u8, &'static str> = HashMap::new();
     let mut collisions: Vec<String> = Vec::new();
