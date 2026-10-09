@@ -235,6 +235,7 @@ use crate::vtx::{
 };
 use crate::dbt_integration::install_dbt_ept_callbacks;
 use aether_translator::dbt::{
+    aether_dbt_arena_epoch, aether_dbt_chain_link,
     aether_dbt_init as translator_dbt_init, JIT_CACHE_BYTES as TRANSLATOR_JIT_BYTES,
     aether_dbt_block_host_va, aether_dbt_block_host_va_safe, aether_dbt_last_failure,
     aether_dbt_translate_block, block_bytes_are_safe, AetherDbtResult,
@@ -3451,19 +3452,10 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
         // (sched_clock / vsync / choreographer / udelay) derives from this same
         // counter, so they scale together and stay self-consistent; the guest's
         // clock simply runs slower than wall-clock (fine — and reversible).
-        // Updated every 16 dispatches to amortize the runtime call; a plain add
-        // (no RDTSC / u128 divide) keeps it cheap.
-        {
-            const VIRT_TICKS_PER_BLOCK: u64 = 64;
-            static mut TIMER_TICK: u32 = 0;
-            let t = *ptr::addr_of!(TIMER_TICK);
-            if t == 0 {
-                let n = (*ptr::addr_of!(VIRT_NOW)).wrapping_add(16 * VIRT_TICKS_PER_BLOCK);
-                *ptr::addr_of_mut!(VIRT_NOW) = n;
-                sysreg_rt::aether_timer_set_now(n);
-            }
-            *ptr::addr_of_mut!(TIMER_TICK) = (t + 1) & 0xF;
-        }
+        // ch66: with block chaining one dispatch runs up to DBT_CHAIN_BUDGET+1
+        // blocks, so the counter is now advanced AFTER the block by
+        // VIRT_TICKS_PER_BLOCK × (blocks actually executed) — the same guest
+        // time per block as the old "16 × 64 every 16 dispatches".
 
         // Point the block at the faulting PC. A correctly-lifted block reads its
         // own constant PC at terminators, but seeding it keeps the context's PC
@@ -3477,11 +3469,43 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
         if !safe {
             return None;
         }
+        // ch66 block chaining. Link the previous dispatch's chain exit to this
+        // block (now resolved) if it exited to exactly this PC, then seed the
+        // chain budget and clear the exit word for this entry.
+        {
+            use aether_translator::runtime::context::{CHAIN_BUDGET_IDX, CHAIN_EXIT_IDX};
+            let p = *ptr::addr_of!(CHAIN_PENDING);
+            *ptr::addr_of_mut!(CHAIN_PENDING) = (0, 0, 0);
+            if p.0 != 0 && p.2 == pc {
+                let _ = aether_dbt_chain_link(p.0, p.1, pc);
+            }
+            (*ptr::addr_of_mut!(NPF_GUEST_CTX))[SYSREG_SLOT0 + CHAIN_EXIT_IDX] = 0;
+            (*ptr::addr_of_mut!(NPF_GUEST_CTX))[SYSREG_SLOT0 + CHAIN_BUDGET_IDX] = DBT_CHAIN_BUDGET;
+        }
+        let arena_ep = aether_dbt_arena_epoch();
         enter_host_block(host_va as *const u8, ctx);
         let ctx_slice = core::slice::from_raw_parts_mut(
             ctx,
             aether_translator::runtime::context::CTX_U64S,
         );
+        // ch66: blocks this dispatch executed (each chained/stub exit spent one
+        // unit of budget; a plain-RET exit spends none, so clamp to >= 1).
+        let executed = {
+            use aether_translator::runtime::context::{CHAIN_BUDGET_IDX, CHAIN_EXIT_IDX};
+            let left = ctx_slice[SYSREG_SLOT0 + CHAIN_BUDGET_IDX];
+            *ptr::addr_of_mut!(CHAIN_PENDING) =
+                (ctx_slice[SYSREG_SLOT0 + CHAIN_EXIT_IDX], arena_ep, ctx_slice[NPF_PC_SLOT]);
+            DBT_CHAIN_BUDGET.wrapping_sub(left).clamp(1, DBT_CHAIN_BUDGET + 1)
+        };
+        *ptr::addr_of_mut!(DBT_BLOCKS_EXECUTED) =
+            (*ptr::addr_of!(DBT_BLOCKS_EXECUTED)).wrapping_add(executed);
+        {
+            const VIRT_TICKS_PER_BLOCK: u64 = 64;
+            let n = (*ptr::addr_of!(VIRT_NOW)).wrapping_add(executed * VIRT_TICKS_PER_BLOCK);
+            *ptr::addr_of_mut!(VIRT_NOW) = n;
+            sysreg_rt::aether_timer_set_now(n);
+        }
+        *ptr::addr_of_mut!(LAST_DISPATCH_BLOCKS) = executed as u32;
 
         // M4b-3 SYNCHRONOUS abort: if a load/store in the block faulted
         // (early-RET with a pending Data Abort recorded by the walker), inject
@@ -4232,7 +4256,7 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
         // then `aether_pending_irq` is spurious and this is a no-op.
         let pending_irq = sysreg_rt::aether_pending_irq();
         if exceptions::irqs_unmasked(ctx_slice) && pending_irq != gic::SPURIOUS_INTID
-            && irq_deliverable_now(exceptions::guest_el(ctx_slice))
+            && irq_deliverable_now(exceptions::guest_el(ctx_slice), *ptr::addr_of!(LAST_DISPATCH_BLOCKS))
         {
             let _pre_sp = ctx_slice[31]; // active SP (x31 slot)
             exceptions::inject_irq(ctx_slice);
@@ -4274,14 +4298,26 @@ static mut EL1_IRQ_DEFER_CTR: u32 = 0;
 // starved and init crawled. EL0 (userspace) preemption is delivered freely and
 // is harmless to the kernel-mutex race.
 const EL1_IRQ_DEFER: u32 = 4096;
+/// ch66: chained transfers allowed per dispatcher entry. Bounds IRQ / timer
+/// latency to ~65 blocks while a hot loop runs chained.
+const DBT_CHAIN_BUDGET: u64 = 64;
+/// ch66: (chain-exit word, arena epoch at entry, guest PC at exit) of the last
+/// dispatch — linked on the next dispatch once that PC's block is resolved.
+static mut CHAIN_PENDING: (u64, u64, u64) = (0, 0, 0);
+/// ch66: total guest blocks executed (dispatches × chain length) — heartbeat.
+pub(crate) static mut DBT_BLOCKS_EXECUTED: u64 = 0;
+/// ch66: blocks executed by the most recent dispatch (EL1 IRQ rate limiter).
+static mut LAST_DISPATCH_BLOCKS: u32 = 1;
 #[inline]
-fn irq_deliverable_now(cur_el: u64) -> bool {
+fn irq_deliverable_now(cur_el: u64, blocks: u32) -> bool {
     // SAFETY: EL2-private, single-vCPU dispatch loop — no concurrent access.
     unsafe {
         if cur_el == 0 {
             true // EL0/userspace: deliver freely (does not touch the EL1 budget)
         } else {
-            let c = (*ptr::addr_of!(EL1_IRQ_DEFER_CTR)).wrapping_add(1);
+            // ch66: count BLOCKS (not dispatches) so chaining keeps the same
+            // EL1 delivery rate per unit of guest work.
+            let c = (*ptr::addr_of!(EL1_IRQ_DEFER_CTR)).wrapping_add(blocks.max(1));
             if c >= EL1_IRQ_DEFER {
                 *ptr::addr_of_mut!(EL1_IRQ_DEFER_CTR) = 0;
                 true
@@ -5191,6 +5227,30 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                             gfb.base as *const u8, hfb.base as *mut u8, n,
                         );
                     }
+                }
+                // ch66 [perf] heartbeat: guest blocks executed (dispatches ×
+                // chain length), chain links/unlinks, soft-TLB whole flushes and
+                // the host TSC — consecutive lines give blocks/s and chain reach.
+                {
+                    let (links, unlinks) = aether_translator::dbt::aether_dbt_chain_stats();
+                    dual_puts(b"[perf] iter=");
+                    dual_puthex64(iter);
+                    dual_puts(b" blk=");
+                    dual_puthex64(*ptr::addr_of!(DBT_BLOCKS_EXECUTED));
+                    dual_puts(b" links=");
+                    dual_puthex64(links);
+                    dual_puts(b" unlinks=");
+                    dual_puthex64(unlinks);
+                    dual_puts(b" tlbflush=");
+                    dual_puthex64(*ptr::addr_of!(
+                        aether_translator::runtime::mmu::MMU_TLBI_FLUSH_ALL_TOTAL) as u64);
+                    dual_puts(b" tlbiva=");
+                    dual_puthex64(*ptr::addr_of!(
+                        aether_translator::runtime::mmu::MMU_TLBI_VA_TOTAL) as u64);
+                    dual_puts(b" tsc=");
+                    dual_puthex64(host_tsc());
+                    dual_puts(b"
+");
                 }
                 use aether_translator::runtime::exceptions as exc;
                 let total = *ptr::addr_of!(exc::SYSCALL_TOTAL);

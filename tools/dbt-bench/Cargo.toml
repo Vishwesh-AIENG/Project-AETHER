@@ -1,0 +1,13 @@
+[package]
+name = "dbt-bench"
+version = "0.1.0"
+edition = "2021"
+description = "AETHER DBT measurement harness (ch66): translate/exec/coverage modes and the slowdown-vs-native kernels gate."
+publish = false
+
+[[bin]]
+name = "aether-dbt-bench"
+path = "src/main.rs"
+
+[dependencies]
+aether-translator = { path = "../../aether-translator" }

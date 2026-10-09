@@ -78,8 +78,15 @@ const SCRATCH1: u8 = 1; // RCX
 enum MsrMmuEffect {
     /// No software-TLB action needed (e.g. SCTLR — `M` is read live every xlate).
     None,
-    /// TTBR0/1_EL1, TCR_EL1, or MAIR_EL1 changed: invalidate the whole soft TLB.
+    /// TCR_EL1 or MAIR_EL1 changed: invalidate the whole soft TLB (+ blocks).
     FlushTlb,
+    /// TTBR1_EL1 changed: the soft TLB is tagged with the live TTBR value, so
+    /// it needs no flush (ch66); the JIT block cache (keyed by VA only) still
+    /// must be invalidated.
+    InvalidateBlocks,
+    /// TTBR0_EL1 changed: as `InvalidateBlocks`, but only the low (user) half —
+    /// kernel blocks are unaffected by a user address-space switch.
+    InvalidateLowBlocks,
 }
 
 /// Integer lowering pass.  Stateless; call [`IntLower::lower_block`] per block.
@@ -115,7 +122,8 @@ impl IntLower {
         enc: &mut X86Encoder,
         branch_patches: &mut alloc::vec::Vec<(usize, crate::ir::BlockId)>,
     ) {
-        if entry_pc != 0 {
+        // ch66: the LAST_GUEST_PC block-entry stamp only feeds debug watchers.
+        if cfg!(feature = "dbt-diag") && entry_pc != 0 {
             const RAX: u8 = 0;
             const RCX: u8 = 1;
             // RAX = entry_pc
@@ -360,6 +368,25 @@ impl IntLower {
     /// SCRATCH0); the Load/Store arms fail loud (UD2) before calling this if the
     /// address (or store value) is spilled, so a stale-scratch address can never
     /// reach the call.
+    /// Fault exit of an MMU helper call (RAX == 0): restore the save set, write
+    /// the EXACT guest PC of the faulting instruction into the context PC slot
+    /// (the dispatcher's abort injection takes ELR from it), then RET to the
+    /// dispatcher. The PC is a translation-time constant (`CUR_LOWER_PC`, set by
+    /// the instruction's `StampFaultPc`), so the hot success path carries no PC
+    /// bookkeeping at all (ch66: replaces the per-memop `WritePc` stamp).
+    fn emit_mmu_fault_exit(enc: &mut X86Encoder) {
+        const RAX: u8 = 0;
+        for &r in Self::MMU_SAVE_REGS.iter().rev() {
+            enc.emit_pop_r64(r);
+        }
+        let pc = crate::backend::encode::CUR_LOWER_PC.load(core::sync::atomic::Ordering::Relaxed);
+        if pc != 0 {
+            enc.emit_mov_r64_imm64(RAX, pc as i64);
+            enc.emit_mov_mem_r64(CONTEXT_REG, PC_DISP, RAX);
+        }
+        enc.emit_ret();
+    }
+
     fn emit_mmu_xlate_call(enc: &mut X86Encoder, addr_reg: u8, is_write: bool, size: i32) {
         const RAX: u8 = 0;
         const RCX: u8 = 1;
@@ -395,13 +422,10 @@ impl IntLower {
         //    + RET with a balanced stack.
         enc.emit_test_rr64(RAX, RAX); // ZF=1 iff RAX==0 (fault)
         let jnz_ok = enc.emit_jcc_rel32(cc::NZ); // success → skip the fault RET
-        // fault path: restore the save set (reverse order) and RET. Last byte of
-        // the whole block is still a RET elsewhere; an early RET mid-block keeps
-        // block_bytes_are_safe happy (no UD2; the block still ends in RET).
-        for &r in Self::MMU_SAVE_REGS.iter().rev() {
-            enc.emit_pop_r64(r);
-        }
-        enc.emit_ret();
+        // fault path: restore the save set, stamp the faulting PC, RET. Last byte
+        // of the whole block is still a RET elsewhere; an early RET mid-block
+        // keeps block_bytes_are_safe happy (no UD2; the block still ends in RET).
+        Self::emit_mmu_fault_exit(enc);
         // success path:
         let ok_pos = enc.pos();
         enc.patch_rel32(jnz_ok, ok_pos);
@@ -520,10 +544,7 @@ impl IntLower {
         //    still ends in RET, so block_bytes_are_safe stays happy).
         enc.emit_test_rr64(RAX, RAX);
         let jnz_ok = enc.emit_jcc_rel32(cc::NZ);
-        for &r in Self::MMU_SAVE_REGS.iter().rev() {
-            enc.emit_pop_r64(r);
-        }
-        enc.emit_ret();
+        Self::emit_mmu_fault_exit(enc);
         let ok_pos = enc.pos();
         enc.patch_rel32(jnz_ok, ok_pos);
         // 5. Success: restore the save set. The store is already done; the block
@@ -620,12 +641,24 @@ impl IntLower {
     /// clears the PC→host-offset lookup table, NOT the code arena this block is
     /// executing from, so returning into the in-flight block is safe.
     fn emit_dbt_invalidate_call(enc: &mut X86Encoder) {
+        Self::emit_dbt_invalidate_call_to(enc, Self::dbt_invalidate_addr());
+    }
+
+    /// ch66: `MSR TTBR0_EL1` drops only the user-half blocks.
+    fn emit_dbt_invalidate_low_call(enc: &mut X86Encoder) {
+        Self::emit_dbt_invalidate_call_to(
+            enc,
+            crate::dbt::aether_dbt_invalidate_low as *const () as usize,
+        );
+    }
+
+    fn emit_dbt_invalidate_call_to(enc: &mut X86Encoder, helper: usize) {
         const RAX: u8 = 0;
         for &r in Self::MMU_SAVE_REGS.iter() {
             enc.emit_push_r64(r);
         }
         enc.emit_sub_r64_imm32(4 /* RSP */, 0x28);
-        enc.emit_mov_r64_imm64(RAX, Self::dbt_invalidate_addr() as i64);
+        enc.emit_mov_r64_imm64(RAX, helper as i64);
         enc.emit_call_r64(RAX);
         enc.emit_add_r64_imm32(4 /* RSP */, 0x28);
         for &r in Self::MMU_SAVE_REGS.iter().rev() {
@@ -953,9 +986,9 @@ impl IntLower {
         // sysreg_read_idx and mmu.rs SLOT_SCTLR/TTBR0/TTBR1/TCR/MAIR are the same
         // 0..4 numbering by construction — see the comment in mmu.rs).
         match Self::sysreg_read_idx(reg) {
-            i if i == crate::runtime::mmu::SLOT_TTBR0 as i32
-                || i == crate::runtime::mmu::SLOT_TTBR1 as i32
-                || i == crate::runtime::mmu::SLOT_TCR as i32
+            i if i == crate::runtime::mmu::SLOT_TTBR0 as i32 => MsrMmuEffect::InvalidateLowBlocks,
+            i if i == crate::runtime::mmu::SLOT_TTBR1 as i32 => MsrMmuEffect::InvalidateBlocks,
+            i if i == crate::runtime::mmu::SLOT_TCR as i32
                 || i == crate::runtime::mmu::SLOT_MAIR as i32 => MsrMmuEffect::FlushTlb,
             // SCTLR (SLOT_SCTLR == 0) and every other register: no TLB flush.
             _ => MsrMmuEffect::None,
@@ -1165,13 +1198,17 @@ impl IntLower {
                 // mov RAX, pc ; mov RCX, &FAULT_OP_PC ; mov [RCX], RAX.
                 // RAX/RCX are reserved scratch (same as the block-entry stamp);
                 // not live across IR ops, so clobbering between ops is safe.
-                const RAX: u8 = 0;
-                const RCX: u8 = 1;
-                enc.emit_mov_r64_imm64(RAX, *pc as i64);
-                let addr = core::ptr::addr_of_mut!(crate::runtime::mmu::FAULT_OP_PC)
-                    as usize as i64;
-                enc.emit_mov_r64_imm64(RCX, addr);
-                enc.emit_mov_mem_r64(RCX, 0, RAX);
+                // ch66: diagnostics-only (feeds debug watchers), off by default.
+                #[cfg(feature = "dbt-diag")]
+                {
+                    const RAX: u8 = 0;
+                    const RCX: u8 = 1;
+                    enc.emit_mov_r64_imm64(RAX, *pc as i64);
+                    let addr = core::ptr::addr_of_mut!(crate::runtime::mmu::FAULT_OP_PC)
+                        as usize as i64;
+                    enc.emit_mov_r64_imm64(RCX, addr);
+                    enc.emit_mov_mem_r64(RCX, 0, RAX);
+                }
             }
             // ── Constants ─────────────────────────────────────────────────
             ConstI32 { dst, val } => {
@@ -2885,9 +2922,14 @@ impl IntLower {
                 // a cold re-translate is negligible. The invalidate clears only
                 // the lookup table, never the in-flight code arena (see
                 // DbtRuntime::invalidate_all), so it is safe mid-block.
-                if Self::msr_mmu_side_effect(*reg) == MsrMmuEffect::FlushTlb {
-                    Self::emit_mmu_flush_call(enc);
-                    Self::emit_dbt_invalidate_call(enc);
+                match Self::msr_mmu_side_effect(*reg) {
+                    MsrMmuEffect::FlushTlb => {
+                        Self::emit_mmu_flush_call(enc);
+                        Self::emit_dbt_invalidate_call(enc);
+                    }
+                    MsrMmuEffect::InvalidateBlocks => Self::emit_dbt_invalidate_call(enc),
+                    MsrMmuEffect::InvalidateLowBlocks => Self::emit_dbt_invalidate_low_call(enc),
+                    MsrMmuEffect::None => {}
                 }
             }
 

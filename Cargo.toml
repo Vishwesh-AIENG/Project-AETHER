@@ -6,6 +6,7 @@ members = [
     "tools/aether-install",
     "tools/aether-setup",
     "tools/dbt-oracle",
+    "tools/dbt-bench",
     "aether-translator",
 ]
 

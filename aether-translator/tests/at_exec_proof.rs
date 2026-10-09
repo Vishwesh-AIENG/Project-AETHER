@@ -158,17 +158,27 @@ fn mid_block_memop_pc_stamp() {
     let (host_va, len) = aether_dbt_block_host_va(pc).expect("host va");
     // SAFETY: runtime-owned code buffer, valid for `len` bytes.
     let code: Vec<u8> = unsafe { core::slice::from_raw_parts(host_va as *const u8, len).to_vec() };
-    // ConstI64 emits the i32-fitting PC as a 4-byte imm32 (REX.W mov r64,imm32).
-    let stamp_ldr = (pc as u32 + 8).to_le_bytes(); // 0x100008 = the LDR's PC
-    assert!(
-        code.windows(4).any(|w| w == stamp_ldr),
-        "mid-block LDR must be preceded by a PC stamp of pc+8",
-    );
-    // (The diagnostic per-instruction FAULT_OP_PC stamp now writes EVERY
-    // instruction's PC, so a byte-scan can no longer distinguish the PC_SLOT
-    // mem-resume stamp from the diagnostic stamp — the "non-memory not stamped"
-    // assertion was removed. The mem-resume stamp above (pc+8) still proves the
-    // PC_SLOT mechanism fires on the LDR.)
+    // ch66: the stamp is no longer emitted before every memop; it lives on the
+    // MMU helper's fault-exit path. Prove it by EXECUTION: flat MMU (SCTLR=0)
+    // with a small window, x2 outside it -> the LDR faults -> the block must
+    // early-return with PC_SLOT == pc+8 (the LDR), the two movs committed, and a
+    // pending abort recorded.
+    let window = vec![0u8; 4096];
+    let wbase = window.as_ptr() as u64;
+    aether_translator::runtime::mmu::aether_mmu_set_window(wbase, window.len() as u64);
+    let exec = winexec::make_executable(&code);
+    let mut ctx = vec![0u64; CTX_U64S];
+    ctx[0] = 0x1234;
+    ctx[2] = wbase + 0x10_0000; // outside the window -> translation fault
+    ctx[PC_SLOT] = pc; // dispatcher seed (block start)
+    // SAFETY: translator-emitted RET-terminated block; ctx is CTX_U64S long.
+    unsafe { enter_block(exec, ctx.as_mut_ptr()) };
+    let pend = aether_translator::runtime::context::SYSREG_SLOT0
+        + aether_translator::runtime::mmu::SLOT_PEND_PENDING;
+    assert_eq!(ctx[pend], 1, "LDR outside the window must record a pending abort");
+    assert_eq!(ctx[PC_SLOT], pc + 8, "fault PC must be the LDR itself, not the block start");
+    assert_eq!(ctx[8], 0x1234, "mov x8,x0 before the fault is committed");
+    assert_eq!(ctx[0], 0, "mov w0,wzr before the fault is committed");
 }
 
 /// uses: aether_dbt_init -> aether_dbt_translate_block -> aether_dbt_block_host_va
@@ -3175,12 +3185,15 @@ fn build_remappable_ctx(va: u64) -> (Vec<u64>, u64, u64, usize, u64, u64) {
     (ctx, l0, l3, l3_slot, data_a, data_b)
 }
 
-/// (e) FLUSH PROOF: a `MSR TTBR0_EL1, Xn` between two loads of the same VA flushes
-/// the software TLB, so the second load re-walks the (rewritten) tables and reads
-/// the NEW output page. Without the MSR-triggered flush the second load would read
-/// the stale cached PA (page A) — which (f) demonstrates with SCTLR.
+/// (e) ADDRESS-SPACE PROOF (ch66): the software TLB is tagged with the live
+/// TTBR value, so after `MSR TTBR0_EL1, Xn` installs a DIFFERENT address space
+/// (here: same tables, different ASID) the old space's cached translation is
+/// never hit — the second load re-walks the (rewritten) tables and reads the NEW
+/// page. (A TTBR write itself no longer flushes the TLB; real hardware does not
+/// either. Re-installing the SAME TTBR value without a TLBI may legitimately keep
+/// using the old entry, so that case is deliberately not asserted.)
 #[test]
-fn m4b_msr_ttbr0_flushes_tlb() {
+fn m4b_msr_ttbr0_new_space_misses_old_tlb_entry() {
     let _serial = serial();
     let va = 0x0000_0066_0000_0000u64;
     let (mut ctx, l0, l3, l3_slot, data_a, data_b) = build_remappable_ctx(va);
@@ -3192,7 +3205,7 @@ fn m4b_msr_ttbr0_flushes_tlb() {
         core::ptr::write_volatile(data_b as *mut u64, VAL_B);
     }
 
-    // Block 1: LDR X1,[X0]  (caches VA→PA(dataA) in the software TLB).
+    // Block 1: LDR X1,[X0]  (caches VA→PA(dataA) tagged with TTBR0 = l0, ASID 0).
     let ld_words = [0xF940_0001u32]; // LDR X1,[X0]
     let ld_code = translate_straight_line(&ld_words, 0xF100);
     let ld_exec = winexec::make_executable(&ld_code);
@@ -3203,13 +3216,11 @@ fn m4b_msr_ttbr0_flushes_tlb() {
     assert_eq!(ctx[1], VAL_A, "first load reads dataA via the freshly walked PA");
     assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "no fault on the mapped load");
 
-    // Rewrite the L3 leaf to point at dataB. The software TLB still holds the
-    // stale VA→dataA entry; only an MSR-triggered flush will evict it.
+    // Rewrite the L3 leaf to point at dataB (the old space's entry stays cached).
     put_desc(l3, l3_slot, leaf_4k(data_b, false));
 
-    // Block 2: MSR TTBR0_EL1, X2 ; LDR X1,[X0]. The MSR write triggers
-    // aether_mmu_flush_all(); X2 carries the SAME L0 base so the re-walk still
-    // succeeds, now reading the rewritten leaf → dataB.
+    // Block 2: MSR TTBR0_EL1, X2 ; LDR X1,[X0] with X2 = same base, ASID 5: a
+    // different address space, so the ASID-0 entry must not hit.
     let msr_ld_words = [0xD518_2002u32, 0xF940_0001u32]; // MSR TTBR0_EL1,X2 ; LDR X1,[X0]
     let msr_ld_code = translate_straight_line(&msr_ld_words, 0xF110);
     assert!(
@@ -3217,18 +3228,18 @@ fn m4b_msr_ttbr0_flushes_tlb() {
         "MSR+LDR block must not fail loud (no UD2)"
     );
     let msr_ld_exec = winexec::make_executable(&msr_ld_code);
+    let ttbr_asid5 = l0 | (5u64 << 48);
     ctx[0] = va;
-    ctx[2] = l0; // X2 = same L0 base (re-store TTBR0 with the valid base)
+    ctx[2] = ttbr_asid5;
     ctx[1] = 0; // clear the previous load result
-    // SAFETY: RWX RET-terminated block; ctx is the extended context; the MSR
-    // flushes the soft TLB, the LDR re-walks the rewritten tables.
+    // SAFETY: RWX RET-terminated block; ctx is the extended context.
     unsafe { enter_block(msr_ld_exec, ctx.as_mut_ptr()); }
     assert_eq!(
         ctx[1], VAL_B,
-        "after MSR TTBR0_EL1 flushed the TLB, the second load re-walks → dataB"
+        "a different TTBR0 (ASID) must not hit the old space's entry → re-walk → dataB"
     );
-    assert_eq!(ctx[SYSREG_SLOT0 + SLOT_TTBR0], l0, "TTBR0 slot holds the MSR'd base");
-    assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "no fault after the flush+rewalk");
+    assert_eq!(ctx[SYSREG_SLOT0 + SLOT_TTBR0], ttbr_asid5, "TTBR0 slot holds the MSR'd value");
+    assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "no fault after the re-walk");
 }
 
 /// (f) NEGATIVE PROOF: a `MSR SCTLR_EL1, Xn` (NOT a translation-control register)
@@ -3286,36 +3297,32 @@ fn m4b_msr_sctlr_does_not_flush_tlb() {
     assert_eq!(ctx[SYSREG_SLOT0 + SLOT_SCTLR], SCTLR_M, "SCTLR slot holds the MSR'd value");
 }
 
-/// (g) BYTE PROOF: the TTBR0 MSR block emits MORE code than the SCTLR MSR block,
-/// because only the former appends the `aether_mmu_flush_all` Win64 call sequence
-/// (12 push + sub rsp + mov rax,imm64 + call + add rsp + 12 pop). A direct length
-/// comparison of two otherwise-identical single-MSR blocks isolates the flush
-/// emission to the translation-control classification.
+/// (g) BYTE PROOF (ch66 contract): `MSR TCR_EL1` bakes the
+/// `aether_mmu_flush_all` call (a translation-control change flushes the soft
+/// TLB); `MSR TTBR0_EL1` bakes only the user-half JIT block invalidate and
+/// `MSR TTBR1_EL1` the full one (the TLB is TTBR-tagged and needs no flush);
+/// `MSR SCTLR_EL1` bakes neither.
 #[test]
-fn m4b_ttbr0_msr_emits_flush_call_sctlr_does_not() {
+fn m4b_tcr_msr_emits_flush_call_ttbr0_invalidates_blocks_only() {
     let _serial = serial();
-    // Single-MSR blocks (no load) so the only difference is the flush call.
     let ttbr0 = translate_straight_line(&[0xD518_2002u32], 0xF300); // MSR TTBR0_EL1,X2
+    let tcr = translate_straight_line(&[0xD518_2042u32], 0xF308); // MSR TCR_EL1,X2
     let sctlr = translate_straight_line(&[0xD518_1002u32], 0xF310); // MSR SCTLR_EL1,X2
-    assert!(
-        ttbr0.len() > sctlr.len(),
-        "TTBR0 MSR must emit the flush call (longer block): ttbr0={} sctlr={}",
-        ttbr0.len(),
-        sctlr.len()
-    );
-    // The flush block bakes the helper address via `mov rax, imm64` (REX.W B8).
-    // Its presence in the TTBR0 block and absence in the SCTLR block is a second,
-    // structural witness that the flush call was emitted only for TTBR0.
-    let flush_va = aether_mmu_flush_all as *const () as usize as u64;
-    let flush_le = flush_va.to_le_bytes();
-    assert!(
-        ttbr0.windows(8).any(|w| w == flush_le),
-        "TTBR0 MSR block must bake the aether_mmu_flush_all address"
-    );
-    assert!(
-        !sctlr.windows(8).any(|w| w == flush_le),
-        "SCTLR MSR block must NOT bake the flush address (no flush for SCTLR)"
-    );
+    let flush_le = (aether_mmu_flush_all as *const () as usize as u64).to_le_bytes();
+    let inval_le = (aether_translator::dbt::aether_dbt_invalidate_all as *const () as usize as u64)
+        .to_le_bytes();
+    let has = |code: &[u8], pat: &[u8; 8]| code.windows(8).any(|w| w == pat);
+    assert!(has(&tcr, &flush_le), "TCR MSR block must bake the aether_mmu_flush_all address");
+    assert!(has(&tcr, &inval_le), "TCR MSR block must invalidate JIT blocks");
+    let inval_low_le = (aether_translator::dbt::aether_dbt_invalidate_low as *const () as usize as u64)
+        .to_le_bytes();
+    let ttbr1 = translate_straight_line(&[0xD518_2022u32], 0xF318); // MSR TTBR1_EL1,X2
+    assert!(!has(&ttbr0, &flush_le), "TTBR0 MSR must NOT flush the TTBR-tagged soft TLB");
+    assert!(has(&ttbr0, &inval_low_le) && !has(&ttbr0, &inval_le),
+            "TTBR0 MSR must invalidate only the user-half (low VA) JIT blocks");
+    assert!(!has(&ttbr1, &flush_le), "TTBR1 MSR must NOT flush the TTBR-tagged soft TLB");
+    assert!(has(&ttbr1, &inval_le), "TTBR1 MSR must invalidate all JIT blocks");
+    assert!(!has(&sctlr, &flush_le) && !has(&sctlr, &inval_le), "SCTLR MSR: no flush, no invalidate");
 }
 
 // ── M4b-2 SILICON PROOF: synthetic __enable_mmu (host-mirrored) ─────────────────
@@ -9400,4 +9407,76 @@ fn cmp_sp_imm_compares_sp_not_xzr() {
         n, 0,
         "CMP SP(0x8000),#0x10: result 0x7FF0 positive → N=0 (bug: 0-0x10 negative → N=1). NZCV={nzcv:#x}"
     );
+}
+
+/// ch66 BLOCK CHAINING: a 100-iteration counted loop run through a dispatcher
+/// that follows the chaining protocol (seed CHAIN_BUDGET, clear CHAIN_EXIT, link
+/// the reported exit after the block). The result must be exact, the loop must
+/// run mostly chained (far fewer dispatches than iterations), and after
+/// `invalidate_all` every link must be undone and a fresh run still be exact.
+#[test]
+fn block_chaining_loop_executes_and_unlinks() {
+    let _serial = serial();
+    use aether_translator::dbt::{AetherDbtResult, DbtRuntime};
+    use aether_translator::runtime::context::{CHAIN_BUDGET_IDX, CHAIN_EXIT_IDX, SYSREG_SLOT0};
+    extern "system" {
+        fn VirtualProtect(a: *const core::ffi::c_void, s: usize, n: u32, o: *mut u32) -> i32;
+    }
+    // 0x10000: mov x0,#0 ; 0x10004: add x0,x0,#1 ; cmp x0,#100 ; b.ne 0x10004 ;
+    // 0x10010: b 0x10110 (the harness stops there).
+    let words: [u32; 5] = [0xD280_0000, 0x9100_0400, 0xF101_901F, 0x54FF_FFC1, 0x1400_0040];
+    let base: u64 = 0x10000;
+    let stop: u64 = 0x10110;
+    let mem: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let mut rt = DbtRuntime::new();
+    let cb = rt.code_buf.base_ptr();
+    let mut old = 0u32;
+    // SAFETY: making the runtime's own code arena executable for in-place runs.
+    assert!(unsafe { VirtualProtect(cb as *const _, rt.code_buf.capacity(), 0x40, &mut old) } != 0);
+    let exit_i = SYSREG_SLOT0 + CHAIN_EXIT_IDX;
+    let budget_i = SYSREG_SLOT0 + CHAIN_BUDGET_IDX;
+
+    let run = |rt: &mut DbtRuntime| -> (u64, u64) {
+        let mut ctx = vec![0u64; CTX_U64S];
+        ctx[PC_SLOT] = base;
+        let mut dispatches = 0u64;
+        let mut pending: Option<(u64, u64)> = None;
+        while ctx[PC_SLOT] != stop {
+            let pc = ctx[PC_SLOT];
+            let off = match rt.host_offset_for_pc(pc) {
+                Some((o, _)) => o,
+                None => {
+                    let s = (pc - base) as usize;
+                    assert_eq!(rt.translate_block(pc, &mem[s..]), AetherDbtResult::Ok);
+                    rt.host_offset_for_pc(pc).unwrap().0
+                }
+            };
+            if let Some((ex, ep)) = pending.take() {
+                rt.chain_link(ex, ep, pc, off);
+            }
+            ctx[exit_i] = 0;
+            ctx[budget_i] = 64;
+            let ep = rt.arena_epoch;
+            // SAFETY: RET-terminated translated block in the RWX arena.
+            unsafe { enter_block(cb.add(off), ctx.as_mut_ptr()) };
+            pending = Some((ctx[exit_i], ep));
+            dispatches += 1;
+            assert!(dispatches < 10_000, "runaway");
+        }
+        (ctx[0], dispatches)
+    };
+
+    let (x0, d1) = run(&mut rt);
+    assert_eq!(x0, 100, "loop result exact under chaining");
+    assert!(rt.stat_chain_links > 0, "the loop back-edge must get linked");
+    // Warm second run: the back-edge is already linked, so 100 iterations take
+    // only a handful of dispatches (budget 64 per dispatch).
+    let (x0, d2) = run(&mut rt);
+    assert_eq!(x0, 100);
+    assert!(d2 <= 6, "chained loop: {d2} dispatches (first run {d1})");
+
+    rt.invalidate_all();
+    assert_eq!(rt.stat_chain_unlinks, rt.stat_chain_links, "invalidate_all undoes every link");
+    let (x0, _) = run(&mut rt);
+    assert_eq!(x0, 100, "re-translated after invalidate: still exact");
 }

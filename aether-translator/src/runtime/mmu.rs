@@ -1164,19 +1164,31 @@ fn finish_leaf(
 // per-core TLBs (or atomics) + ASID tagging. The flush-on-every-TTBR/TCR/MAIR
 // write contract (M4b-2d) is load-bearing for CORRECTNESS here, not just speed.
 
-const TLB_ENTRIES: usize = 256;
+// ch66: 4096 entries (was 256) and a generation counter: an entry is live only
+// when its TLB_EGEN equals TLB_GEN, so a whole-TLB flush is one increment
+// instead of a loop over every slot (flushes are frequent: every TLBI).
+const TLB_ENTRIES: usize = 4096;
 const TLB_EMPTY: u64 = u64::MAX;
 
 static mut TLB_TAG: [u64; TLB_ENTRIES] = [TLB_EMPTY; TLB_ENTRIES];
 static mut TLB_PA: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
 static mut TLB_W: [bool; TLB_ENTRIES] = [false; TLB_ENTRIES];
-/// Per-entry address-space tag for TTBR0 (low-VA) cached translations: the full
-/// `TTBR0_EL1` value (page-table base + ASID) live at fill time. A low-VA lookup
-/// hits only when this matches the CURRENT `TTBR0_EL1`, so a FORKED child (which
-/// the kernel installs by writing a different `TTBR0_EL1` baddr) can never hit a
-/// stale entry left by the parent — even if the flush-on-TTBR0-write contract
-/// were ever missed. (High-VA / TTBR1 entries are never cached, so no tag there.)
-/// This is the signal-11 "software-TLB staleness on forked TTBR0 pages" guard.
+/// Fill generation of each entry; live iff == `TLB_GEN`.
+static mut TLB_EGEN: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
+/// Current TLB generation (starts at 1 so the zero-initialised EGEN is stale).
+static mut TLB_GEN: u64 = 1;
+/// ch66: cache kernel (TTBR1, high-VA) translations too, tagged with the live
+/// `TTBR1_EL1` value exactly as low VAs are tagged with `TTBR0_EL1`. Runtime
+/// switch so a regression can be bisected without a rebuild.
+pub static mut TLB_CACHE_HIGH: bool = true;
+/// Per-entry address-space tag: the full translation-table base register value
+/// (page-table base + ASID) live at fill time — `TTBR0_EL1` for low VAs,
+/// `TTBR1_EL1` for high VAs. A lookup hits only when this matches the CURRENT
+/// register, so a FORKED child (which the kernel installs by writing a different
+/// `TTBR0_EL1` baddr) can never hit a stale entry left by the parent, and a
+/// transient kernel pgd (idmap / create_kpti_ng_temp_pgd, a different TTBR1)
+/// never hits swapper's entries. This is the signal-11 "software-TLB staleness
+/// on forked TTBR0 pages" guard; because of it a TTBR write needs no flush.
 static mut TLB_ASID: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
 
 /// Invalidate the entire software TLB. Called on MSR to TTBR0/1_EL1, TCR_EL1,
@@ -1185,12 +1197,28 @@ static mut TLB_ASID: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
 pub extern "C" fn aether_mmu_flush_all() {
     // SAFETY: EL2-private arrays, single-vCPU; no aliasing references exist.
     unsafe {
-        let tag = core::ptr::addr_of_mut!(TLB_TAG);
-        for i in 0..TLB_ENTRIES {
-            (*tag)[i] = TLB_EMPTY;
-        }
+        tlb_bump_gen();
         let t = core::ptr::addr_of_mut!(MMU_TLBI_FLUSH_ALL_TOTAL);
         *t = (*t).saturating_add(1);
+    }
+}
+
+/// O(1) whole-TLB invalidate: advance the generation so every entry is stale.
+/// On the (unreachable in practice) u64 wrap, clear the per-entry generations.
+#[allow(unsafe_code)]
+fn tlb_bump_gen() {
+    // SAFETY: EL2-private, single-vCPU; no references to the statics escape.
+    unsafe {
+        let g = (*core::ptr::addr_of!(TLB_GEN)).wrapping_add(1);
+        if g == 0 {
+            let e = core::ptr::addr_of_mut!(TLB_EGEN);
+            for i in 0..TLB_ENTRIES {
+                (*e)[i] = 0;
+            }
+            *core::ptr::addr_of_mut!(TLB_GEN) = 1;
+        } else {
+            *core::ptr::addr_of_mut!(TLB_GEN) = g;
+        }
     }
 }
 
@@ -1227,10 +1255,7 @@ pub extern "C" fn aether_mmu_tlbi_va(va: u64) {
     // SAFETY: EL2-private, single-vCPU; in-bounds index + diagnostic counters.
     unsafe {
         // Whole-TLB flush — see doc above.
-        let tag = core::ptr::addr_of_mut!(TLB_TAG);
-        for i in 0..TLB_ENTRIES {
-            (*tag)[i] = TLB_EMPTY;
-        }
+        tlb_bump_gen();
         let t = core::ptr::addr_of_mut!(MMU_TLBI_VA_TOTAL);
         *t = (*t).saturating_add(1);
         let lo = *core::ptr::addr_of!(MMU_TRACE_LO);
@@ -1307,17 +1332,30 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
     // (low) VAs still cache; the boot-time identity-mapped low VAs that
     // dominate the early dispatch hot path benefit from the cache and the
     // kernel never rewrites them.
+    //
+    // ch66: superseded. High VAs are now cached too (when TLB_CACHE_HIGH), with
+    // the same safety argument as low VAs: each entry is tagged with the live
+    // TTBR1 value (a transient pgd never hits swapper's entries), only VALID
+    // walks are cached (making a mapping valid needs no TLBI, so nothing stale
+    // can exist for it), and EVERY TLBI form still drops the whole TLB, so a
+    // valid->changed edit is covered by the kernel's own break-before-make TLBI.
+    // Synthesised translations (kernel-image / KPTI Err-branch fallbacks) are
+    // still never cached for high VAs.
     let va_high = (va >> 63) & 1 == 1;
-    // Address-space tag for the low-VA (TTBR0) cache: the live TTBR0_EL1. A
-    // forked child runs with a DIFFERENT TTBR0 base, so tagging each cached
-    // low-VA entry with it prevents a child from hitting the parent's stale
-    // translation (the signal-11 forked-process staleness guard). Read once.
+    // Address-space tag: the live TTBR of the half `va` selects. A forked child
+    // runs with a DIFFERENT TTBR0 base, so tagging each cached entry prevents a
+    // child from hitting the parent's stale translation. Read once.
     let ttbr0 = sysregs[SYSREG_SLOT0 + SLOT_TTBR0];
-    if !va_high {
+    let space = if va_high { sysregs[SYSREG_SLOT0 + SLOT_TTBR1] } else { ttbr0 };
+    // SAFETY: EL2-private, single-vCPU.
+    let cache_ok = !va_high || unsafe { *core::ptr::addr_of!(TLB_CACHE_HIGH) };
+    let gen = unsafe { *core::ptr::addr_of!(TLB_GEN) };
+    if cache_ok {
         // SAFETY: EL2-private, single-vCPU.
         unsafe {
             if *core::ptr::addr_of!(TLB_TAG[idx]) == page
-                && *core::ptr::addr_of!(TLB_ASID[idx]) == ttbr0
+                && *core::ptr::addr_of!(TLB_EGEN[idx]) == gen
+                && *core::ptr::addr_of!(TLB_ASID[idx]) == space
                 && (!is_w || *core::ptr::addr_of!(TLB_W[idx]))
             {
                 return Ok(*core::ptr::addr_of!(TLB_PA[idx]) | (va & 0xFFF));
@@ -1356,14 +1394,16 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
             // pgds (idmap / create_kpti_ng_temp_pgd) too, and snapshotting those
             // would poison KERNEL_PGD_SNAPSHOT. The snapshot is set ONLY from the
             // Err-branch differential resolve below, which PROVES tramp↔swapper.
-            // Only cache low (TTBR0) VAs — see top-of-fn rationale.
-            if !va_high {
+            // Cache the walked translation (high VAs only when TLB_CACHE_HIGH)
+            // — see top-of-fn rationale.
+            if cache_ok {
                 // SAFETY: EL2-private, single-vCPU.
                 unsafe {
                     *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
                     *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
                     *core::ptr::addr_of_mut!(TLB_W[idx]) = writable;
-                    *core::ptr::addr_of_mut!(TLB_ASID[idx]) = ttbr0;
+                    *core::ptr::addr_of_mut!(TLB_ASID[idx]) = space;
+                    *core::ptr::addr_of_mut!(TLB_EGEN[idx]) = gen;
                 }
             }
             Ok(pa)
@@ -1401,6 +1441,7 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
                             *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
                             *core::ptr::addr_of_mut!(TLB_W[idx]) = true;
                             *core::ptr::addr_of_mut!(TLB_ASID[idx]) = ttbr0;
+                            *core::ptr::addr_of_mut!(TLB_EGEN[idx]) = gen;
                         }
                         *core::ptr::addr_of_mut!(MMU_KIMG_FALLBACK_HITS) =
                             (*core::ptr::addr_of!(MMU_KIMG_FALLBACK_HITS))

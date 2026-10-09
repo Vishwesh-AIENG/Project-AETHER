@@ -92,6 +92,19 @@ pub const SYSREG_SINK_IDX: usize = 63;
 /// 56-58 = pending-fault, 59/60 = MMU scratch, 63 = sink.)
 pub const RESV_VA_DISP: i32 = (SYSREG_BASE + 61 * 8) as i32; // 0x510
 pub const RESV_VALID_DISP: i32 = (SYSREG_BASE + 62 * 8) as i32; // 0x518
+/// ch66 block chaining. Sysreg slots 27..39 are unused by the sysreg map.
+/// `CHAIN_EXIT`: written by an unlinked chainable block exit just before it
+/// returns to the dispatcher — (code-arena offset of the exit's `jmp rel32`
+/// field) + 1, or left 0 by every other exit. The dispatcher zeroes it before
+/// each entry and, on a non-zero value, patches that jump to go straight to the
+/// next block. `CHAIN_BUDGET`: chained transfers left before the chain must
+/// return to the dispatcher (interrupt / timer / clock bookkeeping). A
+/// zero-initialised context therefore never chains (harness-safe).
+pub const CHAIN_EXIT_IDX: usize = 38;
+pub const CHAIN_BUDGET_IDX: usize = 39;
+pub const CHAIN_EXIT_DISP: i32 = (SYSREG_BASE + CHAIN_EXIT_IDX * 8) as i32;
+pub const CHAIN_BUDGET_DISP: i32 = (SYSREG_BASE + CHAIN_BUDGET_IDX * 8) as i32;
+
 /// First byte offset of the 64-slot linear-scan spill area.
 pub const SPILL_BASE: usize = 0x528;
 /// Number of spill slots.

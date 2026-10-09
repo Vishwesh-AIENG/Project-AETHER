@@ -23,6 +23,11 @@ dbt_linked = []
 # The dedicated `corpus-gates` CI lane (.github/workflows/aether-translator.yml)
 # turns this feature on after installing those toolchains.
 linux_corpus = []
+# ch66: per-instruction / per-block diagnostic PC stamps (FAULT_OP_PC,
+# LAST_GUEST_PC) in emitted code. Off by default: they cost ~3 x86 insns per
+# guest instruction and only feed debug watchers. Precise fault PCs do NOT
+# depend on them (the MMU fault-exit path stores the exact PC itself).
+dbt-diag = []
 
 [dev-dependencies]
 # AT-1 fuzz cross-check. 0.14 wraps Capstone 5.x with full ARMv8.2+ crypto

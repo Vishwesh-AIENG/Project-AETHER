@@ -374,6 +374,14 @@ impl X86Encoder {
         self.emit_i32(imm as i32);
     }
 
+    /// SUB qword [base + disp], imm8 (sign-extended). Sets CF on borrow.
+    pub fn emit_sub_mem64_imm8(&mut self, base: u8, disp: i32, imm: i8) {
+        self.rex_opt(true, 0, 0, base);
+        self.buf.push(0x83);
+        self.modrm_mem(5, base, disp); // /5 = SUB
+        self.buf.push(imm as u8);
+    }
+
     /// MOV r64, [base + disp].
     pub fn emit_mov_r64_mem(&mut self, dst: u8, base: u8, disp: i32) {
         self.rex_opt(true, dst, 0, base);

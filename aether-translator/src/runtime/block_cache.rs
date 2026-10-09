@@ -34,6 +34,9 @@ pub struct CachedBlock {
     pub safe: bool,
     /// Generation at which this entry was installed.
     pub generation: u32,
+    /// ch66: address-space epoch at install time (see `BlockCache::epoch`). The
+    /// entry is live only while it equals the current epoch of its VA half.
+    pub epoch: u64,
 }
 
 /// Two-generation block cache.
@@ -51,6 +54,12 @@ pub struct BlockCache {
     /// Promotion threshold: fraction of capacity (as integer percent) before
     /// triggering a generation flip.  Default: 70.
     fill_pct: u32,
+    /// ch66: O(1) invalidation. `epoch[0]` covers low (TTBR0, VA[55]=0) PCs,
+    /// `epoch[1]` high (TTBR1) PCs. Bumping an epoch makes every entry of that
+    /// half stale at once (a stale entry reads as a miss and is overwritten in
+    /// place on re-insert; rotation reclaims the rest). Replaces the O(capacity)
+    /// clear of both generations that every TLBI / TTBR write used to pay.
+    epoch: [u64; 2],
 
     // Statistics
     pub stat_hits: u64,
@@ -73,6 +82,7 @@ impl BlockCache {
             active_count: 0,
             generation: 0,
             fill_pct: 70,
+            epoch: [1, 1],
             stat_hits: 0,
             stat_misses: 0,
             stat_old_hits: 0,
@@ -81,6 +91,18 @@ impl BlockCache {
     }
 
     // ── Hash & probe ──────────────────────────────────────────────────────────
+
+    /// Address-space half of a guest PC: 1 for TTBR1 (VA[55] set), else 0.
+    #[inline]
+    pub fn half(guest_pc: u64) -> usize {
+        ((guest_pc >> 55) & 1) as usize
+    }
+
+    /// Current epoch of `guest_pc`'s half.
+    #[inline]
+    pub fn epoch_of(&self, guest_pc: u64) -> u64 {
+        self.epoch[Self::half(guest_pc)]
+    }
 
     #[inline]
     fn bucket(&self, guest_pc: u64) -> usize {
@@ -148,16 +170,25 @@ impl BlockCache {
     /// Checks active generation first, then old generation (and promotes to
     /// active on an old-gen hit to prevent re-eviction).
     pub fn lookup(&mut self, guest_pc: u64) -> Option<&CachedBlock> {
+        let ep = self.epoch_of(guest_pc);
         // Hot path: active generation.
         if let Some(idx) = Self::probe(&self.active, guest_pc) {
-            self.stat_hits += 1;
-            return self.active[idx].as_ref();
+            if self.active[idx].as_ref().map_or(false, |e| e.epoch == ep) {
+                self.stat_hits += 1;
+                return self.active[idx].as_ref();
+            }
+            // Stale (invalidated) entry: a miss. Do not consult `old` — any
+            // old-generation copy is at least as stale.
+            self.stat_misses += 1;
+            return None;
         }
 
         // Cold path: old generation.
         // Old-gen is read-only (no deletions) to preserve linear-probe chains.
         // We promote to active by copying — old slot stays intact until rotation.
-        if let Some(idx) = Self::probe(&self.old, guest_pc) {
+        if let Some(idx) = Self::probe(&self.old, guest_pc)
+            .filter(|&i| self.old[i].as_ref().map_or(false, |e| e.epoch == ep && e.len != 0))
+        {
             self.stat_old_hits += 1;
             let entry = self.old[idx].as_ref().unwrap().clone();
             let already = Self::probe(&self.active, guest_pc).is_some();
@@ -192,6 +223,7 @@ impl BlockCache {
             len,
             safe,
             generation: self.generation,
+            epoch: self.epoch_of(guest_pc),
         };
 
         // Update count only if this is truly a new slot.
@@ -240,8 +272,22 @@ impl BlockCache {
         }
     }
 
-    /// Evict all entries (both generations).
+    /// Evict all entries (both generations) — O(1): bump both epochs.
     pub fn flush_all(&mut self) {
+        self.epoch[0] = self.epoch[0].wrapping_add(1);
+        self.epoch[1] = self.epoch[1].wrapping_add(1);
+        self.stat_evictions += 1;
+    }
+
+    /// Evict every low-half (TTBR0 / user) entry — O(1). Kernel (TTBR1) blocks
+    /// stay live: a TTBR0 switch cannot change what a high VA maps to.
+    pub fn flush_low(&mut self) {
+        self.epoch[0] = self.epoch[0].wrapping_add(1);
+        self.stat_evictions += 1;
+    }
+
+    /// Physically clear both generations (arena reset: every offset is dead).
+    pub fn clear(&mut self) {
         for slot in &mut self.active {
             *slot = None;
         }
@@ -249,7 +295,7 @@ impl BlockCache {
             *slot = None;
         }
         self.active_count = 0;
-        self.stat_evictions += 1;
+        self.flush_all();
     }
 
     /// Hit rate: `hits / (hits + misses)`.  Old-gen hits count as hits.

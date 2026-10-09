@@ -190,6 +190,16 @@ impl CodeBuf {
         self.buf.as_ptr()
     }
 
+    /// ch66: overwrite `bytes` at `offset` inside already-emitted code (block
+    /// chaining link/unlink and exit-site fixups). Returns false if out of range.
+    pub fn patch(&mut self, offset: usize, bytes: &[u8]) -> bool {
+        if offset.checked_add(bytes.len()).map_or(true, |e| e > self.written_len) {
+            return false;
+        }
+        self.buf[offset..offset + bytes.len()].copy_from_slice(bytes);
+        true
+    }
+
     /// Current high-water mark.
     pub fn written_len(&self) -> usize {
         self.written_len

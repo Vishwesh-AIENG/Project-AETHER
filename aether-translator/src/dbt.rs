@@ -111,6 +111,19 @@ pub const JIT_CACHE_BYTES: usize = 16 * 1024 * 1024;
 /// guest-invisible JIT PA arena — no EPT/NPT or bump-arena interaction.
 pub const BLOCK_CACHE_CAPACITY: usize = 262144;
 
+/// ch66: block chaining on/off (runtime switch for bisecting; the dispatcher
+/// must also seed `CHAIN_BUDGET` for chaining to take effect).
+pub static CHAIN_ENABLED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// One chainable exit recorded while translating a block (block-local offsets).
+#[derive(Clone, Copy)]
+struct ChainExit {
+    /// Offset of the `jmp rel32` displacement field.
+    rel_pos: usize,
+    /// Offset of the imm64 of the `mov rax, imm64` that reports the site.
+    imm_pos: usize,
+}
+
 /// Aggregate runtime state for the translator. One instance per hypervisor
 /// (single-vCPU model).
 pub struct DbtRuntime {
@@ -168,6 +181,14 @@ pub struct DbtRuntime {
     /// identical and reuses its capacity. `mem::take`n + cleared per block,
     /// then restored.
     scratch_branch_patches: alloc::vec::Vec<(usize, crate::ir::BlockId)>,
+    /// ch66: patched chain sites `(code-arena offset of the rel32, VA half)`,
+    /// so an invalidation can restore them to fall-through (unlink).
+    chain_sites: alloc::vec::Vec<(usize, u8)>,
+    /// ch66: bumped on every code-arena reset; a chain exit observed under an
+    /// older arena epoch must not be linked (its offset may now be other code).
+    pub arena_epoch: u64,
+    pub stat_chain_links: u64,
+    pub stat_chain_unlinks: u64,
 }
 
 impl DbtRuntime {
@@ -190,6 +211,152 @@ impl DbtRuntime {
             scratch_enc:  X86Encoder::new(),
             scratch_regalloc: regalloc::RegallocScratch::default(),
             scratch_branch_patches: alloc::vec::Vec::new(),
+            chain_sites: alloc::vec::Vec::new(),
+            arena_epoch: 0,
+            stat_chain_links: 0,
+            stat_chain_unlinks: 0,
+        }
+    }
+
+    /// ch66: may a block whose IR is `ops` chain directly to its successor?
+    /// No if it can change the address space / translation regime, raise or
+    /// return from an exception, or touch an emulated system register — those
+    /// exits must go back to the dispatcher (and some of them invalidate).
+    fn block_may_chain(ops: &[crate::ir::IrOp]) -> bool {
+        use crate::decoder::sysreg::SysReg;
+        use crate::ir::IrOp;
+        ops.iter().all(|op| match op {
+            IrOp::Hvc { .. } | IrOp::Svc { .. } | IrOp::Smc { .. } | IrOp::Brk { .. }
+            | IrOp::Hlt { .. } | IrOp::EretRt | IrOp::TlbInval { .. } | IrOp::AtS1E1 { .. }
+            | IrOp::Isb | IrOp::Unimplemented { .. } => false,
+            IrOp::Msr { reg, .. } => matches!(
+                reg,
+                SysReg::NzcvEl0 | SysReg::FpcrEl0 | SysReg::FpsrEl0 | SysReg::TpidrEl0
+            ),
+            _ => true,
+        })
+    }
+
+    /// ch66: statically known successor PCs of a block, restricted to the
+    /// block's own 4 KiB page (same page => same VA->PA mapping as the block
+    /// itself, so a chained jump can never cross into a different mapping).
+    fn chain_targets(
+        block_pc: u64,
+        last: Option<(DecodedInsn, u64)>,
+        ended_on_terminator: bool,
+        next_pc: u64,
+    ) -> ([u64; 2], usize) {
+        let mut t = [0u64; 2];
+        let mut n = 0usize;
+        let push = |pc: u64, t: &mut [u64; 2], n: &mut usize| {
+            if (pc >> 12) == (block_pc >> 12) && !t[..*n].contains(&pc) {
+                t[*n] = pc;
+                *n += 1;
+            }
+        };
+        if !ended_on_terminator {
+            push(next_pc, &mut t, &mut n);
+            return (t, n);
+        }
+        if let Some((insn, ipc)) = last {
+            let rel = |off: i32| ipc.wrapping_add(off as i64 as u64);
+            match insn {
+                DecodedInsn::B { offset } | DecodedInsn::Bl { offset } => push(rel(offset), &mut t, &mut n),
+                DecodedInsn::Bcond { offset, .. }
+                | DecodedInsn::Cbz { offset, .. }
+                | DecodedInsn::Cbnz { offset, .. }
+                | DecodedInsn::Tbz { offset, .. }
+                | DecodedInsn::Tbnz { offset, .. } => {
+                    push(rel(offset), &mut t, &mut n);
+                    push(ipc.wrapping_add(4), &mut t, &mut n);
+                }
+                _ => {}
+            }
+        }
+        (t, n)
+    }
+
+    /// ch66: emit the chaining exit stub in place of the plain `RET`.
+    ///
+    /// ```text
+    ///   sub  qword [r15+BUDGET], 1 ; jb PLAIN     ; budget spent -> dispatcher
+    ///   mov  rax, [r15+PC]
+    ///   mov  rcx, T0 ; cmp rax, rcx ; jne NEXT0
+    ///   jmp  rel32(0)                             ; <- patched to T0's block
+    ///   mov  rax, SITE0 ; mov [r15+EXIT], rax ; ret
+    /// NEXT0: (same for T1)
+    /// PLAIN: ret
+    /// ```
+    /// The block already wrote its next PC; the stub only routes. Unpatched,
+    /// each `jmp` falls through to the site report. Last byte is RET.
+    fn emit_chain_stub(enc: &mut X86Encoder, targets: &[u64], exits: &mut [ChainExit; 2]) {
+        use crate::runtime::context::{CHAIN_BUDGET_DISP, CHAIN_EXIT_DISP, PC_OFFSET};
+        const RAX: u8 = 0;
+        const RCX: u8 = 1;
+        const R15: u8 = 15;
+        const JB: u8 = 0x2;
+        const JNE: u8 = 0x5;
+        enc.emit_sub_mem64_imm8(R15, CHAIN_BUDGET_DISP, 1);
+        let jb_plain = enc.emit_jcc_rel32(JB);
+        enc.emit_mov_r64_mem(RAX, R15, PC_OFFSET as i32);
+        let mut pending: Option<usize> = None;
+        for (i, &t) in targets.iter().enumerate() {
+            if let Some(j) = pending.take() {
+                let here = enc.pos();
+                enc.patch_rel32(j, here);
+            }
+            enc.emit_mov_r64_imm64(RCX, t as i64);
+            enc.emit_cmp_rr64(RAX, RCX);
+            pending = Some(enc.emit_jcc_rel32(JNE));
+            let rel_pos = enc.emit_jmp_rel32(); // rel32 = 0: falls through
+            let imm_pos = enc.pos() + 2; // REX.W B8+r imm64
+            enc.emit_mov_r64_imm64(RAX, i64::MAX); // placeholder, fixed after placement
+            enc.emit_mov_mem_r64(R15, CHAIN_EXIT_DISP, RAX);
+            enc.emit_ret();
+            exits[i] = ChainExit { rel_pos, imm_pos };
+        }
+        let plain = enc.pos();
+        if let Some(j) = pending {
+            enc.patch_rel32(j, plain);
+        }
+        enc.patch_rel32(jb_plain, plain);
+        enc.emit_ret();
+    }
+
+    /// ch66: link a chain exit to its successor. `exit_word` is the value the
+    /// block left in `CHAIN_EXIT` (0 = nothing to link), `entry_arena_epoch` the
+    /// `arena_epoch` read BEFORE the block ran, `target_off` the successor's
+    /// arena offset (looked up / translated for the PC the block exited to).
+    /// Returns true if a jump was patched.
+    pub fn chain_link(&mut self, exit_word: u64, entry_arena_epoch: u64, next_pc: u64, target_off: usize) -> bool {
+        if exit_word == 0 || entry_arena_epoch != self.arena_epoch {
+            return false;
+        }
+        let site = (exit_word - 1) as usize;
+        let rel = (target_off as i64) - (site as i64 + 4);
+        if rel < i32::MIN as i64 || rel > i32::MAX as i64 {
+            return false;
+        }
+        if !self.code_buf.patch(site, &(rel as i32).to_le_bytes()) {
+            return false;
+        }
+        self.chain_sites.push((site, BlockCache::half(next_pc) as u8));
+        self.stat_chain_links = self.stat_chain_links.saturating_add(1);
+        true
+    }
+
+    /// ch66: restore every patched site of the given halves to fall-through.
+    fn unlink(&mut self, low: bool, high: bool) {
+        let mut i = 0;
+        while i < self.chain_sites.len() {
+            let (site, half) = self.chain_sites[i];
+            if (half == 0 && low) || (half == 1 && high) {
+                let _ = self.code_buf.patch(site, &0i32.to_le_bytes());
+                self.chain_sites.swap_remove(i);
+                self.stat_chain_unlinks = self.stat_chain_unlinks.saturating_add(1);
+            } else {
+                i += 1;
+            }
         }
     }
 
@@ -316,6 +483,7 @@ impl DbtRuntime {
         let mut cur_pc = pc;
         let mut first_word_ok = false;
         let mut ended_on_terminator = false;
+        let mut last_insn: Option<(DecodedInsn, u64)> = None;
 
         for _ in 0..MAX_INSNS_PER_BLOCK {
             if bytes_consumed + 4 > guest_mem.len() {
@@ -365,11 +533,11 @@ impl DbtRuntime {
             // stub → corrupted pointer → SIGSEGV / kill init). Always stamping is
             // idempotent for the non-chained first insn (writes the same PC the
             // dispatcher already seeded).
-            if Self::is_mem_access(&insn) {
-                let v = block.new_value(crate::ir::value::IrValueKind::I64);
-                block.push_op(crate::ir::IrOp::ConstI64 { dst: v, val: cur_pc as i64 });
-                block.push_op(crate::ir::IrOp::WritePc { src: v });
-            }
+            //
+            // ch66: the stamp now lives on the MMU helper's FAULT-EXIT path
+            // (`IntLower::emit_mmu_fault_exit`), which writes this instruction's
+            // exact PC only when the access actually faults. Same guarantee for
+            // chained and non-chained blocks, zero cost on the success path.
 
             let term = Self::is_terminator(&insn);
             let ops_before = block.ops.len();
@@ -401,6 +569,7 @@ impl DbtRuntime {
             }
             insns_lifted += 1;
             bytes_consumed += 4;
+            last_insn = Some((insn, cur_pc));
             cur_pc = cur_pc.wrapping_add(4);
             if term {
                 ended_on_terminator = true;
@@ -474,10 +643,22 @@ impl DbtRuntime {
         // Restore the scratch buffer HERE — before the OutOfCapacity early
         // returns below — so its warm capacity is never lost on a fail path.
         self.scratch_branch_patches = branch_patches;
-        // Block epilogue: RET. Cheapest possible "return to dispatcher" —
-        // production lowering inserts the AT-19 context-save/restore here,
-        // which is out of Step A's narrow scope.
-        enc.emit_ret();
+        // Block epilogue. ch66: a chainable block ends in the chaining exit stub
+        // (patchable direct jumps to its same-page successors); anything else
+        // keeps the plain RET to the dispatcher.
+        let mut chain_exits = [ChainExit { rel_pos: 0, imm_pos: 0 }; 2];
+        let (targets, n_targets) = if CHAIN_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+            && Self::block_may_chain(&func.blocks[0].ops)
+        {
+            Self::chain_targets(pc, last_insn, ended_on_terminator, cur_pc)
+        } else {
+            ([0; 2], 0)
+        };
+        if n_targets > 0 {
+            Self::emit_chain_stub(&mut enc, &targets[..n_targets], &mut chain_exits);
+        } else {
+            enc.emit_ret();
+        }
 
         let bytes_len = enc.as_bytes().len();
         // Compute the structural-safety verdict ONCE here (immutable bytes), so
@@ -501,7 +682,10 @@ impl DbtRuntime {
                 self.stat_lower_failures =
                     self.stat_lower_failures.saturating_add(1);
                 self.code_buf.reset();
-                self.block_cache.flush_all();
+                self.block_cache.clear();
+                // Every chain site died with the arena.
+                self.chain_sites.clear();
+                self.arena_epoch = self.arena_epoch.wrapping_add(1);
                 match self.code_buf.alloc_block(pc, enc.as_bytes()) {
                     Ok(o) => o,
                     Err(_) => return AetherDbtResult::TranslationFailed,
@@ -509,6 +693,13 @@ impl DbtRuntime {
             }
             Err(_) => return AetherDbtResult::TranslationFailed,
         };
+
+        // ch66: the exit stubs report their site as an ARENA offset (+1 so that
+        // 0 means "no site"); only known now that the block is placed.
+        for e in &chain_exits[..n_targets] {
+            let site = (host_offset + e.rel_pos + 1) as u64;
+            let _ = self.code_buf.patch(host_offset + e.imm_pos, &site.to_le_bytes());
+        }
 
         // Return the scratch buffers to the runtime so the next translation
         // reuses their (now-warm) capacity instead of allocating fresh.
@@ -590,7 +781,16 @@ impl DbtRuntime {
     /// Leaving the arena intact keeps the in-flight block valid; dropping its
     /// cache entry only means the *next* dispatch of that PC retranslates.
     pub fn invalidate_all(&mut self) {
+        self.unlink(true, true);
         self.block_cache.flush_all();
+    }
+
+    /// ch66: invalidate only low-half (TTBR0 / user VA) blocks and their chains.
+    /// A TTBR0 switch cannot change what a high (kernel) VA maps to, so kernel
+    /// blocks and kernel chains survive it.
+    pub fn invalidate_low(&mut self) {
+        self.unlink(true, false);
+        self.block_cache.flush_low();
     }
 }
 
@@ -786,6 +986,40 @@ pub fn aether_dbt_dispatch_block(guest_pc: u64, guest_mem: &[u8]) -> AetherDbtRe
 /// host-test callers.
 pub extern "C" fn aether_dbt_invalidate_all() -> AetherDbtResult {
     match global::with(|rt| rt.invalidate_all()) {
+        Some(()) => AetherDbtResult::Ok,
+        None => AetherDbtResult::NotInitialised,
+    }
+}
+
+/// ch66: current code-arena epoch (read BEFORE entering a block; pass to
+/// [`aether_dbt_chain_link`] after it returns).
+pub fn aether_dbt_arena_epoch() -> u64 {
+    global::with(|rt| rt.arena_epoch).unwrap_or(u64::MAX)
+}
+
+/// ch66: link the chain exit a block reported (`exit_word` = its CHAIN_EXIT
+/// slot) to the cached block for `next_pc`. Call once the dispatcher has the
+/// next block translated; no-op if anything is stale or missing.
+pub fn aether_dbt_chain_link(exit_word: u64, entry_arena_epoch: u64, next_pc: u64) -> bool {
+    if exit_word == 0 {
+        return false;
+    }
+    global::with(|rt| match rt.host_offset_for_pc(next_pc) {
+        Some((off, _)) => rt.chain_link(exit_word, entry_arena_epoch, next_pc, off),
+        None => false,
+    })
+    .unwrap_or(false)
+}
+
+/// ch66: (links made, links undone) — for the dispatch heartbeat.
+pub fn aether_dbt_chain_stats() -> (u64, u64) {
+    global::with(|rt| (rt.stat_chain_links, rt.stat_chain_unlinks)).unwrap_or((0, 0))
+}
+
+/// ch66: invalidate only the low-half (user, TTBR0) blocks and chains. Wired
+/// into emitted code for `MSR TTBR0_EL1` (same ABI as `aether_dbt_invalidate_all`).
+pub extern "C" fn aether_dbt_invalidate_low() -> AetherDbtResult {
+    match global::with(|rt| rt.invalidate_low()) {
         Some(()) => AetherDbtResult::Ok,
         None => AetherDbtResult::NotInitialised,
     }
