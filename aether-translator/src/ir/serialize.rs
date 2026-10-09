@@ -755,6 +755,7 @@ pub fn encode(op: &IrOp, out: &mut Vec<u8>) -> Result<(), SerErr> {
             put_u8(out, *n);
             put_u8(out, *m);
         }
+        IrOp::SimdInterp { word } => put_u32(out, *word),
         IrOp::VecBicOrrImm { d, imm, is_bic, q } => {
             put_u8(out, *d);
             put_u64(out, *imm);
@@ -1309,6 +1310,7 @@ pub fn decode(bytes: &[u8]) -> Result<(IrOp, usize), SerErr> {
         0x75 => IrOp::CryptoSha256 {
             kind: r.u8()?, d: r.u8()?, n: r.u8()?, m: r.u8()?,
         },
+        0x48 => IrOp::SimdInterp { word: r.u32()? },
         0x6E => IrOp::VecReduceAdd {
             d: r.u8()?, n: r.u8()?, esize: r.u8()?, q: r.u8()? != 0,
         },
@@ -1682,6 +1684,7 @@ pub fn variant_tag(op: &IrOp) -> u8 {
         IrOp::VecMulLong { .. } => 0x71,
         IrOp::VecRev64 { .. } => 0x72,
         IrOp::CryptoSha256 { .. } => 0x75,
+        IrOp::SimdInterp { .. } => 0x48,
         IrOp::Mrs { .. } => 0xC5,
         IrOp::Msr { .. } => 0xC6,
         IrOp::Dmb { .. } => 0xC7,

@@ -1143,5 +1143,11 @@ pub enum DecodeErr {
 /// always little-endian per ARM ARM §B1.6.1; callers should provide the word
 /// already in native u32 form (use `u32::from_le_bytes` on bytes).
 pub fn decode_instruction(word: u32) -> Result<DecodedInsn, DecodeErr> {
-    top_level::dispatch(word)
+    match top_level::dispatch(word) {
+        // A valid Advanced SIMD encoding the typed decoder does not route yet but
+        // the runtime helper implements exactly: accept it as AdvSimd (the lifter
+        // turns it into a simd_rt call). `supports` rejects reserved encodings.
+        Err(_) if crate::runtime::simd_rt::supports(word) => Ok(DecodedInsn::AdvSimd { raw: word }),
+        r => r,
+    }
 }

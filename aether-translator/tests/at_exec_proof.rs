@@ -9018,6 +9018,36 @@ fn simd_scalar_fabd_execute() {
     assert_eq!(ctx[vd(0)], 0x7FC0_0000, "FABD S (-NaN, 1) = +qNaN");
 }
 
+/// Long-tail Advanced SIMD through the simd_rt CALL path (translated code → Win64
+/// call → interpreter → q-regs): BIF (was a decode failure), URSHR and UADDW (were
+/// UD2), UCVTF .4s (was UD2 in the cvtdq2ps lowering). Also checks that GPRs and
+/// unrelated vector registers survive the call.
+#[test]
+fn simd_rt_call_path_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    // BIF V0.8B, V1.8B, V2.8B = 0x2EE21C20 (Q=0: upper 64 zeroed).
+    let ctx = fp_run1(0x2EE2_1C20, |c| {
+        c[vd(0)] = 0xF0; c[vd(0) + 1] = !0; c[vd(1)] = 0x0F; c[vd(2)] = 0xCC;
+        c[5] = 0x1234_5678; c[vd(7)] = 0xAAAA;
+    });
+    assert_eq!(ctx[vd(0)], (0xF0 & 0xCC) | (0x0F & !0xCCu64 & 0xFF), "BIF");
+    assert_eq!(ctx[vd(0) + 1], 0, "Q=0 zeroes Vd[127:64]");
+    assert_eq!(ctx[5], 0x1234_5678, "X5 survives the helper call");
+    assert_eq!(ctx[vd(7)], 0xAAAA, "V7 untouched");
+    // URSHR V0.2D, V1.2D, #8 = 0x6F782420: (0x180 + 0x80) >> 8 = 2.
+    let ctx = fp_run1(0x6F78_2420, |c| { c[vd(1)] = 0x180; c[vd(1) + 1] = 0x7F; });
+    assert_eq!(ctx[vd(0)], 2, "URSHR lane 0");
+    assert_eq!(ctx[vd(0) + 1], 0, "URSHR lane 1 (0x7F+0x80)>>8");
+    // UADDW V0.8H, V1.8H, V2.8B = 0x2E221020.
+    let ctx = fp_run1(0x2E22_1020, |c| { c[vd(1)] = 0x0001_00FF; c[vd(2)] = 0x0101; });
+    assert_eq!(ctx[vd(0)] & 0xFFFF_FFFF, 0x0002_0100, "UADDW");
+    // UCVTF V0.4S, V0.4S = 0x6E21D800: 0xFFFFFFFF -> 4294967296.0f.
+    let ctx = fp_run1(0x6E21_D800, |c| { c[vd(0)] = 0xFFFF_FFFF; });
+    assert_eq!(ctx[vd(0)] as u32, 4294967296.0f32.to_bits(), "UCVTF .4s unsigned");
+}
+
 /// FCVTL/FCVTL2/FCVTN/FCVTN2: vector FP precision convert (f16<->f32, f32<->f64).
 #[test]
 fn simd_fcvtl_fcvtn_execute() {

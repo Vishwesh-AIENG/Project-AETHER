@@ -269,6 +269,7 @@ fn all_variants() -> Vec<IrOp> {
         IrOp::VecMulLong { d: 1, n: 2, m: 3, size: 1, q: true, signed: false, accum: true, sub: false },
         IrOp::VecRev64 { d: 1, n: 2, size: 1, q: true, container: 8 },
         IrOp::CryptoSha256 { kind: 2, d: 1, n: 2, m: 3 },
+        IrOp::SimdInterp { word: 0x2EE2_1C20 },
         IrOp::VecBicOrrImm { d: 1, imm: 0xF0, is_bic: true, q: false },
         IrOp::VecAddLongPair { d: 1, n: 2, esize_in: 1, q: true, signed: false },
         IrOp::VecUnzip { d: 1, n: 2, m: 3, esize: 4, q: true, odd: false },
@@ -426,7 +427,7 @@ fn variant_tag_is_injective() {
     // Sanity: the sample set must cover every variant exactly once. (198 is the
     // current IrOp variant count; bump this if a variant is added — and add its
     // sample above so the tag stays unique.)
-    assert_eq!(ops.len(), 200, "all_variants() must hold one of every IrOp variant");
+    assert_eq!(ops.len(), 201, "all_variants() must hold one of every IrOp variant");
 
     let mut by_tag: HashMap<u8, &'static str> = HashMap::new();
     let mut collisions: Vec<String> = Vec::new();
@@ -536,6 +537,7 @@ fn variant_name(op: &IrOp) -> &'static str {
         IrOp::VecMulLong { .. } => "VecMulLong",
         IrOp::VecRev64 { .. } => "VecRev64",
         IrOp::CryptoSha256 { .. } => "CryptoSha256",
+        IrOp::SimdInterp { .. } => "SimdInterp",
         IrOp::VecBicOrrImm { .. } => "VecBicOrrImm",
         IrOp::VecAddLongPair { .. } => "VecAddLongPair",
         IrOp::VecUnzip { .. } => "VecUnzip",

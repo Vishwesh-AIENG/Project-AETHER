@@ -811,6 +811,33 @@ impl IntLower {
         }
     }
 
+    /// Runtime address of `aether_simd_exec(ctx, word)` — long-tail Advanced SIMD.
+    fn simd_exec_addr() -> usize {
+        crate::runtime::simd_rt::aether_simd_exec as *const () as usize
+    }
+
+    /// Emit a Win64 CALL to `aether_simd_exec(ctx = R15, word)` — identical
+    /// save / shadow-space discipline to `emit_crypto_sha256_call`. The full
+    /// 32-bit word is passed in EDX (the callee reads only the low 32 bits, so
+    /// the imm32 sign-extension into RDX is harmless).
+    fn emit_simd_interp_call(enc: &mut X86Encoder, word: u32) {
+        const RAX: u8 = 0;
+        const RCX: u8 = 1;
+        const RDX: u8 = 2;
+        for &r in Self::MMU_SAVE_REGS.iter() {
+            enc.emit_push_r64(r);
+        }
+        enc.emit_mov_rr64(RCX, CONTEXT_REG);
+        enc.emit_mov_r64_imm32(RDX, word as i32);
+        enc.emit_sub_r64_imm32(4 /* RSP */, 0x28);
+        enc.emit_mov_r64_imm64(RAX, Self::simd_exec_addr() as i64);
+        enc.emit_call_r64(RAX);
+        enc.emit_add_r64_imm32(4 /* RSP */, 0x28);
+        for &r in Self::MMU_SAVE_REGS.iter().rev() {
+            enc.emit_pop_r64(r);
+        }
+    }
+
     /// Runtime address of `aether_crypto_sha1(ctx, packed)` — ARMv8 SHA-1.
     fn crypto_sha1_addr() -> usize {
         crate::runtime::crypto_rt::aether_crypto_sha1 as *const () as usize
@@ -2601,6 +2628,11 @@ impl IntLower {
                     | ((*n as u32) << 16)
                     | ((*m as u32) << 24);
                 Self::emit_crypto_sha256_call(enc, packed);
+            }
+            // Long-tail Advanced SIMD: Win64 CALL to simd_rt, which interprets the
+            // raw ARM word on the guest q-regs (exact ARM pseudocode semantics).
+            SimdInterp { word } => {
+                Self::emit_simd_interp_call(enc, *word);
             }
             // CRC32B/H/W/X and CRC32CB/H/W/X. The lift produces this for ALL eight
             // (ID_AA64ISAR0 advertises CRC32, so ext4/f2fs metadata, zlib, and dex

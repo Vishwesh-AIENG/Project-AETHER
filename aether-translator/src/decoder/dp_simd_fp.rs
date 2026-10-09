@@ -193,6 +193,11 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
         if sz == 1 && q == 0 {
             return Err(DecodeErr::Reserved);
         }
+        // The cvtdq2ps lowering covers signed .4s/.2s only; unsigned and .2d go to
+        // the simd_rt helper (exact) instead of the lowering's fail-loud UD2.
+        if u == 1 || sz == 1 {
+            return Ok(DecodedInsn::AdvSimd { raw: word });
+        }
         let rn = ((word >> 5) & 0x1F) as u8;
         let rd = (word & 0x1F) as u8;
         return Ok(DecodedInsn::SimdCvtFp {

@@ -155,6 +155,7 @@ fn is_side_effecting(op: &IrOp) -> bool {
         | IrOp::VecMulLong { .. }
         | IrOp::VecRev64 { .. }
         | IrOp::CryptoSha256 { .. }
+        | IrOp::SimdInterp { .. }
         | IrOp::VecBicOrrImm { .. }
         | IrOp::VecAddLongPair { .. }
         | IrOp::VecUnzip { .. }

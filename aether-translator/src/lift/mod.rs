@@ -2077,6 +2077,11 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
         }
 
         // Coarse fallback for SIMD/FP families not yet typed (semantics Phase B).
+        // Long-tail Advanced SIMD the runtime helper implements exactly: execute
+        // the raw word via a CALL into simd_rt instead of the fail-loud UD2 below.
+        AdvSimd { raw } if crate::runtime::simd_rt::supports(raw) => {
+            cx.push(IrOp::SimdInterp { word: raw });
+        }
         AdvSimd { raw } => {
             let v = cx.val(IrValueKind::I32);
             cx.push(IrOp::ConstI32 { dst: v, val: raw as i32 });

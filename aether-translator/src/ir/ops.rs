@@ -547,6 +547,11 @@ pub enum IrOp {
         n: u8,
         m: u8,
     },
+    /// Long-tail Advanced SIMD instruction executed by the runtime helper: a
+    /// Win64 CALL to `runtime::simd_rt::aether_simd_exec(ctx, word)`, which
+    /// interprets the raw ARM `word` on the guest q-registers in ctx memory.
+    /// Only emitted for words `simd_rt::supports` accepts.
+    SimdInterp { word: u32 },
     /// NEON `BIC`/`ORR` (vector, immediate) — read-modify-write V`d` with an
     /// `AdvSIMDExpandImm`-expanded 64-bit `imm` pattern: BIC clears (`Vd &= ~imm`),
     /// ORR sets (`Vd |= imm`). `q`=false is the 64-bit form (upper 64 zeroed).
@@ -1676,7 +1681,8 @@ impl IrOp {
             | IrOp::VecTbl1 { .. } | IrOp::VecTblN { .. }
             | IrOp::VecDupElem { .. } | IrOp::VecPmull { .. }
             | IrOp::VecMulLong { .. } | IrOp::VecRev64 { .. }
-            | IrOp::CryptoSha256 { .. } | IrOp::VecFpRound { .. } | IrOp::VecFpCvtWidth { .. }
+            | IrOp::CryptoSha256 { .. } | IrOp::SimdInterp { .. }
+            | IrOp::VecFpRound { .. } | IrOp::VecFpCvtWidth { .. }
             | IrOp::VecBicOrrImm { .. } | IrOp::VecAddLongPair { .. }
             | IrOp::VecUnzip { .. } | IrOp::VecReduceAdd { .. }
             | IrOp::Dmb { .. } | IrOp::Dsb { .. }

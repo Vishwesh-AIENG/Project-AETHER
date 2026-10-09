@@ -33,6 +33,7 @@ pub mod gic;
 pub mod hello_world;
 pub mod mmu;
 pub mod psci;
+pub mod simd_rt;
 pub mod sysreg_rt;
 pub mod timer;
 pub mod perf_bench;
