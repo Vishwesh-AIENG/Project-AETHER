@@ -260,6 +260,9 @@ impl DbtRuntime {
                 | DecodedInsn::SimdLd1Multi { .. }
                 | DecodedInsn::SimdLd1Rep { .. }
                 | DecodedInsn::SimdLd1Lane { .. }
+                | DecodedInsn::SimdLdStN { .. }
+                | DecodedInsn::SimdLdStNLane { .. }
+                | DecodedInsn::SimdLdNRep { .. }
         )
     }
 

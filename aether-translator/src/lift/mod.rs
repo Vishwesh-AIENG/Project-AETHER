@@ -1511,6 +1511,105 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 cx.write_reg_or_sp(rn, newaddr, true, true);
             }
         }
+        DecodedInsn::SimdLdStN { is_load, nregs, q, esize, rt, rn, writeback, rm } => {
+            // LD2/3/4 / ST2/3/4: element e of register r is at
+            // [Xn + (e*nregs + r)*esize]. Expanded into per-element lane
+            // loads/stores (the same ops single-lane LD1/ST1 use), so the
+            // (de)interleave is exact. A fault mid-sequence is safe: the PC stamp
+            // re-executes the whole instruction and every access is idempotent.
+            // Loads first zero each destination (Q=0 must clear bits [127:64];
+            // with Q=1 every lane is then overwritten anyway).
+            let base = cx.read_reg_or_sp(rn, true, true);
+            let elems = (if q { 16 } else { 8 }) / esize;
+            let (lty, sty) = match esize {
+                1 => (LoadTy::U8, StoreTy::U8),
+                2 => (LoadTy::U16, StoreTy::U16),
+                4 => (LoadTy::U32, StoreTy::U32),
+                _ => (LoadTy::U64, StoreTy::U64),
+            };
+            if is_load {
+                for r in 0..nregs {
+                    cx.push(IrOp::VecMoviImm { d: (rt.0 + r) & 0x1F, lo: 0, hi: 0 });
+                }
+            }
+            for e in 0..elems {
+                for r in 0..nregs {
+                    let reg = (rt.0 + r) & 0x1F;
+                    let off = cx.const_i64(((e as i64) * (nregs as i64) + r as i64) * esize as i64);
+                    let addr = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Add { dst: addr, a: base, b: off });
+                    let v = cx.val(IrValueKind::I64);
+                    if is_load {
+                        cx.push(IrOp::Load { dst: v, addr, ty: lty, order: MemOrder::Relaxed });
+                        cx.push(IrOp::VecInsGpr { d: reg, lane: e, src: v, size: esize });
+                    } else {
+                        cx.push(IrOp::VecExtractLane { dst: v, n: reg, lane: e, size: esize, signed: false });
+                        cx.push(IrOp::Store { val: v, addr, ty: sty, order: MemOrder::Relaxed });
+                    }
+                }
+            }
+            if writeback {
+                let inc = if rm == 31 {
+                    cx.const_i64((nregs as i64) * if q { 16 } else { 8 })
+                } else {
+                    cx.read_reg(Reg(rm), true)
+                };
+                let newbase = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Add { dst: newbase, a: base, b: inc });
+                cx.write_reg_or_sp(rn, newbase, true, true);
+            }
+        }
+        DecodedInsn::SimdLdStNLane { rt, rn, nregs, esize, lane, is_load, writeback, rm } => {
+            // LD2-4/ST2-4 single structure: element r at [Xn + r*esize] <-> lane
+            // `lane` of V(rt+r); other lanes kept.
+            let base = cx.read_reg_or_sp(rn, true, true);
+            let (lty, sty) = match esize {
+                1 => (LoadTy::U8, StoreTy::U8),
+                2 => (LoadTy::U16, StoreTy::U16),
+                4 => (LoadTy::U32, StoreTy::U32),
+                _ => (LoadTy::U64, StoreTy::U64),
+            };
+            for r in 0..nregs {
+                let reg = (rt.0 + r) & 0x1F;
+                let off = cx.const_i64(r as i64 * esize as i64);
+                let addr = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Add { dst: addr, a: base, b: off });
+                let v = cx.val(IrValueKind::I64);
+                if is_load {
+                    cx.push(IrOp::Load { dst: v, addr, ty: lty, order: MemOrder::Relaxed });
+                    cx.push(IrOp::VecInsGpr { d: reg, lane, src: v, size: esize });
+                } else {
+                    cx.push(IrOp::VecExtractLane { dst: v, n: reg, lane, size: esize, signed: false });
+                    cx.push(IrOp::Store { val: v, addr, ty: sty, order: MemOrder::Relaxed });
+                }
+            }
+            if writeback {
+                let inc = if rm == 31 { cx.const_i64((nregs as i64) * esize as i64) } else { cx.read_reg(Reg(rm), true) };
+                let newbase = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Add { dst: newbase, a: base, b: inc });
+                cx.write_reg_or_sp(rn, newbase, true, true);
+            }
+        }
+        DecodedInsn::SimdLdNRep { rt, rn, nregs, size, q, writeback, rm } => {
+            // LD2R/3R/4R: element r at [Xn + r*esize], broadcast to V(rt+r).
+            let esize = 1u8 << size;
+            let base = cx.read_reg_or_sp(rn, true, true);
+            let lty = match size { 0 => LoadTy::U8, 1 => LoadTy::U16, 2 => LoadTy::U32, _ => LoadTy::U64 };
+            for r in 0..nregs {
+                let off = cx.const_i64(r as i64 * esize as i64);
+                let addr = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Add { dst: addr, a: base, b: off });
+                let v = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Load { dst: v, addr, ty: lty, order: MemOrder::Relaxed });
+                cx.push(IrOp::VecDupGpr { d: (rt.0 + r) & 0x1F, src: v, size: esize, q });
+            }
+            if writeback {
+                let inc = if rm == 31 { cx.const_i64((nregs as i64) * esize as i64) } else { cx.read_reg(Reg(rm), true) };
+                let newbase = cx.val(IrValueKind::I64);
+                cx.push(IrOp::Add { dst: newbase, a: base, b: inc });
+                cx.write_reg_or_sp(rn, newbase, true, true);
+            }
+        }
         DecodedInsn::SimdLd1Rep { rt, rn, size, q, writeback, rm } => {
             // LD1R: load one `size`-byte element from [Xn] (zero-extended into a
             // GPR), then broadcast it to all lanes via VecDupGpr; optional

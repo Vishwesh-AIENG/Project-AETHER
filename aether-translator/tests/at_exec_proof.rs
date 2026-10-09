@@ -2309,6 +2309,66 @@ fn casp_pair_mismatch_leaves_memory_unchanged() {
     assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "no fault");
 }
 
+/// LD2/LD3/LD4 / ST2/ST3/ST4 structure (de)interleave + LDnR + LDn lane — ~3,100
+/// distinct words across the Android image were decode failures.
+#[test]
+fn simd_structure_loads_stores_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    aether_mmu_set_window(0, u64::MAX);
+    aether_mmu_flush_all();
+    let run = |word: u32, ctx: &mut [u64; CTX_U64S]| {
+        let code = translate_straight_line(&[word], 0xC300);
+        let exec = winexec::make_executable(&code);
+        // SAFETY: RWX RET-terminated block; ctx is the full extended context.
+        unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+        assert_eq!(ctx[SYSREG_SLOT0 + SLOT_PEND_PENDING], 0, "no fault");
+    };
+    // LD2 {v0.4s, v1.4s}, [x2] = 0x4C408840: de-interleave [0..8).
+    let src: [u32; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[2] = src.as_ptr() as u64;
+    run(0x4C40_8840, &mut ctx);
+    assert_eq!(ctx[vd(0)], 0 | (2 << 32), "LD2 v0 lanes 0,1");
+    assert_eq!(ctx[vd(0) + 1], 4 | (6 << 32), "LD2 v0 lanes 2,3");
+    assert_eq!(ctx[vd(1)], 1 | (3 << 32), "LD2 v1 lanes 0,1");
+    assert_eq!(ctx[vd(1) + 1], 5 | (7 << 32), "LD2 v1 lanes 2,3");
+    // ST3 {v0.8b, v1.8b, v2.8b}, [x2], #24 = 0x0C9F4040: interleave, post-index.
+    let mut dst = [0u8; 32];
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[2] = dst.as_mut_ptr() as u64;
+    ctx[vd(0)] = u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7]);
+    ctx[vd(1)] = u64::from_le_bytes([10, 11, 12, 13, 14, 15, 16, 17]);
+    ctx[vd(2)] = u64::from_le_bytes([20, 21, 22, 23, 24, 25, 26, 27]);
+    let before = ctx[2];
+    run(0x0C9F_4040, &mut ctx);
+    assert_eq!(&dst[..6], &[0, 10, 20, 1, 11, 21], "ST3 interleave");
+    assert_eq!(&dst[21..24], &[7, 17, 27], "ST3 last structure");
+    assert_eq!(dst[24], 0, "ST3 writes exactly 24 bytes");
+    assert_eq!(ctx[2], before + 24, "ST3 post-index += 24");
+    // LD4R {v4.8h - v7.8h}, [x2] = 0x4D60E444: element r replicated into V(4+r).
+    let src16: [u16; 4] = [100, 200, 300, 400];
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[2] = src16.as_ptr() as u64;
+    run(0x4D60_E444, &mut ctx);
+    for (r, v) in [100u64, 200, 300, 400].iter().enumerate() {
+        let lanes = v | (v << 16) | (v << 32) | (v << 48);
+        assert_eq!(ctx[vd(4 + r as u8)], lanes, "LD4R V{} lo", 4 + r);
+        assert_eq!(ctx[vd(4 + r as u8) + 1], lanes, "LD4R V{} hi", 4 + r);
+    }
+    // LD2 {v0.s, v1.s}[1], [x2] = 0x0D609040: lane 1 only, other lanes kept.
+    let src2: [u32; 2] = [77, 88];
+    let mut ctx = [0u64; CTX_U64S];
+    ctx[2] = src2.as_ptr() as u64;
+    ctx[vd(0)] = 0x1111_1111; ctx[vd(0) + 1] = 0x2222;
+    ctx[vd(1)] = 0x3333_3333;
+    run(0x0D60_9040, &mut ctx);
+    assert_eq!(ctx[vd(0)], 0x1111_1111 | (77 << 32), "LD2 lane: v0[1]=77, v0[0] kept");
+    assert_eq!(ctx[vd(0) + 1], 0x2222, "LD2 lane keeps v0 upper");
+    assert_eq!(ctx[vd(1)], 0x3333_3333 | (88 << 32), "LD2 lane: v1[1]=88");
+}
+
 /// Regression: a scalar FP load/store (`LDR Dn` / `STR Dn`) must use the FP
 /// register file, NOT the integer register that shares the same number. The old
 /// size-only routing lifted `ldr d1` as `ldr x1`; a legitimate intervening

@@ -112,6 +112,43 @@ fn decode_simd_ldst_single(word: u32) -> Result<DecodedInsn, DecodeErr> {
             rm,
         });
     }
+    // 2-4 register single-structure forms: nregs = (opcode<0>:R) + 1.
+    let nregs = ((((opcode & 1) << 1) | r) + 1) as u8;
+    if nregs >= 2 {
+        // LD2R/LD3R/LD4R: opcode 110/111, L=1, S=0.
+        if opcode >> 1 == 0b11 {
+            if l == 1 && s == 0 {
+                return Ok(DecodedInsn::SimdLdNRep {
+                    rt: VReg(rt),
+                    rn: Reg(rn),
+                    nregs,
+                    size: size as u8,
+                    q: q == 1,
+                    writeback: post_index == 1,
+                    rm,
+                });
+            }
+            return Err(DecodeErr::Reserved);
+        }
+        // Lane forms: opcode 00x = B, 01x = H, 10x = S/D (same index encoding as LD1).
+        let (esize, lane): (u8, u8) = match opcode & 0b110 {
+            0b000 => (1, ((q << 3) | (s << 2) | size) as u8),
+            0b010 if size & 1 == 0 => (2, ((q << 2) | (s << 1) | (size >> 1)) as u8),
+            0b100 if size == 0b00 => (4, ((q << 1) | s) as u8),
+            0b100 if size == 0b01 && s == 0 => (8, q as u8),
+            _ => return Err(DecodeErr::Reserved),
+        };
+        return Ok(DecodedInsn::SimdLdStNLane {
+            rt: VReg(rt),
+            rn: Reg(rn),
+            nregs,
+            esize,
+            lane,
+            is_load: l == 1,
+            writeback: post_index == 1,
+            rm,
+        });
+    }
     Err(DecodeErr::Unimplemented)
 }
 
@@ -127,12 +164,36 @@ fn decode_simd_ldst_multi(word: u32, post_index: bool) -> Result<DecodedInsn, De
     let rn = ((word >> 5) & 0x1F) as u8;
     let rt = (word & 0x1F) as u8;
     let rm = ((word >> 16) & 0x1F) as u8; // post-index register/imm selector
+    // LD2/LD3/LD4 / ST2/ST3/ST4 (de)interleaving forms: opcode 1000/0100/0000.
+    // ~3,100 distinct words across the Android image (codecs, Skia pixel formats).
+    let nregs: u8 = match opcode {
+        0b1000 => 2,
+        0b0100 => 3,
+        0b0000 => 4,
+        _ => 0,
+    };
+    if nregs != 0 {
+        let size = (word >> 10) & 0x3;
+        if size == 0b11 && q == 0 {
+            return Err(DecodeErr::Reserved); // no 1D arrangement for LD2-4
+        }
+        return Ok(DecodedInsn::SimdLdStN {
+            is_load: l == 1,
+            nregs,
+            q: q == 1,
+            esize: 1 << size,
+            rt: VReg(rt),
+            rn: Reg(rn),
+            writeback: post_index,
+            rm,
+        });
+    }
     let regs: u8 = match opcode {
         0b0111 => 1,
         0b1010 => 2,
         0b0110 => 3,
         0b0010 => 4,
-        _ => return Err(DecodeErr::Unimplemented), // LD2/3/4 de-interleave / reserved
+        _ => return Err(DecodeErr::Unimplemented), // reserved
     };
     Ok(DecodedInsn::SimdLd1Multi {
         is_load: l == 1,

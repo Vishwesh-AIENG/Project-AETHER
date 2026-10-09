@@ -730,6 +730,44 @@ pub enum DecodedInsn {
         writeback: bool,
         rm: u8,
     },
+    /// NEON `LD2/LD3/LD4` / `ST2/ST3/ST4` (multiple structures): `nregs`-way
+    /// (de)interleave of `esize`-byte elements between [Xn] and V`rt`..V`rt+n-1`
+    /// (wrapping mod 32); `q` = 16 vs 8 bytes per register. Element e of register
+    /// r lives at [Xn + (e*nregs + r)*esize]. Post-index: rm==31 → += nregs*(q?16:8).
+    SimdLdStN {
+        is_load: bool,
+        nregs: u8,
+        q: bool,
+        esize: u8,
+        rt: VReg,
+        rn: Reg,
+        writeback: bool,
+        rm: u8,
+    },
+    /// NEON single-structure `LD2/3/4`/`ST2/3/4 {Vt.<T>..}[lane]`: `nregs`
+    /// consecutive `esize`-byte elements at [Xn] to/from lane `lane` of V`rt`..
+    /// (other lanes kept). Post-index: rm==31 → += nregs*esize.
+    SimdLdStNLane {
+        rt: VReg,
+        rn: Reg,
+        nregs: u8,
+        esize: u8,
+        lane: u8,
+        is_load: bool,
+        writeback: bool,
+        rm: u8,
+    },
+    /// NEON `LD2R/LD3R/LD4R`: `nregs` consecutive elements at [Xn], element r
+    /// replicated to every lane of V`rt+r`. Post-index: rm==31 → += nregs*esize.
+    SimdLdNRep {
+        rt: VReg,
+        rn: Reg,
+        nregs: u8,
+        size: u8,
+        q: bool,
+        writeback: bool,
+        rm: u8,
+    },
     /// NEON `BIC`/`ORR` (vector, immediate): RMW V`rd` with the expanded 64-bit
     /// `imm` pattern. `is_bic` clears (`&~imm`) else sets (`|imm`). bionic strchr
     /// `bic v4.8h, #0xf0`.
