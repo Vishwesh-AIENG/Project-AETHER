@@ -9018,6 +9018,30 @@ fn simd_scalar_fabd_execute() {
     assert_eq!(ctx[vd(0)], 0x7FC0_0000, "FABD S (-NaN, 1) = +qNaN");
 }
 
+/// FMOV (vector, immediate): VFPExpandImm(imm8) in every lane.
+#[test]
+fn simd_fmov_vector_imm_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    let s = |x: f32| f32::to_bits(x) as u64;
+    // FMOV V0.2S, #0.5 = 0x0F03F400 (imm8 0x60).
+    let ctx = fp_run1(0x0F03_F400, |c| { c[vd(0) + 1] = !0; });
+    assert_eq!(ctx[vd(0)], s(0.5) | (s(0.5) << 32), "FMOV V0.2S,#0.5");
+    assert_eq!(ctx[vd(0) + 1], 0, "Q=0 zeroes the upper 64");
+    // FMOV V0.2S, #2.0 = 0x0F00F400 (imm8 0x00 -> 2.0).
+    let ctx = fp_run1(0x0F00_F400, |_| {});
+    assert_eq!(ctx[vd(0)], s(2.0) | (s(2.0) << 32), "FMOV V0.2S,#2.0");
+    // FMOV V1.4S, #-1.0 = 0x4F07F601 (imm8 0xF0 -> -1.0).
+    let ctx = fp_run1(0x4F07_F601, |_| {});
+    assert_eq!(ctx[vd(1)], s(-1.0) | (s(-1.0) << 32), "FMOV V1.4S,#-1.0 lo");
+    assert_eq!(ctx[vd(1) + 1], s(-1.0) | (s(-1.0) << 32), "FMOV V1.4S,#-1.0 hi");
+    // FMOV V2.2D, #1.5 = 0x6F03F702 (imm8 0x78 -> 1.5).
+    let ctx = fp_run1(0x6F03_F702, |_| {});
+    assert_eq!(ctx[vd(2)], 1.5f64.to_bits(), "FMOV V2.2D,#1.5 lo");
+    assert_eq!(ctx[vd(2) + 1], 1.5f64.to_bits(), "FMOV V2.2D,#1.5 hi");
+}
+
 /// Scalar FP by element: FMUL/FMLA/FMLS Sd,Sn,Vm.S[idx] and the D forms.
 #[test]
 fn fp_scalar_by_element_execute() {

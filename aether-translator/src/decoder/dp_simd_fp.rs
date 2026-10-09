@@ -1214,6 +1214,23 @@ fn adv_simd_expand_imm(op: u32, cmode: u32, imm8: u64) -> Option<u64> {
     Some(imm64)
 }
 
+/// ARM VFPExpandImm: the 8-bit FP immediate a:b:c:d:e:f:g:h as an IEEE bit
+/// pattern. single: exp = NOT(b):b*5:c:d, frac = efgh:0*19; double: exp =
+/// NOT(b):b*8:c:d, frac = efgh:0*48.
+pub(crate) fn vfp_expand_imm8(imm8: u32, dbl: bool) -> u64 {
+    let a = ((imm8 >> 7) & 1) as u64;
+    let b = ((imm8 >> 6) & 1) as u64;
+    let cd = ((imm8 >> 4) & 3) as u64;
+    let efgh = (imm8 & 0xF) as u64;
+    if dbl {
+        let exp = ((1 - b) << 10) | (if b == 1 { 0xFF << 2 } else { 0 }) | cd;
+        (a << 63) | (exp << 52) | (efgh << 48)
+    } else {
+        let exp = ((1 - b) << 7) | (if b == 1 { 0x1F << 2 } else { 0 }) | cd;
+        (a << 31) | (exp << 23) | (efgh << 19)
+    }
+}
+
 fn decode_simd_modimm(word: u32) -> Result<DecodedInsn, DecodeErr> {
     // Advanced SIMD modified immediate. cmode[15:12], op@29, Q@30.
     //   imm8 = a:b:c:d:e:f:g:h = bits[18:16] : bits[9:5].
@@ -1258,7 +1275,22 @@ fn decode_simd_modimm(word: u32) -> Result<DecodedInsn, DecodeErr> {
         });
     }
     if is_fmov {
-        return Ok(DecodedInsn::AdvSimd { raw: word });
+        // FMOV (vector, immediate): VFPExpandImm(imm8) replicated per lane. op=0
+        // → .2s/.4s (single), op=1 → .2d (double; Q=0 is reserved). A pure set,
+        // so it becomes a MOVI-style 128-bit constant (136 distinct framework
+        // words were coarse AdvSimd → UD2). Q=0 zeroes the upper 64 bits.
+        let imm8 = (((word >> 16) & 0x7) << 5) | ((word >> 5) & 0x1F);
+        let rd = (word & 0x1F) as u8;
+        let lane = if op == 1 {
+            if q == 0 {
+                return Err(DecodeErr::Reserved);
+            }
+            vfp_expand_imm8(imm8, true)
+        } else {
+            let s = vfp_expand_imm8(imm8, false);
+            s | (s << 32)
+        };
+        return Ok(DecodedInsn::SimdMoviImm { rd, lo: lane, hi: if q == 1 { lane } else { 0 } });
     }
 
     let abc = (word >> 16) & 0x7;
