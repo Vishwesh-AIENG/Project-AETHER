@@ -360,7 +360,13 @@ pub fn default_dtb_config() -> AndroidDtbConfig {
                 androidboot.android_dt_dir=/sys/firmware/devicetree/base/firmware/android \
                 androidboot.verifiedbootstate=green androidboot.slot_suffix=_a \
                 androidboot.dynamic_partitions=false \
-                initcall_debug ignore_loglevel initcall_blacklist=init_kprobe_trace";
+                initcall_debug ignore_loglevel initcall_blacklist=init_kprobe_trace \
+                printk.devkmsg=on";
+    // printk.devkmsg=on: lift the default /dev/kmsg write rate limit (10 lines /
+    // 5 s) so the vendor `aether_logcat_kmsg` service can mirror logcat warnings
+    // and errors into the kernel log, i.e. onto the serial console. Userspace
+    // daemons (netd, SurfaceFlinger, zygote, system_server) log only to logcat,
+    // so without this their failure reasons never reach com1.log.
     let n = if cmd.len() < MAX_KERNEL_CMDLINE_LEN { cmd.len() } else { MAX_KERNEL_CMDLINE_LEN };
     cfg.cmdline[..n].copy_from_slice(&cmd[..n]);
     cfg.cmdline_len = n;
