@@ -150,10 +150,24 @@ pub fn lower(op: &IrOp, enc: &mut X86Encoder) {
         IrOp::VecScalarPair { is_fp, dbl, d, n } => lower_vecscalarpair(enc, *is_fp, *dbl, *d, *n),
 
         // ── Remaining families: scaffolded fail-loud (BUILDSPEC §7, Tier 1). ──
+        // FP reg->reg move with upper-lane zeroing (FMOV Sd,Sn / Dd,Dn; also the
+        // "zero everything above lane 0" step of scalar by-element ops). movss/movsd
+        // loads zero the rest of the xmm, so a full 128-bit store gives the scalar
+        // FP-write semantics. (Was a scaffolded UD2.)
+        IrOp::FpMov { d, n, width_bits } => match width_bits {
+            32 => {
+                enc.emit_movss_load(VS0, R15, vd(*n));
+                enc.emit_movdqu_store(R15, vd(*d), VS0);
+            }
+            64 => {
+                enc.emit_movsd_load(VS0, R15, vd(*n));
+                enc.emit_movdqu_store(R15, vd(*d), VS0);
+            }
+            _ => enc.emit_ud2(),
+        },
         IrOp::VecAddLong { .. }
         | IrOp::FpFromInt { .. }
         | IrOp::FpToIntR { .. }
-        | IrOp::FpMov { .. }
         | IrOp::FpToGpr { .. }
         | IrOp::FpFromGpr { .. } => enc.emit_ud2(),
         // NOTE: CryptoShaR (SHA-1) and CryptoSha256 are NOT routed here — they are

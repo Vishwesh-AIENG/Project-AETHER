@@ -1377,6 +1377,22 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // SCVTF/UCVTF/FCVTZS/FCVTZU (vector) — int↔FP convert.
             cx.push(IrOp::VecCvtFp { to_fp, signed, dbl, q, d: rd.0, n: rn.0 });
         }
+        DecodedInsn::SimdScalarByElem { rd, rn, rm, fp_op, dbl, idx } => {
+            // Scalar FMUL/FMLA/FMLS by element = the vector by-element op on the
+            // 64-bit (q=false) form, whose lane 0 is exactly the scalar result, then
+            // an FMOV-style move to zero every bit above lane 0 (scalar FP write).
+            use crate::ir::ops::VecFpOp;
+            let op = match fp_op {
+                1 => VecFpOp::Mla,
+                2 => VecFpOp::Mls,
+                _ => VecFpOp::Mul,
+            };
+            let size = if dbl { 3 } else { 2 };
+            cx.push(IrOp::VecByElem {
+                op, is_fp: true, dbl, size, q: false, d: rd.0, n: rn.0, m: rm.0, idx,
+            });
+            cx.push(IrOp::FpMov { d: rd.0, n: rd.0, width_bits: if dbl { 64 } else { 32 } });
+        }
         DecodedInsn::SimdScalarFabd { rd, rn, rm, dbl } => {
             // FABD = FPAbs(FPSub(n, m)) per the ARM pseudocode, so the scalar
             // FSUB then FABS ops give the exact result (incl. a NaN's cleared sign).

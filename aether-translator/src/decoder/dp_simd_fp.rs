@@ -1978,5 +1978,32 @@ fn decode_simd_scalar_indexed(word: u32) -> Result<DecodedInsn, DecodeErr> {
     if !ok {
         return Err(DecodeErr::Reserved);
     }
+    // FP FMLA/FMLS/FMUL by element (same opcodes as the vector form: 0001/0101/
+    // 1001, U=0). size=10 → S (idx=H:L, Vm=M:Rm), size=11 with L=0 → D (idx=H).
+    // These were coarse AdvSimd → UD2 (FMUL alone: 167 distinct framework words).
+    if u == 0 {
+        let fp_op = match opcode {
+            0b0001 => Some(1u8), // FMLA
+            0b0101 => Some(2u8), // FMLS
+            0b1001 => Some(0u8), // FMUL
+            _ => None,
+        };
+        let l = (word >> 21) & 1;
+        if let Some(fp_op) = fp_op {
+            if size == 0b10 || (size == 0b11 && l == 0) {
+                let dbl = size == 0b11;
+                let h = (word >> 11) & 1;
+                let m = (word >> 20) & 1;
+                return Ok(DecodedInsn::SimdScalarByElem {
+                    rd: VReg((word & 0x1F) as u8),
+                    rn: VReg(((word >> 5) & 0x1F) as u8),
+                    rm: VReg((((m << 4) | ((word >> 16) & 0xF))) as u8),
+                    fp_op,
+                    dbl,
+                    idx: if dbl { h as u8 } else { ((h << 1) | l) as u8 },
+                });
+            }
+        }
+    }
     Ok(DecodedInsn::AdvSimd { raw: word })
 }

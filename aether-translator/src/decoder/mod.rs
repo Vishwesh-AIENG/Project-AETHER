@@ -822,6 +822,16 @@ pub enum DecodedInsn {
         signed: bool,
         dbl: bool,
     },
+    /// Scalar FP by element: `FMUL/FMLA/FMLS Sd,Sn,Vm.S[idx]` (and the D forms).
+    /// `fp_op`: 0=FMUL 1=FMLA 2=FMLS (as in `SimdByElem`).
+    SimdScalarByElem {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        fp_op: u8,
+        dbl: bool,
+        idx: u8,
+    },
     /// Scalar SIMD `FABD Sd,Sn,Sm` / `Dd,Dn,Dm` (scalar 3-same, U=1 a=1 opcode 11010):
     /// `|Sn - Sm|`, defined by ARM as FPAbs(FPSub(n, m)).
     SimdScalarFabd {

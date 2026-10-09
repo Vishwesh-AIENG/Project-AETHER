@@ -9018,6 +9018,38 @@ fn simd_scalar_fabd_execute() {
     assert_eq!(ctx[vd(0)], 0x7FC0_0000, "FABD S (-NaN, 1) = +qNaN");
 }
 
+/// Scalar FP by element: FMUL/FMLA/FMLS Sd,Sn,Vm.S[idx] and the D forms.
+#[test]
+fn fp_scalar_by_element_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    let s = |x: f32| f32::to_bits(x) as u64;
+    // V0.4s = [10, 20, 30, 40]; V1.s[0] = 1.5 (lane 1 = 99 must not leak).
+    let set = |c: &mut [u64]| {
+        c[vd(0)] = s(10.0) | (s(20.0) << 32);
+        c[vd(0) + 1] = s(30.0) | (s(40.0) << 32);
+        c[vd(1)] = s(1.5) | (s(99.0) << 32);
+    };
+    // FMUL S1, S1, V0.S[2] = 0x5F809821 (the framework corpus example): 1.5*30 = 45.
+    let ctx = fp_run1(0x5F80_9821, |c| { set(c); c[vd(1) + 1] = !0; });
+    assert_eq!(ctx[vd(1)], s(45.0), "FMUL S1,S1,V0.S[2]: lane 1 must be zeroed");
+    assert_eq!(ctx[vd(1) + 1], 0, "scalar FMUL zeroes the upper 64");
+    // FMLA S2, S1, V0.S[1] = 0x5FA01022: 2.0 + 1.5*20 = 32.
+    let ctx = fp_run1(0x5FA0_1022, |c| { set(c); c[vd(2)] = s(2.0) | (s(7.0) << 32); });
+    assert_eq!(ctx[vd(2)], s(32.0), "FMLA S2,S1,V0.S[1]");
+    // FMLS S2, S1, V0.S[3] = 0x5FA05822: 2.0 - 1.5*40 = -58.
+    let ctx = fp_run1(0x5FA0_5822, |c| { set(c); c[vd(2)] = s(2.0); });
+    assert_eq!(ctx[vd(2)], s(-58.0), "FMLS S2,S1,V0.S[3]");
+    // FMUL D1, D1, V0.D[1] = 0x5FC09821: 2.5 * 4.0 = 10.
+    let ctx = fp_run1(0x5FC0_9821, |c| {
+        c[vd(0)] = 3.0f64.to_bits(); c[vd(0) + 1] = 4.0f64.to_bits();
+        c[vd(1)] = 2.5f64.to_bits(); c[vd(1) + 1] = !0;
+    });
+    assert_eq!(f64::from_bits(ctx[vd(1)]), 10.0, "FMUL D1,D1,V0.D[1]");
+    assert_eq!(ctx[vd(1) + 1], 0, "scalar FMUL D zeroes the upper 64");
+}
+
 /// Fixed-point SCVTF/UCVTF (int × 2^-fbits), e.g. `ucvtf s3, w8, #24` (0x1E03A103).
 #[test]
 fn fp_fixed_point_scvtf_ucvtf_execute() {
