@@ -1377,6 +1377,15 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // SCVTF/UCVTF/FCVTZS/FCVTZU (vector) — int↔FP convert.
             cx.push(IrOp::VecCvtFp { to_fp, signed, dbl, q, d: rd.0, n: rn.0 });
         }
+        DecodedInsn::SimdScalarCvtIntFp { rd, rn, signed, dbl } => {
+            // Scalar SCVTF/UCVTF Vd,Vn = read the low integer element (as FMOV Xd,Dn
+            // does), then the same convert as SCVTF/UCVTF Vd,Xn. Integer width ==
+            // FP width. The extract happens before the write, so rd == rn is safe.
+            let size = if dbl { 8 } else { 4 };
+            let v = cx.val(IrValueKind::I64);
+            cx.push(IrOp::VecExtractLane { dst: v, n: rn.0, lane: 0, size, signed: false });
+            cx.push(IrOp::FpCvtIntScalar { d: rd.0, src: v, to_dbl: dbl, signed, src_64: dbl });
+        }
         DecodedInsn::SimdZipTrn { rd, rn, rm, kind, size, q } => {
             // ZIP1/ZIP2/TRN1/TRN2 — interleave Vn:Vm.
             cx.push(IrOp::VecZipTrn { kind, size, q, d: rd.0, n: rn.0, m: rm.0 });

@@ -813,6 +813,15 @@ pub enum DecodedInsn {
         dbl: bool,
         q: bool,
     },
+    /// Scalar SIMD `SCVTF`/`UCVTF` `Sd,Sn` / `Dd,Dn` (2-reg-misc scalar, opcode 11101):
+    /// int→FP where the integer is the low element of a vector register. `dbl`
+    /// selects the 64-bit (D) form, which is also the integer width.
+    SimdScalarCvtIntFp {
+        rd: VReg,
+        rn: VReg,
+        signed: bool,
+        dbl: bool,
+    },
     /// NEON `ZIP1`/`ZIP2`/`TRN1`/`TRN2` permute. `kind`: 0=ZIP1 1=ZIP2 2=TRN1
     /// 3=TRN2. `size`: log2 element bytes. Interleaves the lanes of V`rn`:V`rm`.
     /// RGBA channel interleave + matrix transpose (graphics).

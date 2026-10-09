@@ -8964,6 +8964,32 @@ fn fp_vector_frinta_no_double_round() {
     assert_eq!((ctx[vd(0) + 1] >> 32) as u32, 0x4B00_0001, "vFRINTA(2^23+1) unchanged");
 }
 
+/// Scalar SIMD SCVTF/UCVTF `Dd,Dn` / `Sd,Sn`: the integer is the low element of a
+/// vector register. `ucvtf d0, d0` (0x7E61D800) failed to decode and halted the
+/// 2026-10-08 WHPX boot right after zygote start.
+#[test]
+fn simd_scalar_scvtf_ucvtf_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    // UCVTF D0, D1 = 0x7E61D820: unsigned 2^63+2048 -> exact double, upper 64 zeroed.
+    let ctx = fp_run1(0x7E61_D820, |c| { c[vd(1)] = 0x8000_0000_0000_0800; c[vd(0) + 1] = !0; });
+    assert_eq!(f64::from_bits(ctx[vd(0)]), 9223372036854777856.0, "UCVTF D0,D1 (2^63+2048)");
+    assert_eq!(ctx[vd(0) + 1], 0, "scalar UCVTF zeroes the upper 64");
+    // UCVTF D0, D0 (rd == rn, the boot's exact word).
+    let ctx = fp_run1(0x7E61_D800, |c| { c[vd(0)] = 42; });
+    assert_eq!(f64::from_bits(ctx[vd(0)]), 42.0, "UCVTF D0,D0");
+    // SCVTF D0, D1 = 0x5E61D820: signed -5 -> -5.0.
+    let ctx = fp_run1(0x5E61_D820, |c| { c[vd(1)] = (-5i64) as u64; });
+    assert_eq!(f64::from_bits(ctx[vd(0)]), -5.0, "SCVTF D0,D1 (-5)");
+    // SCVTF S0, S1 = 0x5E21D820: low 32 bits only (upper garbage ignored), signed.
+    let ctx = fp_run1(0x5E21_D820, |c| { c[vd(1)] = 0xDEAD_BEEF_FFFF_FFFE; });
+    assert_eq!(ctx[vd(0)], f32::to_bits(-2.0) as u64, "SCVTF S0,S1 (-2) with zeroed upper bits");
+    // UCVTF S0, S1 = 0x7E21D820: 0xFFFFFFFE unsigned -> 4294967294 rounds to 2^32 in f32.
+    let ctx = fp_run1(0x7E21_D820, |c| { c[vd(1)] = 0xFFFF_FFFE; });
+    assert_eq!(ctx[vd(0)], f32::to_bits(4294967296.0) as u64, "UCVTF S0,S1 (0xFFFFFFFE)");
+}
+
 /// FRINTA keeps the sign of a zero result: x in (-0.5, -0] rounds to -0.0, not +0.0.
 /// The ties-away emulation adds a masked addend that is +0.0 when |x - trunc(x)| < 0.5,
 /// and -0.0 + +0.0 = +0.0 under round-to-nearest. Found by the 2026-10-08 oracle

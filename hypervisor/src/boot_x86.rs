@@ -6738,13 +6738,37 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                 // an EL0 (init/bionic post-apexd) coverage gap is distinguished
                 // from a kernel-side one. `fw` already carries the offending ARM
                 // word; pair it with the EL for a one-boot pin.
-                {
+                let cur_el = {
                     let g = &*ptr::addr_of!(NPF_GUEST_CTX);
                     const SR0: usize = aether_translator::runtime::context::SYSREG_SLOT0;
-                    let cur_el = (g[SR0 + 42] >> 2) & 0b11;
-                    dual_puts(b"[dbt]   EL=");
-                    dual_puthex64(cur_el);
-                    dual_puts(b" (0=EL0/userspace 1=EL1/kernel)\n");
+                    (g[SR0 + 42] >> 2) & 0b11
+                };
+                dual_puts(b"[dbt]   EL=");
+                dual_puthex64(cur_el);
+                dual_puts(b" (0=EL0/userspace 1=EL1/kernel)\n");
+                // An undecodable/unliftable word in USERSPACE is architecturally an
+                // UNDEFINED instruction: deliver it as one (EC=0, IL=1) so the kernel
+                // SIGILLs that process, exactly as real hardware would, instead of
+                // halting the whole system. translate_block only fails when the
+                // FIRST word of the block fails (later bad words end the block
+                // early), so fpc == pc and ELR_EL1 points at the offending word.
+                // Kernel-side (EL1) gaps still halt: they are DBT bugs to fix.
+                // The 2026-10-08 WHPX boot halted here post-zygote on one such word.
+                if cur_el == 0 && fpc == pc && (fkind == 1 || fkind == 2) {
+                    static mut EL0_UNDEF_TF: u32 = 0;
+                    *ptr::addr_of_mut!(EL0_UNDEF_TF) = (*ptr::addr_of!(EL0_UNDEF_TF)).saturating_add(1);
+                    dual_puts(b"[dbt]   EL0 TranslateFail -> inject undef (SIGILL to process) count=");
+                    dual_puthex64(*ptr::addr_of!(EL0_UNDEF_TF) as u64);
+                    dual_puts(b"\n");
+                    let ctx_slice: &mut [u64] = &mut *ptr::addr_of_mut!(NPF_GUEST_CTX);
+                    aether_translator::runtime::exceptions::inject(
+                        ctx_slice,
+                        aether_translator::runtime::exceptions::ExceptionKind::Sync,
+                        1u64 << 25, // EC=0 (Unknown), IL=1
+                        0,
+                        false,
+                    );
+                    continue;
                 }
                 exit_code = 1;
                 sum_pc = fpc;

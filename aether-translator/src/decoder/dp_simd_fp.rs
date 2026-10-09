@@ -204,6 +204,19 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
             q: q == 1,
         });
     }
+    // Scalar SIMD SCVTF/UCVTF `Sd,Sn` / `Dd,Dn` — the scalar (bits[31:30]=01,
+    // bits[28:24]=11110) twin of the vector form above. No rule matched it, so it
+    // fell to Reserved and the dispatcher halted: `ucvtf d0, d0` (0x7E61D800) in an
+    // EL0 process right after zygote start was the 2026-10-08 WHPX boot's last wall.
+    // Frame: 01 U 11110 0 sz 10000 11101 10 Rn Rd; leave U(29)/sz(22) free.
+    if (word & 0xDFBF_FC00) == 0x5E21_D800 {
+        return Ok(DecodedInsn::SimdScalarCvtIntFp {
+            rd: VReg((word & 0x1F) as u8),
+            rn: VReg(((word >> 5) & 0x1F) as u8),
+            signed: (word >> 29) & 1 == 0,
+            dbl: (word >> 22) & 1 == 1,
+        });
+    }
     // FP 2reg-misc — FABS/FNEG/FSQRT + FP compare-vs-#0 (FCMEQ/FCMGT/FCMGE/FCMLT/
     // FCMLE) + FCVTZS/FCVTZU + FRECPE/FRSQRTE(reserved). These have bit23=1 (FP
     // block) AND opcode[3]=1 (bit15). The integer 2reg-misc mask below pins bit15=0
