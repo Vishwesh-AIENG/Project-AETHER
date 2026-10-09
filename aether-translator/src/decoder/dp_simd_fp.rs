@@ -217,6 +217,18 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
             dbl: (word >> 22) & 1 == 1,
         });
     }
+    // FCVTL/FCVTL2 (opcode 10111) and FCVTN/FCVTN2 (10110), vector 2-reg-misc U=0
+    // a=0. 221 distinct framework words fell to Reserved (most are f16<->f32).
+    // Frame: 0 Q 0 01110 0 sz 10000 1011x 10 Rn Rd; leave Q(30)/sz(22)/bit12 free.
+    if (word & 0xBFBF_EC00) == 0x0E21_6800 {
+        return Ok(DecodedInsn::SimdFpCvtWidth {
+            rd: VReg((word & 0x1F) as u8),
+            rn: VReg(((word >> 5) & 0x1F) as u8),
+            widen: (word >> 12) & 1 == 1,
+            half: (word >> 22) & 1 == 0,
+            upper: (word >> 30) & 1 == 1,
+        });
+    }
     // Scalar SIMD FABD Sd,Sn,Sm / Dd,Dn,Dm — the most common decode gap in the
     // Android framework corpus (231 distinct words; vector FABD was already handled).
     // Frame: 01 1 11110 1 sz 1 Rm 11010 1 Rn Rd; leave sz(22) free.

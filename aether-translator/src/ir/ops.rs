@@ -1158,6 +1158,11 @@ pub enum IrOp {
     /// 0.5 toward the sign then truncate. `dbl` selects .2d (64-bit lane) vs
     /// .4s/.2s (32-bit). `q`=false zeroes Vd[127:64]. Ctx-template op.
     VecFpRound { d: u8, n: u8, dbl: bool, q: bool, round: RoundMode },
+    /// Vector FP precision convert (FCVTL/FCVTL2 widen, FCVTN/FCVTN2 narrow).
+    /// `half`: f16<->f32 (sz=0) vs f32<->f64 (sz=1). `upper`: the "2" form — widen
+    /// reads Vn[127:64]; narrow writes Vd[127:64] and keeps Vd[63:0] (the plain
+    /// narrow form zeroes Vd[127:64]).
+    VecFpCvtWidth { d: u8, n: u8, widen: bool, half: bool, upper: bool },
     /// FP precision convert (FCVT S<->D<->H).
     FpCvt2 { d: u8, n: u8, from_bits: u8, to_bits: u8 },
     /// FP conditional select (FCSEL Dd, Dn, Dm, cond): Dd = cond ? Dn : Dm.
@@ -1671,7 +1676,7 @@ impl IrOp {
             | IrOp::VecTbl1 { .. } | IrOp::VecTblN { .. }
             | IrOp::VecDupElem { .. } | IrOp::VecPmull { .. }
             | IrOp::VecMulLong { .. } | IrOp::VecRev64 { .. }
-            | IrOp::CryptoSha256 { .. } | IrOp::VecFpRound { .. }
+            | IrOp::CryptoSha256 { .. } | IrOp::VecFpRound { .. } | IrOp::VecFpCvtWidth { .. }
             | IrOp::VecBicOrrImm { .. } | IrOp::VecAddLongPair { .. }
             | IrOp::VecUnzip { .. } | IrOp::VecReduceAdd { .. }
             | IrOp::Dmb { .. } | IrOp::Dsb { .. }

@@ -901,6 +901,10 @@ pub fn encode(op: &IrOp, out: &mut Vec<u8>) -> Result<(), SerErr> {
             put_u8(out, *d); put_u8(out, *n); put_u8(out, *dbl as u8);
             put_u8(out, *q as u8); put_round(out, *round);
         }
+        IrOp::VecFpCvtWidth { d, n, widen, half, upper } => {
+            put_u8(out, *d); put_u8(out, *n); put_u8(out, *widen as u8);
+            put_u8(out, *half as u8); put_u8(out, *upper as u8);
+        }
         IrOp::FpCvt2 { d, n, from_bits, to_bits } => {
             put_u8(out, *d); put_u8(out, *n); put_u8(out, *from_bits); put_u8(out, *to_bits);
         }
@@ -1272,6 +1276,9 @@ pub fn decode(bytes: &[u8]) -> Result<(IrOp, usize), SerErr> {
         },
         0x47 => IrOp::VecFpRound {
             d: r.u8()?, n: r.u8()?, dbl: r.u8()? != 0, q: r.u8()? != 0, round: r.round()?,
+        },
+        0x7D => IrOp::VecFpCvtWidth {
+            d: r.u8()?, n: r.u8()?, widen: r.u8()? != 0, half: r.u8()? != 0, upper: r.u8()? != 0,
         },
         0x70 => IrOp::VecExt {
             d: r.u8()?, n: r.u8()?, m: r.u8()?, imm: r.u8()?, q: r.u8()? != 0,
@@ -1665,6 +1672,7 @@ pub fn variant_tag(op: &IrOp) -> u8 {
         IrOp::VecShiftIns { .. } => 0x45,
         IrOp::VecShiftNarrowSat { .. } => 0x46,
         IrOp::VecFpRound { .. } => 0x47,
+        IrOp::VecFpCvtWidth { .. } => 0x7D,
         IrOp::VecExt { .. } => 0x70,
         IrOp::VecTbl1 { .. } => 0x76,
         IrOp::VecTblN { .. } => 0x7C,

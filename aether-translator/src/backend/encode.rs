@@ -1572,6 +1572,50 @@ impl X86Encoder {
         self.emit_vex_fma213(0xAE, dbl, dst, vvvv, rm);
     }
 
+    // ── FP precision converts (FCVTL/FCVTN family) ────────────────────────────
+
+    /// General 3-byte VEX, VEX.128 (L=0), pp=01 (66), register-register form:
+    /// `map` = mmmmm (0b00010 = 0F38, 0b00011 = 0F3A); vvvv unused (1111).
+    fn emit_vex128_66(&mut self, map: u8, opcode: u8, reg: u8, rm: u8) {
+        self.buf.push(0xC4);
+        let r_inv = ((!(reg >> 3)) & 1) << 7;
+        let b_inv = ((!(rm >> 3)) & 1) << 5;
+        self.buf.push(r_inv | (1 << 6) | b_inv | map);
+        self.buf.push((0xF << 3) | 0b01); // W=0, vvvv=1111 (unused), L=0, pp=66
+        self.buf.push(opcode);
+        self.modrm_rr(reg, rm);
+    }
+    /// VCVTPH2PS xmm_dst, xmm_src (F16C): 4 halves in src[63:0] → 4 singles.
+    pub fn emit_vcvtph2ps(&mut self, dst: u8, src: u8) {
+        self.emit_vex128_66(0b00010, 0x13, dst, src);
+    }
+    /// VCVTPS2PH xmm_dst, xmm_src, imm8 (F16C): 4 singles → 4 halves in dst[63:0],
+    /// dst[127:64] zeroed. imm8 bits[1:0] = rounding (00 = nearest-even).
+    /// ModRM.reg is the SOURCE here (the r/m operand is the destination).
+    pub fn emit_vcvtps2ph(&mut self, dst: u8, src: u8, imm: u8) {
+        self.emit_vex128_66(0b00011, 0x1D, src, dst);
+        self.buf.push(imm);
+    }
+    /// CVTPS2PD xmm, xmm: 2 singles in src[63:0] → 2 doubles.
+    pub fn emit_cvtps2pd(&mut self, dst: u8, src: u8) {
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F); self.buf.push(0x5A);
+        self.modrm_rr(dst, src);
+    }
+    /// CVTPD2PS xmm, xmm: 2 doubles → 2 singles in dst[63:0], dst[127:64] zeroed.
+    pub fn emit_cvtpd2ps(&mut self, dst: u8, src: u8) {
+        self.buf.push(0x66);
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F); self.buf.push(0x5A);
+        self.modrm_rr(dst, src);
+    }
+    /// MOVLHPS xmm_dst, xmm_src: dst[127:64] = src[63:0] (dst[63:0] kept).
+    pub fn emit_movlhps(&mut self, dst: u8, src: u8) {
+        self.rex_opt(false, dst, 0, src);
+        self.buf.push(0x0F); self.buf.push(0x16);
+        self.modrm_rr(dst, src);
+    }
+
     /// UCOMISS xmm, xmm.
     pub fn emit_ucomiss(&mut self, a: u8, b: u8) {
         self.rex_opt(false, a, 0, b);

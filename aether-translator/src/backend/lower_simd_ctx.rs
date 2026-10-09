@@ -144,6 +144,8 @@ pub fn lower(op: &IrOp, enc: &mut X86Encoder) {
         IrOp::FpRound { d, n, dbl, round, raise_inexact } =>
             lower_fpround(enc, *d, *n, *dbl, *round, *raise_inexact),
         // Vector FP round-to-integral (FRINTN/M/P/Z/A).
+        IrOp::VecFpCvtWidth { d, n, widen, half, upper } =>
+            lower_vecfpcvtwidth(enc, *d, *n, *widen, *half, *upper),
         IrOp::VecFpRound { d, n, dbl, q, round } =>
             lower_vecfpround(enc, *d, *n, *dbl, *q, *round),
         // Scalar pairwise reduce (ADDP/FADDP).
@@ -1586,6 +1588,33 @@ fn lower_fpround(
         enc.emit_roundss(VS0, VS0, imm);
     }
     enc.emit_movdqu_store(R15, vd(d), VS0);
+}
+
+/// Vector FP precision convert: FCVTL/FCVTL2 (widen) and FCVTN/FCVTN2 (narrow),
+/// f16<->f32 via F16C (VEX, like the FMA lowering) and f32<->f64 via SSE2.
+/// The x86 converts take their narrow operand from / write it to bits [63:0] and
+/// follow MXCSR rounding, as ARM follows FPCR; NaNs are quieted with the payload
+/// truncated and the sign kept on both sides.
+fn lower_vecfpcvtwidth(enc: &mut X86Encoder, d: u8, n: u8, widen: bool, half: bool, upper: bool) {
+    enc.emit_movdqu_load(VS0, R15, vd(n));
+    if widen {
+        if upper {
+            enc.emit_psrldq_imm(VS0, 8); // FCVTL2: source is Vn[127:64]
+        }
+        if half { enc.emit_vcvtph2ps(VS0, VS0) } else { enc.emit_cvtps2pd(VS0, VS0) }
+        enc.emit_movdqu_store(R15, vd(d), VS0);
+    } else {
+        // Result lands in VS0[63:0] with VS0[127:64] zeroed (FCVTN semantics).
+        if half { enc.emit_vcvtps2ph(VS0, VS0, 0x04) } else { enc.emit_cvtpd2ps(VS0, VS0) }
+        if upper {
+            // FCVTN2: write Vd[127:64], keep Vd[63:0].
+            enc.emit_movdqu_load(VS1, R15, vd(d));
+            enc.emit_movlhps(VS1, VS0);
+            enc.emit_movdqu_store(R15, vd(d), VS1);
+        } else {
+            enc.emit_movdqu_store(R15, vd(d), VS0);
+        }
+    }
 }
 
 /// Scalar FRINTA (round to integral, ties AWAY from zero) on the low element.

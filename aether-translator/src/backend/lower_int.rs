@@ -3451,7 +3451,7 @@ impl IntLower {
             | VecPair { .. } | VecReduce { .. } | VecAddLong { .. } | VecFp { .. }
             | VecFpCmp { .. } | VecFpUn { .. }
             | VecByElem { .. } | VecCvtFp { .. } | VecZipTrn { .. } | VecScalarPair { .. }
-            | FpFromInt { .. } | FpToIntR { .. } | FpRound { .. } | VecFpRound { .. } | FpCvt2 { .. }
+            | FpFromInt { .. } | FpToIntR { .. } | FpRound { .. } | VecFpRound { .. } | VecFpCvtWidth { .. } | FpCvt2 { .. }
             | FpCsel { .. }
             | FpMov { .. } | FpBin { .. } | FpFma { .. } | FpUn { .. } | FpCmpN { .. }
             | FpToGpr { .. } | FpFromGpr { .. } | CryptoAesR { .. } => {

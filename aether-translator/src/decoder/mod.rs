@@ -822,6 +822,15 @@ pub enum DecodedInsn {
         signed: bool,
         dbl: bool,
     },
+    /// Vector FP precision convert: FCVTL{2} (`widen`) / FCVTN{2}. `half`: sz=0
+    /// (f16<->f32); else f32<->f64. `upper`: Q=1 ("2" form, high half).
+    SimdFpCvtWidth {
+        rd: VReg,
+        rn: VReg,
+        widen: bool,
+        half: bool,
+        upper: bool,
+    },
     /// Scalar FP by element: `FMUL/FMLA/FMLS Sd,Sn,Vm.S[idx]` (and the D forms).
     /// `fp_op`: 0=FMUL 1=FMLA 2=FMLS (as in `SimdByElem`).
     SimdScalarByElem {

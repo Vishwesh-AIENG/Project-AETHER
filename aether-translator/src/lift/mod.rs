@@ -1377,6 +1377,9 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // SCVTF/UCVTF/FCVTZS/FCVTZU (vector) — int↔FP convert.
             cx.push(IrOp::VecCvtFp { to_fp, signed, dbl, q, d: rd.0, n: rn.0 });
         }
+        DecodedInsn::SimdFpCvtWidth { rd, rn, widen, half, upper } => {
+            cx.push(IrOp::VecFpCvtWidth { d: rd.0, n: rn.0, widen, half, upper });
+        }
         DecodedInsn::SimdScalarByElem { rd, rn, rm, fp_op, dbl, idx } => {
             // Scalar FMUL/FMLA/FMLS by element = the vector by-element op on the
             // 64-bit (q=false) form, whose lane 0 is exactly the scalar result, then

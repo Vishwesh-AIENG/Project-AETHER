@@ -9018,6 +9018,47 @@ fn simd_scalar_fabd_execute() {
     assert_eq!(ctx[vd(0)], 0x7FC0_0000, "FABD S (-NaN, 1) = +qNaN");
 }
 
+/// FCVTL/FCVTL2/FCVTN/FCVTN2: vector FP precision convert (f16<->f32, f32<->f64).
+#[test]
+fn simd_fcvtl_fcvtn_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    let s = |x: f32| f32::to_bits(x) as u64;
+    // f16 bit patterns: 1.0=0x3C00, -2.0=0xC000, 0.5=0x3800, 65504=0x7BFF.
+    let h4 = |a: u64, b: u64, c: u64, d: u64| a | (b << 16) | (c << 32) | (d << 48);
+    // FCVTL V0.4S, V1.4H = 0x0E217820.
+    let ctx = fp_run1(0x0E21_7820, |c| { c[vd(1)] = h4(0x3C00, 0xC000, 0x3800, 0x7BFF); });
+    assert_eq!(ctx[vd(0)], s(1.0) | (s(-2.0) << 32), "FCVTL .4h->.4s lo");
+    assert_eq!(ctx[vd(0) + 1], s(0.5) | (s(65504.0) << 32), "FCVTL .4h->.4s hi");
+    // FCVTL2 V0.4S, V1.8H = 0x4E217820 (source = upper 4 halves).
+    let ctx = fp_run1(0x4E21_7820, |c| { c[vd(1) + 1] = h4(0x3800, 0x3C00, 0, 0); });
+    assert_eq!(ctx[vd(0)], s(0.5) | (s(1.0) << 32), "FCVTL2 uses Vn[127:64]");
+    // FCVTN V0.4H, V1.4S = 0x0E216820; upper 64 of V0 zeroed.
+    let ctx = fp_run1(0x0E21_6820, |c| {
+        c[vd(1)] = s(1.0) | (s(-2.0) << 32); c[vd(1) + 1] = s(0.5) | (s(65504.0) << 32);
+        c[vd(0) + 1] = !0;
+    });
+    assert_eq!(ctx[vd(0)], h4(0x3C00, 0xC000, 0x3800, 0x7BFF), "FCVTN .4s->.4h");
+    assert_eq!(ctx[vd(0) + 1], 0, "FCVTN zeroes Vd[127:64]");
+    // FCVTN2 V0.8H, V1.4S = 0x4E216820: writes upper, keeps lower.
+    let ctx = fp_run1(0x4E21_6820, |c| {
+        c[vd(1)] = s(1.0) | (s(1.0) << 32); c[vd(1) + 1] = s(1.0) | (s(1.0) << 32);
+        c[vd(0)] = 0x1234_5678_9ABC_DEF0;
+    });
+    assert_eq!(ctx[vd(0)], 0x1234_5678_9ABC_DEF0, "FCVTN2 keeps Vd[63:0]");
+    assert_eq!(ctx[vd(0) + 1], h4(0x3C00, 0x3C00, 0x3C00, 0x3C00), "FCVTN2 writes Vd[127:64]");
+    // FCVTL V0.2D, V1.2S = 0x0E617820; FCVTN2 V0.4S, V1.2D = 0x4E616820.
+    let ctx = fp_run1(0x0E61_7820, |c| { c[vd(1)] = s(1.5) | (s(-0.25) << 32); });
+    assert_eq!(ctx[vd(0)], 1.5f64.to_bits(), "FCVTL .2s->.2d lo");
+    assert_eq!(ctx[vd(0) + 1], (-0.25f64).to_bits(), "FCVTL .2s->.2d hi");
+    let ctx = fp_run1(0x4E61_6820, |c| {
+        c[vd(1)] = 3.0f64.to_bits(); c[vd(1) + 1] = (-1.0f64).to_bits(); c[vd(0)] = 7;
+    });
+    assert_eq!(ctx[vd(0)], 7, "FCVTN2 .2d keeps Vd[63:0]");
+    assert_eq!(ctx[vd(0) + 1], s(3.0) | (s(-1.0) << 32), "FCVTN2 .2d->.4s upper");
+}
+
 /// FMOV (vector, immediate): VFPExpandImm(imm8) in every lane.
 #[test]
 fn simd_fmov_vector_imm_execute() {
