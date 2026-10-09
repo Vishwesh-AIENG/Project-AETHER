@@ -1242,6 +1242,14 @@ impl X86Encoder {
     pub fn emit_pmulld(&mut self, dst: u8, src: u8) {
         self.emit_sse4_op(0x38, 0x40, dst, src);
     }
+    /// PMULDQ xmm, xmm (SSE4.1): signed 32x32->64 on dword lanes 0 and 2.
+    pub fn emit_pmuldq(&mut self, dst: u8, src: u8) {
+        self.emit_sse4_op(0x38, 0x28, dst, src);
+    }
+    /// PMULUDQ xmm, xmm (SSE2): unsigned 32x32->64 on dword lanes 0 and 2.
+    pub fn emit_pmuludq(&mut self, dst: u8, src: u8) {
+        self.emit_sse2_op(0x66, 0xF4, dst, src);
+    }
 
     /// PSHUFB xmm, xmm (SSSE3 — byte shuffle).
     pub fn emit_pshufb(&mut self, dst: u8, src: u8) {

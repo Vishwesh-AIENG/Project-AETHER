@@ -497,13 +497,16 @@ fn classify(w: u32) -> Option<Family> {
 
 /// True if [`exec`] implements this exact encoding.
 pub fn supports(word: u32) -> bool {
-    classify(word).is_some()
+    classify(word).is_some() || classify_ext(word).is_some()
 }
 
 /// Execute `word`: `d` is the current Vd, `read(r)` returns V`r`. Returns the new
 /// Vd, or `None` if the word is not supported.
 pub fn exec(w: u32, d: u128, read: &dyn Fn(u32) -> u128) -> Option<u128> {
-    let fam = classify(w)?;
+    let fam = match classify(w) {
+        Some(f) => f,
+        None => return classify_ext(w).map(|e| exec_ext(e, w, d, read)),
+    };
     let q = bits(w, 30, 30) == 1;
     let u = bits(w, 29, 29) == 1;
     let size = bits(w, 23, 22);
@@ -838,6 +841,576 @@ fn scalar_two_reg_misc(w: u32, u: bool, size: u32, n: u128) -> u128 {
     }) as u128
 }
 
+// ── Extended families (whole-image scan, 2026-10-09) ─────────────────────────
+//
+// Complete integer 3-same / shift-immediate / across-lanes coverage, the
+// saturating 2-reg-misc and doubling-multiply forms, dot product, and the FP
+// pairwise / across-lanes / rounding-mode converts. Same exactness rules as above.
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ext {
+    ThreeSameInt,
+    FpPair,
+    ShiftImm2,
+    ScalarShiftImm2,
+    TwoRegMisc2,
+    ScalarTwoRegMisc2,
+    AcrossLanes,
+    Dot,
+    DotElem,
+    ThreeDiff2,
+    ByElem2,
+    ScalarThreeSameInt,
+}
+
+fn classify_ext(w: u32) -> Option<Ext> {
+    let q = bits(w, 30, 30);
+    let u = bits(w, 29, 29);
+    let size = bits(w, 23, 22);
+    let a = size >> 1;
+    // Vector 3-same (integer + FP pairwise).
+    if w & 0x9F20_0400 == 0x0E20_0400 {
+        let op = bits(w, 15, 11);
+        let ok = match op {
+            0b00000 | 0b00010 | 0b00100 | 0b01100 | 0b01101 | 0b01110 | 0b01111 | 0b10100
+            | 0b10101 | 0b10010 => size != 3,
+            0b00110 | 0b00111 | 0b10001 | 0b01000 | 0b01001 | 0b01010 | 0b01011 | 0b10000 => {
+                !(size == 3 && q == 0)
+            }
+            0b10011 => if u == 1 { size == 0 } else { size != 3 }, // PMUL / MUL
+            0b10111 => u == 0 && !(size == 3 && q == 0),           // ADDP
+            _ => false,
+        };
+        if ok {
+            return Some(Ext::ThreeSameInt);
+        }
+        // FADDP (U=1 a=0 11010), FMAXNMP (U=1 a=0 11000), FMINNMP (U=1 a=1 11000).
+        let fok = u == 1 && !(size & 1 == 1 && q == 0) && match op {
+            0b11010 => a == 0,
+            0b11000 => true,
+            _ => false,
+        };
+        return fok.then_some(Ext::FpPair);
+    }
+    // Vector dot product (three same extra): 0 Q U 01110 10 0 Rm 1 0010 1 Rn Rd.
+    if w & 0x9FE0_FC00 == 0x0E80_9400 {
+        return Some(Ext::Dot);
+    }
+    // Vector across lanes: 0 Q U 01110 size 11000 opcode 10 Rn Rd.
+    if w & 0x9F3E_0C00 == 0x0E30_0800 {
+        let op = bits(w, 16, 12);
+        let ok = match (op, u) {
+            (0b00011, _) | (0b01010, _) | (0b11010, _) | (0b11011, 0) => {
+                size != 3 && !(size == 2 && q == 0)
+            }
+            (0b01100, 1) | (0b01111, 1) => size & 1 == 0 && q == 1, // F{MAX,MIN}{NM}V .4s
+            _ => false,
+        };
+        return ok.then_some(Ext::AcrossLanes);
+    }
+    // Vector 2-reg misc additions.
+    if w & 0x9F3E_0C00 == 0x0E20_0800 {
+        let op = bits(w, 16, 12);
+        let fp_ok = !(size & 1 == 1 && q == 0);
+        let ok = match op {
+            0b00111 | 0b00011 => !(size == 3 && q == 0),  // SQABS/SQNEG, SUQADD/USQADD
+            0b11001 => u == 1 && fp_ok,                   // FRINTX (a=0) / FRINTI (a=1)
+            0b11011 => a == 0 && fp_ok,                   // FCVTMS/MU
+            0b11010 => a == 1 && fp_ok,                   // FCVTPS/PU
+            0b11100 => a == 0 && fp_ok,                   // FCVTAS/AU
+            _ => false,
+        };
+        return ok.then_some(Ext::TwoRegMisc2);
+    }
+    // Scalar 2-reg misc additions.
+    if w & 0xDF3E_0C00 == 0x5E20_0800 {
+        let op = bits(w, 16, 12);
+        let ok = match op {
+            0b00111 | 0b00011 => true,
+            0b11011 => a == 0,
+            0b11010 => a == 1,
+            0b11100 => a == 0,
+            _ => false,
+        };
+        return ok.then_some(Ext::ScalarTwoRegMisc2);
+    }
+    // Vector shift by immediate additions.
+    if w & 0x9F80_0400 == 0x0F00_0400 {
+        let immh = bits(w, 22, 19);
+        if immh == 0 {
+            return None;
+        }
+        let op = bits(w, 15, 11);
+        let narrow = immh & 0b1000 == 0; // narrowing / long forms need esize <= 32
+        let ok = match (op, u) {
+            (0b01000, 1) | (0b01010, _) | (0b01100, 1) | (0b01110, _) => !(immh & 0b1000 != 0 && q == 0),
+            (0b10000, _) | (0b10001, _) | (0b10010, _) | (0b10011, _) | (0b10100, _) => narrow,
+            _ => false,
+        };
+        return ok.then_some(Ext::ShiftImm2);
+    }
+    // Scalar shift by immediate additions.
+    if w & 0xDF80_0400 == 0x5F00_0400 {
+        let immh = bits(w, 22, 19);
+        if immh == 0 {
+            return None;
+        }
+        let op = bits(w, 15, 11);
+        let ok = match (op, u) {
+            (0b01000, 1) | (0b01010, _) => immh & 0b1000 != 0, // SRI, SHL/SLI (D only)
+            (0b01100, 1) | (0b01110, _) => true,               // SQSHLU, SQSHL/UQSHL
+            (0b10000, 1) | (0b10001, 1) | (0b10010, _) | (0b10011, _) => immh & 0b1000 == 0,
+            _ => false,
+        };
+        return ok.then_some(Ext::ScalarShiftImm2);
+    }
+    // Vector x indexed element additions: SQDMLAL/SQDMLSL/SQDMULL, SDOT/UDOT.
+    if w & 0x9F00_0400 == 0x0F00_0000 {
+        let op = bits(w, 15, 12);
+        let ok = match (u, op) {
+            (0, 0b0011) | (0, 0b0111) | (0, 0b1011) => size == 1 || size == 2,
+            (_, 0b1110) => size == 2,
+            _ => false,
+        };
+        return ok.then_some(if op == 0b1110 { Ext::DotElem } else { Ext::ByElem2 });
+    }
+    // Vector 3-different additions: MLAL/MLSL/MULL, SQDMLAL/SQDMLSL/SQDMULL, PMULL.8h.
+    if w & 0x9F20_0C00 == 0x0E20_0000 {
+        let op = bits(w, 15, 12);
+        let ok = match op {
+            0b1000 | 0b1010 | 0b1100 => size != 3,
+            0b1001 | 0b1011 | 0b1101 => u == 0 && (size == 1 || size == 2),
+            0b1110 => u == 0 && size == 0,
+            _ => false,
+        };
+        return ok.then_some(Ext::ThreeDiff2);
+    }
+    // Scalar 3-same integer.
+    if w & 0xDF20_0400 == 0x5E20_0400 {
+        let op = bits(w, 15, 11);
+        let ok = match op {
+            0b00001 | 0b00101 | 0b01001 | 0b01011 => true,
+            0b00110 | 0b00111 | 0b01000 | 0b01010 | 0b10000 | 0b10001 => size == 3,
+            0b10110 => size == 1 || size == 2,
+            _ => false,
+        };
+        return ok.then_some(Ext::ScalarThreeSameInt);
+    }
+    None
+}
+
+/// Polynomial (carry-less) multiply of the low 8 bits.
+fn pmul8(a: u64, b: u64) -> u64 {
+    let mut r = 0u64;
+    for i in 0..8 {
+        if (b >> i) & 1 == 1 {
+            r ^= (a & 0xFF) << i;
+        }
+    }
+    r & 0xFF
+}
+
+/// Register-controlled shift (SSHL/USHL/SRSHL/URSHL/SQSHL/UQSHL/SQRSHL/UQRSHL):
+/// `sh` = signed bottom byte of the shift element; negative shifts right.
+fn shl_reg(x: i128, sh: i64, es: u32, unsigned: bool, round: bool, sat: bool) -> u64 {
+    let m = mask(es) as u64;
+    let satv = |v: i128| if unsigned { sat_u(v, es) } else { sat_s(v, es) };
+    if sh >= 0 {
+        let s = sh as u32;
+        if s >= es {
+            return if sat && x != 0 { satv(if x > 0 { i128::MAX } else { i128::MIN }) } else { 0 };
+        }
+        let v = x << s; // |x| < 2^64, s < 64: fits in i128
+        if sat { satv(v) } else { (v as u64) & m }
+    } else {
+        let n = ((-sh) as u32).min(100);
+        let rc = if round { 1i128 << (n - 1) } else { 0 };
+        let v = (x + rc) >> n;
+        if sat { satv(v) } else { (v as u64) & m }
+    }
+}
+
+/// One lane of an integer 3-same op (non-pairwise).
+fn int3(op: u32, u: bool, es: u32, a: u64, b: u64, d: u64) -> u64 {
+    let m = mask(es) as u64;
+    let sa = ext(a, es, u);
+    let sb = ext(b, es, u);
+    let r = match op {
+        0b00000 => ((sa + sb) >> 1) as u64,
+        0b00010 => ((sa + sb + 1) >> 1) as u64,
+        0b00100 => ((sa - sb) >> 1) as u64,
+        0b00110 => if sa > sb { m } else { 0 },
+        0b00111 => if sa >= sb { m } else { 0 },
+        0b10001 => {
+            let t = if u { a == b } else { a & b != 0 };
+            if t { m } else { 0 }
+        }
+        0b01000 | 0b01001 | 0b01010 | 0b01011 => {
+            shl_reg(sa, sext(b & 0xFF, 8), es, u, op & 0b10 != 0, op & 1 != 0)
+        }
+        0b01100 => if sa >= sb { a } else { b },
+        0b01101 => if sa <= sb { a } else { b },
+        0b01110 => (sa - sb).unsigned_abs() as u64,
+        0b01111 => (d as i128 + (sa - sb).abs()) as u64,
+        0b10000 => if u { a.wrapping_sub(b) } else { a.wrapping_add(b) },
+        0b10010 => {
+            let p = a.wrapping_mul(b);
+            if u { d.wrapping_sub(p) } else { d.wrapping_add(p) }
+        }
+        0b10011 => if u { pmul8(a, b) } else { a.wrapping_mul(b) },
+        0b00001 => if u { sat_u(sa + sb, es) } else { sat_s(sa + sb, es) },
+        0b00101 => if u { sat_u(sa - sb, es) } else { sat_s(sa - sb, es) },
+        0b10110 => sqdmulh(sext(a, es) as i128, sext(b, es) as i128, es, u),
+        _ => 0,
+    };
+    r & m
+}
+
+/// ARM FPAdd with DN=0 NaN rules and the positive default NaN for invalid ops.
+fn fp_add(f: Fmt, a: u64, b: u64) -> u64 {
+    if let Some(n) = process_nans(f, a, b) {
+        return n;
+    }
+    let r = if f.width() == 32 {
+        (f32::from_bits(a as u32) + f32::from_bits(b as u32)).to_bits() as u64
+    } else {
+        (f64::from_bits(a) + f64::from_bits(b)).to_bits()
+    };
+    if f.is_nan(r) { default_nan(f) } else { r }
+}
+
+fn default_nan(f: Fmt) -> u64 {
+    if f.width() == 32 { 0x7FC0_0000 } else { 0x7FF8_0000_0000_0000 }
+}
+
+/// ARM FPMaxNum / FPMinNum: a quiet NaN loses to a number.
+fn fp_maxmin_num(f: Fmt, mut a: u64, mut b: u64, max: bool) -> u64 {
+    let w = f.width();
+    let neg_inf = (1u64 << (w - 1)) | (((1u64 << f.ebits) - 1) << f.fbits);
+    let pos_inf = ((1u64 << f.ebits) - 1) << f.fbits;
+    let fill = if max { neg_inf } else { pos_inf };
+    let qa = f.is_nan(a) && !f.is_snan(a);
+    let qb = f.is_nan(b) && !f.is_snan(b);
+    if qa && !f.is_nan(b) {
+        a = fill;
+    } else if qb && !f.is_nan(a) {
+        b = fill;
+    }
+    fp_maxmin(f, a, b, max)
+}
+
+/// Round an FP value to an integral value (as f64) in the given mode:
+/// 0 = nearest-even, 1 = floor, 2 = ceil, 3 = ties-away.
+fn round_mode(x: f64, mode: u32) -> f64 {
+    let ax = f64::from_bits(x.to_bits() & !(1u64 << 63));
+    if !(ax < 4503599627370496.0) {
+        return x; // NaN, inf, or already integral
+    }
+    let t = (x as i64) as f64; // truncation (exact: |x| < 2^52)
+    match mode {
+        0 => rne_f64(x),
+        1 => if t > x { t - 1.0 } else { t },
+        2 => if t < x { t + 1.0 } else { t },
+        _ => {
+            let frac = x - t;
+            if frac >= 0.5 { t + 1.0 } else if frac <= -0.5 { t - 1.0 } else { t }
+        }
+    }
+}
+
+/// FP -> integer of the same width with an explicit rounding mode (saturating).
+fn fp_to_int_mode(f: Fmt, x: u64, unsigned: bool, mode: u32) -> u64 {
+    let v = round_mode(f.to_f64(x), mode);
+    match (f.width(), unsigned) {
+        (32, false) => (v as i32) as u32 as u64,
+        (32, true) => (v as u32) as u64,
+        (_, false) => (v as i64) as u64,
+        (_, true) => v as u64,
+    }
+}
+
+fn exec_ext(e: Ext, w: u32, d: u128, read: &dyn Fn(u32) -> u128) -> u128 {
+    let q = bits(w, 30, 30) == 1;
+    let u = bits(w, 29, 29) == 1;
+    let size = bits(w, 23, 22);
+    let n = read(bits(w, 9, 5));
+    let es = 8u32 << size;
+    let mut r = 0u128;
+    match e {
+        Ext::ThreeSameInt => {
+            let m = read(bits(w, 20, 16));
+            let op = bits(w, 15, 11);
+            let cnt = if q { 128 / es } else { 64 / es };
+            if matches!(op, 0b10100 | 0b10101 | 0b10111) {
+                // Pairwise over Vm:Vn (Vn supplies the low results).
+                let src = |j: u32| if j < cnt { lane(n, es, j) } else { lane(m, es, j - cnt) };
+                for i in 0..cnt {
+                    let (x, y) = (src(2 * i), src(2 * i + 1));
+                    let (sx, sy) = (ext(x, es, u), ext(y, es, u));
+                    let v = match op {
+                        0b10100 => if sx >= sy { x } else { y },
+                        0b10101 => if sx <= sy { x } else { y },
+                        _ => x.wrapping_add(y),
+                    };
+                    set_lane(&mut r, es, i, v);
+                }
+            } else {
+                for i in 0..cnt {
+                    set_lane(&mut r, es, i, int3(op, u, es, lane(n, es, i), lane(m, es, i), lane(d, es, i)));
+                }
+            }
+            r
+        }
+        Ext::FpPair => {
+            let m = read(bits(w, 20, 16));
+            let op = bits(w, 15, 11);
+            let f = if size & 1 == 1 { F64 } else { F32 };
+            let fes = f.width();
+            let cnt = if q { 128 / fes } else { 64 / fes };
+            let src = |j: u32| if j < cnt { lane(n, fes, j) } else { lane(m, fes, j - cnt) };
+            for i in 0..cnt {
+                let (x, y) = (src(2 * i), src(2 * i + 1));
+                let v = if op == 0b11010 { fp_add(f, x, y) } else { fp_maxmin_num(f, x, y, size >> 1 == 0) };
+                set_lane(&mut r, fes, i, v);
+            }
+            r
+        }
+        Ext::Dot => {
+            let m = read(bits(w, 20, 16));
+            for i in 0..(if q { 4 } else { 2 }) {
+                let mut acc = lane(d, 32, i) as i128;
+                for k in 0..4 {
+                    acc += ext(lane(n, 8, 4 * i + k), 8, u) * ext(lane(m, 8, 4 * i + k), 8, u);
+                }
+                set_lane(&mut r, 32, i, acc as u64);
+            }
+            r
+        }
+        Ext::DotElem => {
+            let idx = (bits(w, 11, 11) << 1) | bits(w, 21, 21);
+            let m = read(bits(w, 20, 16));
+            for i in 0..(if q { 4 } else { 2 }) {
+                let mut acc = lane(d, 32, i) as i128;
+                for k in 0..4 {
+                    acc += ext(lane(n, 8, 4 * i + k), 8, u) * ext(lane(m, 8, 4 * idx + k), 8, u);
+                }
+                set_lane(&mut r, 32, i, acc as u64);
+            }
+            r
+        }
+        Ext::AcrossLanes => {
+            let op = bits(w, 16, 12);
+            if op == 0b01100 || op == 0b01111 {
+                let max = size >> 1 == 0;
+                let pick = |x: u64, y: u64| if op == 0b01100 { fp_maxmin_num(F32, x, y, max) } else { fp_maxmin(F32, x, y, max) };
+                let lo = pick(lane(n, 32, 0), lane(n, 32, 1));
+                let hi = pick(lane(n, 32, 2), lane(n, 32, 3));
+                return pick(lo, hi) as u128;
+            }
+            let cnt = if q { 128 / es } else { 64 / es };
+            match op {
+                0b00011 => {
+                    let s: i128 = (0..cnt).map(|i| ext(lane(n, es, i), es, u)).sum();
+                    (s as u128) & mask(2 * es)
+                }
+                0b11011 => {
+                    let s = (0..cnt).fold(0u64, |acc, i| acc.wrapping_add(lane(n, es, i)));
+                    (s as u128) & mask(es)
+                }
+                _ => {
+                    let max = op == 0b01010;
+                    let mut best = lane(n, es, 0);
+                    for i in 1..cnt {
+                        let x = lane(n, es, i);
+                        let better = if max { ext(x, es, u) > ext(best, es, u) } else { ext(x, es, u) < ext(best, es, u) };
+                        if better {
+                            best = x;
+                        }
+                    }
+                    best as u128
+                }
+            }
+        }
+        Ext::TwoRegMisc2 | Ext::ScalarTwoRegMisc2 => {
+            let scalar = e == Ext::ScalarTwoRegMisc2;
+            let op = bits(w, 16, 12);
+            match op {
+                0b00111 | 0b00011 => {
+                    let cnt = if scalar { 1 } else if q { 128 / es } else { 64 / es };
+                    for i in 0..cnt {
+                        let x = lane(n, es, i);
+                        let v = match (op, u) {
+                            (0b00111, false) => sat_s((sext(x, es) as i128).abs(), es),
+                            (0b00111, true) => sat_s(-(sext(x, es) as i128), es),
+                            (_, false) => sat_s(sext(lane(d, es, i), es) as i128 + x as i128, es), // SUQADD
+                            (_, true) => sat_u(lane(d, es, i) as i128 + sext(x, es) as i128, es),  // USQADD
+                        };
+                        set_lane(&mut r, es, i, v);
+                    }
+                    r
+                }
+                _ => {
+                    let f = if size & 1 == 1 { F64 } else { F32 };
+                    let fes = f.width();
+                    let cnt = if scalar { 1 } else if q { 128 / fes } else { 64 / fes };
+                    for i in 0..cnt {
+                        let x = lane(n, fes, i);
+                        let v = match op {
+                            0b11001 => {
+                                // FRINTX/FRINTI: current mode (round-to-nearest-even here).
+                                if f.is_nan(x) {
+                                    f.quiet(x)
+                                } else {
+                                    let rr = rne_f64(f.to_f64(x));
+                                    let rr = if rr == 0.0 && f.to_f64(x).is_sign_negative() { -0.0 } else { rr };
+                                    if fes == 32 { (rr as f32).to_bits() as u64 } else { rr.to_bits() }
+                                }
+                            }
+                            0b11011 => fp_to_int_mode(f, x, u, 1),            // FCVTMS/MU
+                            0b11010 => fp_to_int_mode(f, x, u, 2),            // FCVTPS/PU
+                            _ => fp_to_int_mode(f, x, u, 3),                  // FCVTAS/AU
+                        };
+                        set_lane(&mut r, fes, i, v);
+                    }
+                    r
+                }
+            }
+        }
+        Ext::ShiftImm2 | Ext::ScalarShiftImm2 => {
+            let scalar = e == Ext::ScalarShiftImm2;
+            let immh = bits(w, 22, 19);
+            let immhb = bits(w, 22, 16);
+            let op = bits(w, 15, 11);
+            let es = 8u32 << (31 - immh.leading_zeros());
+            match op {
+                0b10000 | 0b10001 | 0b10010 | 0b10011 => {
+                    // Narrowing right shifts: source 2*es, shift in [1, es].
+                    let ws = 2 * es;
+                    let shift = ws - immhb;
+                    let round = op & 1 == 1;
+                    let cnt = if scalar { 1 } else { 64 / es };
+                    let mut lo = 0u128;
+                    for i in 0..cnt {
+                        let x = lane(n, ws, i);
+                        let rc = if round { 1i128 << (shift - 1) } else { 0 };
+                        let v = match (op >> 1 & 1, u) {
+                            (0, false) => ((((x as i128) + rc) >> shift) as u64) & (mask(es) as u64), // (R)SHRN
+                            (0, true) => sat_u((sext(x, ws) as i128 + rc) >> shift, es),          // SQ(R)SHRUN
+                            (_, false) => sat_s((sext(x, ws) as i128 + rc) >> shift, es),         // SQ(R)SHRN
+                            (_, true) => sat_u(((x as i128) + rc) >> shift, es),                  // UQ(R)SHRN
+                        };
+                        set_lane(&mut lo, es, i, v);
+                    }
+                    if scalar { lo } else if q { low64(d) | (lo << 64) } else { lo }
+                }
+                0b10100 => {
+                    // SSHLL/USHLL{2}: widen then shift left by immhb - es.
+                    let shift = immhb - es;
+                    let src = if q { high64(n) } else { low64(n) };
+                    for i in 0..(64 / es) {
+                        let v = ext(lane(src, es, i), es, u) << shift;
+                        set_lane(&mut r, 2 * es, i, v as u64);
+                    }
+                    r
+                }
+                _ => {
+                    let cnt = if scalar { 1 } else if q { 128 / es } else { 64 / es };
+                    let m = mask(es) as u64;
+                    for i in 0..cnt {
+                        let x = lane(n, es, i);
+                        let dv = lane(d, es, i);
+                        let v = match (op, u) {
+                            (0b01000, _) => {
+                                // SRI: shift right by 2*es - immhb, keep Vd's top bits.
+                                let s = 2 * es - immhb;
+                                if s >= es { dv } else { (dv & !(m >> s)) | (x >> s) }
+                            }
+                            (0b01010, false) => (x << (immhb - es)) & m,                     // SHL
+                            (0b01010, true) => {
+                                let s = immhb - es;                                       // SLI
+                                (dv & ((1u64 << s) - 1)) | ((x << s) & m)
+                            }
+                            (0b01100, _) => sat_u((sext(x, es) as i128) << (immhb - es), es), // SQSHLU
+                            (_, false) => sat_s((sext(x, es) as i128) << (immhb - es), es),   // SQSHL
+                            (_, true) => sat_u((x as i128) << (immhb - es), es),              // UQSHL
+                        };
+                        set_lane(&mut r, es, i, v);
+                    }
+                    r
+                }
+            }
+        }
+        Ext::ByElem2 => {
+            // SQDMULL/SQDMLAL/SQDMLSL by element (widening, "2" = Q).
+            let op = bits(w, 15, 12);
+            let (h, l, mb) = (bits(w, 11, 11), bits(w, 21, 21), bits(w, 20, 20));
+            let (rm, idx) = if size == 1 { (bits(w, 19, 16), (h << 2) | (l << 1) | mb) } else { (bits(w, 20, 16), (h << 1) | l) };
+            let b = sext(lane(read(rm), es, idx), es) as i128;
+            let src = if q { high64(n) } else { low64(n) };
+            for i in 0..(64 / es) {
+                let p = sat_s(2 * (sext(lane(src, es, i), es) as i128) * b, 2 * es);
+                let acc = sext(lane(d, 2 * es, i), 2 * es) as i128;
+                let ps = sext(p, 2 * es) as i128;
+                let v = match op {
+                    0b0011 => sat_s(acc + ps, 2 * es),
+                    0b0111 => sat_s(acc - ps, 2 * es),
+                    _ => p,
+                };
+                set_lane(&mut r, 2 * es, i, v);
+            }
+            r
+        }
+        Ext::ThreeDiff2 => {
+            let m = read(bits(w, 20, 16));
+            let op = bits(w, 15, 12);
+            let ws = 2 * es;
+            let (nh, mh) = if q { (high64(n), high64(m)) } else { (low64(n), low64(m)) };
+            for i in 0..(64 / es) {
+                let (x, y) = (lane(nh, es, i), lane(mh, es, i));
+                let acc = lane(d, ws, i);
+                let v = match op {
+                    0b1110 => {
+                        // PMULL .8b -> .8h: carry-less 8x8 -> 16
+                        let mut p = 0u64;
+                        for k in 0..8 {
+                            if (y >> k) & 1 == 1 {
+                                p ^= x << k;
+                            }
+                        }
+                        p
+                    }
+                    0b1001 | 0b1011 | 0b1101 => {
+                        let p = sat_s(2 * (sext(x, es) as i128) * (sext(y, es) as i128), ws);
+                        let ps = sext(p, ws) as i128;
+                        let a = sext(acc, ws) as i128;
+                        match op {
+                            0b1001 => sat_s(a + ps, ws),
+                            0b1011 => sat_s(a - ps, ws),
+                            _ => p,
+                        }
+                    }
+                    _ => {
+                        let p = ext(x, es, u) * ext(y, es, u);
+                        let v = match op {
+                            0b1000 => acc as i128 + p,
+                            0b1010 => acc as i128 - p,
+                            _ => p,
+                        };
+                        v as u64
+                    }
+                };
+                set_lane(&mut r, ws, i, v);
+            }
+            r
+        }
+        Ext::ScalarThreeSameInt => {
+            let m = read(bits(w, 20, 16));
+            let op = bits(w, 15, 11);
+            int3(op, u, es, lane(n, es, 0), lane(m, es, 0), lane(d, es, 0)) as u128
+        }
+    }
+}
+
 // ── Win64 entry point ────────────────────────────────────────────────────────
 
 /// Called from translated code: executes `word` on the q-register file at `ctx`.
@@ -950,6 +1523,48 @@ mod tests {
         let r = run(0x6EA0_4800, &[(0, 1)]);
         assert_eq!(r as u32, 31);
         assert_eq!((r >> 32) as u32, 32);
+    }
+
+    #[test]
+    fn ext_register_and_narrowing_shifts() {
+        // SRSHL V0.8H, V1.8H, V2.8H = 0x4E625420: round(-5 >> 1) = -2
+        let r = run(0x4E62_5420, &[(1, 0xFFFB), (2, 0xFFFF)]);
+        assert_eq!(r & 0xFFFF, 0xFFFE);
+        // SQRSHL V0.4S = 0x4EA25C20: INT_MAX << 1 saturates
+        let r = run(0x4EA2_5C20, &[(1, 0x7FFF_FFFF), (2, 1)]);
+        assert_eq!(r as u32, 0x7FFF_FFFF);
+        // RSHRN V0.4H, V1.4S, #16 = 0x0F108C20: (0x18000 + 0x8000) >> 16 = 2
+        let r = run(0x0F10_8C20, &[(1, 0x0001_8000)]);
+        assert_eq!(r & 0xFFFF, 2);
+        assert_eq!(r >> 64, 0);
+        // SQSHLU V0.4S, V1.4S, #1 = 0x6F216420: -3 -> 0, 0x40000000 -> 0x80000000
+        let r = run(0x6F21_6420, &[(1, (-3i32) as u32 as u128 | (0x4000_0000u128 << 32))]);
+        assert_eq!(r as u32, 0);
+        assert_eq!((r >> 32) as u32, 0x8000_0000);
+    }
+
+    #[test]
+    fn ext_saturating_misc_dot_and_pairs() {
+        // SQNEG V0.4S, V1.4S = 0x6EA07820: -INT_MIN saturates
+        assert_eq!(run(0x6EA0_7820, &[(1, 0x8000_0000)]) as u32, 0x7FFF_FFFF);
+        // SDOT V0.4S, V1.16B, V2.4B[1] = 0x4FA2E020: 5 + [1,2,3,4].[-1,2,-3,4] = 15
+        let m = 0u128 | (((0xFFu128) | (2 << 8) | (0xFD << 16) | (4 << 24)) << 32);
+        let r = run(0x4FA2_E020, &[(0, 5), (1, 0x0403_0201), (2, m)]);
+        assert_eq!(r as u32, 15);
+        // FADDP V0.4S, V1.4S, V2.4S = 0x6E22D420
+        let r = run(0x6E22_D420, &[(1, h(1.0) | (h(2.0) << 32) | (h(3.0) << 64) | (h(4.0) << 96)), (2, h(10.0) | (h(20.0) << 32))]);
+        assert_eq!(r as u32, 3.0f32.to_bits());
+        assert_eq!((r >> 32) as u32, 7.0f32.to_bits());
+        assert_eq!((r >> 64) as u32, 30.0f32.to_bits());
+        // FMAXV S0, V1.4S = 0x6E30F820
+        let r = run(0x6E30_F820, &[(1, h(1.0) | (h(5.0) << 32) | (h(-3.0) << 64) | (h(2.0) << 96))]);
+        assert_eq!(r, 5.0f32.to_bits() as u128);
+        // UADDLV H0, V1.16B = 0x6E303820: 16 * 255
+        assert_eq!(run(0x6E30_3820, &[(1, u128::MAX)]), 4080);
+        // SQDMULL V0.4S, V1.4H, V2.4H = 0x0E62D020: MIN*MIN*2 saturates
+        assert_eq!(run(0x0E62_D020, &[(1, 0x8000), (2, 0x8000)]) as u32, 0x7FFF_FFFF);
+        // FCVTMS V0.4S, V1.4S = 0x4E21B820: floor(-2.5) = -3
+        assert_eq!(run(0x4E21_B820, &[(1, h(-2.5))]) as u32, (-3i32) as u32);
     }
 
     #[test]

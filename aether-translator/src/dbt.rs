@@ -369,7 +369,23 @@ impl DbtRuntime {
             }
 
             let term = Self::is_terminator(&insn);
-            if let Err(_) = lift_at(&insn, block, cur_pc) {
+            let ops_before = block.ops.len();
+            let lifted = lift_at(&insn, block, cur_pc);
+            // If the typed lift of an Advanced SIMD/FP word would lower to the
+            // fail-loud UD2 (an unmapped form or a partial lowering) and the exact
+            // simd_rt helper implements this word, run the helper instead. Keeps
+            // the fast typed path wherever it is complete.
+            if lifted.is_ok()
+                && crate::runtime::simd_rt::supports(word)
+                && block.ops[ops_before..].iter().any(crate::backend::lower_simd_ctx::op_lowers_to_ud2)
+            {
+                block.ops.truncate(ops_before);
+                if cur_pc != 0 {
+                    block.push_op(crate::ir::IrOp::StampFaultPc(cur_pc));
+                }
+                block.push_op(crate::ir::IrOp::SimdInterp { word });
+            }
+            if let Err(_) = lifted {
                 self.stat_lift_failures =
                     self.stat_lift_failures.saturating_add(1);
                 self.last_fail_pc   = cur_pc;

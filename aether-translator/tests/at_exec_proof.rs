@@ -9021,6 +9021,32 @@ fn simd_scalar_fabd_execute() {
     assert_eq!(ctx[vd(0)], 0x7FC0_0000, "FABD S (-NaN, 1) = +qNaN");
 }
 
+/// SMULL/UMULL/SMLAL/SMLSL{2} .2s -> .2d (32x32->64): ~4,860 distinct words in the
+/// Android image lowered to UD2 before (codec/DSP hot loops).
+#[test]
+fn simd_mull_2d_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    let pair = |a: i32, b: i32| (a as u32 as u64) | ((b as u32 as u64) << 32);
+    // SMULL V0.2D, V1.2S, V2.2S = 0x0EA2C020: [-3*7, 0x7FFFFFFF*-2]
+    let ctx = fp_run1(0x0EA2_C020, |c| { c[vd(1)] = pair(-3, i32::MAX); c[vd(2)] = pair(7, -2); });
+    assert_eq!(ctx[vd(0)] as i64, -21, "SMULL lane0");
+    assert_eq!(ctx[vd(0) + 1] as i64, i32::MAX as i64 * -2, "SMULL lane1");
+    // UMULL V0.2D, V1.2S, V2.2S = 0x2EA2C020: 0xFFFFFFFF * 0xFFFFFFFF
+    let ctx = fp_run1(0x2EA2_C020, |c| { c[vd(1)] = u64::MAX; c[vd(2)] = u64::MAX; });
+    assert_eq!(ctx[vd(0)], 0xFFFF_FFFE_0000_0001, "UMULL lane0");
+    // SMULL2 V0.2D, V1.4S, V2.4S = 0x4EA2C020 (upper halves): 5 * -6
+    let ctx = fp_run1(0x4EA2_C020, |c| { c[vd(1) + 1] = pair(5, 1); c[vd(2) + 1] = pair(-6, 1); });
+    assert_eq!(ctx[vd(0)] as i64, -30, "SMULL2 uses Vn[127:64]");
+    // SMLAL V0.2D, V1.2S, V2.2S = 0x0EA28020: 100 + (-4*5)
+    let ctx = fp_run1(0x0EA2_8020, |c| { c[vd(0)] = 100; c[vd(1)] = pair(-4, 0); c[vd(2)] = pair(5, 0); });
+    assert_eq!(ctx[vd(0)] as i64, 80, "SMLAL accumulates in 64 bits");
+    // SMLSL V0.2D, V1.2S, V2.2S = 0x0EA2A020: 100 - (-4*5)
+    let ctx = fp_run1(0x0EA2_A020, |c| { c[vd(0)] = 100; c[vd(1)] = pair(-4, 0); c[vd(2)] = pair(5, 0); });
+    assert_eq!(ctx[vd(0)] as i64, 120, "SMLSL subtracts in 64 bits");
+}
+
 /// Long-tail Advanced SIMD through the simd_rt CALL path (translated code → Win64
 /// call → interpreter → q-regs): BIF (was a decode failure), URSHR and UADDW (were
 /// UD2), UCVTF .4s (was UD2 in the cvtdq2ps lowering). Also checks that GPRs and

@@ -181,6 +181,38 @@ pub fn lower(op: &IrOp, enc: &mut X86Encoder) {
     }
 }
 
+/// True if lowering `op` would emit the fail-loud UD2: a coarse `Hint >= 200`
+/// placeholder, or a ctx-template op (the set `IntLower` delegates to [`lower`])
+/// whose lowering does not cover this form. Decided by trial-lowering into a
+/// scratch encoder and reading its sticky UD2 flag, so it can never disagree with
+/// the real lowering. Used by `dbt` to swap such an instruction for the exact
+/// `simd_rt` helper call when the helper implements the word.
+pub fn op_lowers_to_ud2(op: &IrOp) -> bool {
+    match op {
+        IrOp::Hint { imm } => *imm >= 200,
+        IrOp::VecBin { .. } | IrOp::VecUn { .. } | IrOp::VecShift { .. } | IrOp::VecShiftAcc { .. }
+        | IrOp::VecCmp { .. } | IrOp::VecCmpZero { .. } | IrOp::VecShiftNarrow { .. }
+        | IrOp::VecShiftLong { .. } | IrOp::VecShiftReg { .. } | IrOp::VecShiftIns { .. }
+        | IrOp::VecShiftNarrowSat { .. } | IrOp::VecExt { .. } | IrOp::VecTbl1 { .. }
+        | IrOp::VecTblN { .. } | IrOp::VecDupElem { .. } | IrOp::VecPmull { .. }
+        | IrOp::VecMulLong { .. } | IrOp::VecRev64 { .. } | IrOp::VecAddLongPair { .. }
+        | IrOp::VecUnzip { .. } | IrOp::VecPair { .. } | IrOp::VecReduce { .. }
+        | IrOp::VecAddLong { .. } | IrOp::VecFp { .. } | IrOp::VecFpCmp { .. }
+        | IrOp::VecFpUn { .. } | IrOp::VecByElem { .. } | IrOp::VecCvtFp { .. }
+        | IrOp::VecZipTrn { .. } | IrOp::VecScalarPair { .. } | IrOp::FpFromInt { .. }
+        | IrOp::FpToIntR { .. } | IrOp::FpRound { .. } | IrOp::VecFpRound { .. }
+        | IrOp::VecFpCvtWidth { .. } | IrOp::FpCvt2 { .. } | IrOp::FpCsel { .. }
+        | IrOp::FpMov { .. } | IrOp::FpBin { .. } | IrOp::FpFma { .. } | IrOp::FpUn { .. }
+        | IrOp::FpCmpN { .. } | IrOp::FpToGpr { .. } | IrOp::FpFromGpr { .. }
+        | IrOp::CryptoAesR { .. } => {
+            let mut e = X86Encoder::new();
+            lower(op, &mut e);
+            e.had_ud2()
+        }
+        _ => false,
+    }
+}
+
 /// B20/B29: NEON across-lanes integer min/max reduction (SMAXV/UMAXV/SMINV/UMINV).
 /// Reduces all lanes of Vn (element bytes = `1<<size`) to a single scalar in Vd
 /// lane 0 (rest zeroed). Done in GPR ctx-memory style (like `VecReduceAdd`): each
@@ -1221,18 +1253,33 @@ fn lower_vecmullong(
             else { enc.emit_pmovzxwd(VS0, VS0); enc.emit_pmovzxwd(VS1, VS1); }
             enc.emit_pmulld(VS0, VS1);
         }
-        _ => { enc.emit_ud2(); return; } // .2s → .2d (size=2): Tier 1 (needs pmuldq)
+        S => {
+            // .2s → .2d: spread elements 0,1 into dword lanes 0 and 2, then the
+            // 32x32->64 multiply (PMULDQ signed / PMULUDQ unsigned) on those lanes.
+            enc.emit_pshufd(VS0, VS0, 0x50); // [e0, e0, e1, e1]
+            enc.emit_pshufd(VS1, VS1, 0x50);
+            if signed { enc.emit_pmuldq(VS0, VS1) } else { enc.emit_pmuludq(VS0, VS1) }
+        }
+        _ => { enc.emit_ud2(); return; } // size=3 is reserved for MULL
     }
     if accum {
         enc.emit_movdqu_load(VS2, R15, vd(d));
         if sub {
             // Vd - products (in VS2), store VS2.
-            match size { B => enc.emit_psubw(VS2, VS0), _ => enc.emit_psubd(VS2, VS0) }
+            match size {
+                B => enc.emit_psubw(VS2, VS0),
+                H => enc.emit_psubd(VS2, VS0),
+                _ => enc.emit_psubq(VS2, VS0),
+            }
             enc.emit_movdqu_store(R15, vd(d), VS2);
             return;
         }
         // Vd + products.
-        match size { B => enc.emit_paddw(VS0, VS2), _ => enc.emit_paddd(VS0, VS2) }
+        match size {
+            B => enc.emit_paddw(VS0, VS2),
+            H => enc.emit_paddd(VS0, VS2),
+            _ => enc.emit_paddq(VS0, VS2),
+        }
     }
     enc.emit_movdqu_store(R15, vd(d), VS0);
 }
