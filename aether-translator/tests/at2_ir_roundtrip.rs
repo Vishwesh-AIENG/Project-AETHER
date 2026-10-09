@@ -401,7 +401,7 @@ fn all_variants() -> Vec<IrOp> {
         IrOp::FpFma { op: FpFmaOp::Madd, dbl: false, d: 4, n: 5, m: 6, a: 7 },
         IrOp::FpUn { op: FpUnOp::Sqrt, dbl: false, d: 14, n: 15 },
         IrOp::FpCmpN { n: 16, m: 17, dbl: true, zero: true },
-        IrOp::FpCvtIntScalar { d: 1, src: v(0), to_dbl: true, signed: false, src_64: true },
+        IrOp::FpCvtIntScalar { d: 1, src: v(0), to_dbl: true, signed: false, src_64: true, fbits: 24 },
         IrOp::FpCvtToIntScalar { dst: v(0), n: 1, from_dbl: true, to_64: false, round: RoundMode::Nearest, signed: true },
         IrOp::FpToGpr { d_gpr: 18, n: 19, bits: 64, high_half: true },
         IrOp::FpFromGpr { d: 20, n_gpr: 21, bits: 32, high_half: false },

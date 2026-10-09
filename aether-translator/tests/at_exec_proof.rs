@@ -9018,6 +9018,26 @@ fn simd_scalar_fabd_execute() {
     assert_eq!(ctx[vd(0)], 0x7FC0_0000, "FABD S (-NaN, 1) = +qNaN");
 }
 
+/// Fixed-point SCVTF/UCVTF (int × 2^-fbits), e.g. `ucvtf s3, w8, #24` (0x1E03A103).
+#[test]
+fn fp_fixed_point_scvtf_ucvtf_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    // UCVTF S3, W8, #24: 0xFF000000 (u32) / 2^24 = 255.0.
+    let ctx = fp_run1(0x1E03_A103, |c| { c[8] = 0xFF00_0000; });
+    assert_eq!(ctx[vd(3)], f32::to_bits(255.0) as u64, "UCVTF S3,W8,#24");
+    // SCVTF S0, W1, #1 (scale 63 -> 0x1E02FC20): -3 / 2 = -1.5.
+    let ctx = fp_run1(0x1E02_FC20, |c| { c[1] = 0xFFFF_FFFD; });
+    assert_eq!(ctx[vd(0)], f32::to_bits(-1.5) as u64, "SCVTF S0,W1,#1 (W sign)");
+    // SCVTF D0, X1, #16 (sf=1, ftype=01, scale 48 -> 0x9E42C020): 0x18000 / 2^16 = 1.5.
+    let ctx = fp_run1(0x9E42_C020, |c| { c[1] = 0x1_8000; });
+    assert_eq!(f64::from_bits(ctx[vd(0)]), 1.5, "SCVTF D0,X1,#16");
+    // UCVTF D0, X1, #64 (scale 0 -> 0x9E430020): 2^64-1 / 2^64 rounds to 1.0.
+    let ctx = fp_run1(0x9E43_0020, |c| { c[1] = u64::MAX; });
+    assert_eq!(f64::from_bits(ctx[vd(0)]), 1.0, "UCVTF D0,X1,#64 (u64 max)");
+}
+
 /// FCCMP: NZCV = cond(NZCV_in) ? FPCompare(n, m) : #nzcv. The top UD2 in the
 /// framework corpus. Checks both branches, all compare outcomes and unordered.
 #[test]

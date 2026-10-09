@@ -1188,7 +1188,9 @@ pub enum IrOp {
     /// X (64-bit). MUST be honored — a signed W-form convert of e.g. 0xFFFFFFFF
     /// (ARM −1) must sign-interpret the low 32 bits (→ −1.0), NOT the zero-extended
     /// 64-bit value (→ +2^32). Dropping `src_64` is a silent sign/magnitude bug.
-    FpCvtIntScalar { d: u8, src: IrValueId, to_dbl: bool, signed: bool, src_64: bool },
+    /// `fbits` != 0 is the fixed-point form (`SCVTF Sd, Wn, #fbits`): result is
+    /// int × 2^-fbits.
+    FpCvtIntScalar { d: u8, src: IrValueId, to_dbl: bool, signed: bool, src_64: bool, fbits: u8 },
     /// FCVT{N,P,M,Z,A}{S,U}: convert scalar FP reg `n` to an integer SSA value
     /// `dst` (a GPR result, consumed by a following write_reg). `from_dbl` = S vs
     /// D source; `to_64` = W vs X result; `round` selects the rounding mode.
@@ -1676,8 +1678,8 @@ impl IrOp {
             | IrOp::Isb | IrOp::Sb | IrOp::Hint { .. } => self,
             IrOp::VecDupGpr { d, src, size, q } =>
                 IrOp::VecDupGpr { d, src: vr(src), size, q },
-            IrOp::FpCvtIntScalar { d, src, to_dbl, signed, src_64 } =>
-                IrOp::FpCvtIntScalar { d, src: vr(src), to_dbl, signed, src_64 },
+            IrOp::FpCvtIntScalar { d, src, to_dbl, signed, src_64, fbits } =>
+                IrOp::FpCvtIntScalar { d, src: vr(src), to_dbl, signed, src_64, fbits },
             IrOp::VecInsGpr { d, lane, src, size } =>
                 IrOp::VecInsGpr { d, lane, src: vr(src), size },
             IrOp::TlbInval { va } => IrOp::TlbInval { va: va.map(&mut vr) },

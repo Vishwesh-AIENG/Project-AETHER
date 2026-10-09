@@ -3168,8 +3168,8 @@ impl IntLower {
             // low 32/64 bits with the rest cleared (FP-write semantics), then store
             // the 128-bit reg. Signed cvt; unsigned is exact for values < 2^63
             // (array sizes / counts — the realistic UCVTF inputs).
-            FpCvtIntScalar { d, src, to_dbl, signed, src_64 } => {
-                use crate::regalloc::x86_regs::VS1;
+            FpCvtIntScalar { d, src, to_dbl, signed, src_64, fbits } => {
+                use crate::regalloc::x86_regs::{VS0, VS1};
                 let rs = Self::src_in(alloc, enc, *src, SCRATCH0);
                 let disp = crate::runtime::context::vec_disp(*d);
                 enc.emit_pxor(VS1, VS1);
@@ -3224,6 +3224,22 @@ impl IntLower {
                     }
                     let done = enc.pos();
                     enc.patch_rel32(jmp_done, done);
+                }
+                // Fixed-point form (SCVTF/UCVTF Vd, Rn, #fbits): ARM rounds
+                // int * 2^-fbits once. Scaling by a power of two is exact here (an
+                // integer ≥ 1 times 2^-64 stays far above the subnormal range), so
+                // round(int) * 2^-fbits equals ARM's single rounding bit-for-bit.
+                if *fbits != 0 {
+                    let k = *fbits as u64;
+                    if *to_dbl {
+                        enc.emit_mov_r64_imm64(SCRATCH0, ((1023 - k) << 52) as i64);
+                        enc.emit_movq_xmm_r64(VS0, SCRATCH0);
+                        enc.emit_mulsd(VS1, VS0);
+                    } else {
+                        enc.emit_mov_r64_imm32(SCRATCH0, ((127 - k) << 23) as i32);
+                        enc.emit_movd_xmm_r32(VS0, SCRATCH0);
+                        enc.emit_mulss(VS1, VS0);
+                    }
                 }
                 enc.emit_movdqu_store(CONTEXT_REG, disp, VS1);
             }

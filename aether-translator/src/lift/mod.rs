@@ -1391,7 +1391,7 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             let size = if dbl { 8 } else { 4 };
             let v = cx.val(IrValueKind::I64);
             cx.push(IrOp::VecExtractLane { dst: v, n: rn.0, lane: 0, size, signed: false });
-            cx.push(IrOp::FpCvtIntScalar { d: rd.0, src: v, to_dbl: dbl, signed, src_64: dbl });
+            cx.push(IrOp::FpCvtIntScalar { d: rd.0, src: v, to_dbl: dbl, signed, src_64: dbl, fbits: 0 });
         }
         DecodedInsn::SimdZipTrn { rd, rn, rm, kind, size, q } => {
             // ZIP1/ZIP2/TRN1/TRN2 — interleave Vn:Vm.
@@ -2112,7 +2112,23 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                         let signed = opc == 0b010;
                         let sf = (w >> 31) & 1; // GPR width: 0=W(32) 1=X(64)
                         let gv = cx.read_reg(Reg(rn), sf == 1);
-                        cx.push(IrOp::FpCvtIntScalar { d: rd, src: gv, to_dbl: dbl, signed, src_64: sf == 1 });
+                        cx.push(IrOp::FpCvtIntScalar { d: rd, src: gv, to_dbl: dbl, signed, src_64: sf == 1, fbits: 0 });
+                        done = true;
+                    }
+                }
+                // SCVTF/UCVTF (fixed-point → FP) Sd/Dd, Wn/Xn, #fbits: bit21=0,
+                // rmode=00, opcode=01x, scale[15:10] with fbits = 64 - scale (W form
+                // needs scale >= 32). 163 distinct framework words lowered to UD2.
+                else if (w & 0x7F3E_0000) == 0x1E02_0000 {
+                    let sf = (w >> 31) & 1;
+                    let scale = (w >> 10) & 0x3F;
+                    if sf == 1 || scale >= 32 {
+                        let signed = (w >> 16) & 1 == 0;
+                        let gv = cx.read_reg(Reg(rn), sf == 1);
+                        cx.push(IrOp::FpCvtIntScalar {
+                            d: rd, src: gv, to_dbl: dbl, signed, src_64: sf == 1,
+                            fbits: (64 - scale) as u8,
+                        });
                         done = true;
                     }
                 }
