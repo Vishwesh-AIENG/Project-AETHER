@@ -3289,13 +3289,14 @@ impl IntLower {
             // Helper constant bit-patterns (exactly representable in the FP type):
             //   f32: 2^31 = 0x4F00_0000  2^32 = 0x4F80_0000  2^63 = 0x5F00_0000  2^64 = 0x5F80_0000
             //   f64: 2^31 = 0x41E0_..    2^32 = 0x41F0_..     2^63 = 0x43E0_..    2^64 = 0x43F0_..
-            FpCvtToIntScalar { dst, n, from_dbl, to_64, round, signed } => {
+            FpCvtToIntScalar { dst, n, from_dbl, to_64, round, signed, fbits } => {
                 use crate::regalloc::x86_regs::{VS0, VS1, VS2, VS3};
                 use crate::ir::ops::RoundMode;
                 let disp = crate::runtime::context::vec_disp(*n);
                 let (rd, spilled) = Self::dest_work(alloc, *dst, SCRATCH0);
                 let from_dbl = *from_dbl;
                 let to_64 = *to_64;
+                let fbits = *fbits as u64;
                 // roundss/sd imm: 0=nearest 1=-inf 2=+inf 3=trunc, |0x08 suppresses inexact.
                 // NearestTiesAway (FCVTA{S,U}) has NO x86 rounding mode — mapping it to
                 // nearest-EVEN (0x08) silently rounds every halfway case wrong (2.5→2 not
@@ -3308,11 +3309,28 @@ impl IntLower {
                     RoundMode::PosInf => Some(0x0A),
                     RoundMode::NegInf => Some(0x09),
                 };
+                // Fixed-point form: scale by 2^fbits first. A power-of-two scale is
+                // exact (overflow → ±inf saturates exactly as ARM's FPToFixed does).
+                let scale = |enc: &mut X86Encoder| {
+                    if fbits != 0 {
+                        if from_dbl {
+                            enc.emit_mov_r64_imm64(SCRATCH1, ((1023 + fbits) << 52) as i64);
+                            enc.emit_movq_xmm_r64(VS1, SCRATCH1);
+                            enc.emit_mulsd(VS0, VS1);
+                        } else {
+                            enc.emit_mov_r64_imm32(SCRATCH1, ((127 + fbits) << 23) as i32);
+                            enc.emit_movd_xmm_r32(VS1, SCRATCH1);
+                            enc.emit_mulss(VS0, VS1);
+                        }
+                    }
+                };
                 if from_dbl {
                     enc.emit_movsd_load(VS0, CONTEXT_REG, disp);
+                    scale(enc);
                     if let Some(m) = pre { enc.emit_roundsd(VS0, VS0, m); }
                 } else {
                     enc.emit_movss_load(VS0, CONTEXT_REG, disp);
+                    scale(enc);
                     if let Some(m) = pre { enc.emit_roundss(VS0, VS0, m); }
                 }
                 if ties_away {

@@ -616,13 +616,14 @@ pub fn encode(op: &IrOp, out: &mut Vec<u8>) -> Result<(), SerErr> {
             put_u8(out, u8::from(*src_64));
             put_u8(out, *fbits);
         }
-        IrOp::FpCvtToIntScalar { dst, n, from_dbl, to_64, round, signed } => {
+        IrOp::FpCvtToIntScalar { dst, n, from_dbl, to_64, round, signed, fbits } => {
             put_vid(out, *dst);
             put_u8(out, *n);
             put_u8(out, u8::from(*from_dbl));
             put_u8(out, u8::from(*to_64));
             put_round(out, *round);
             put_u8(out, u8::from(*signed));
+            put_u8(out, *fbits);
         }
         IrOp::VecExtractLane { dst, n, lane, size, signed } => {
             put_vid(out, *dst);
@@ -1233,7 +1234,7 @@ pub fn decode(bytes: &[u8]) -> Result<(IrOp, usize), SerErr> {
         0x5A => IrOp::VecMoviImm { d: r.u8()?, lo: r.u64()?, hi: r.u64()? },
         0x5B => IrOp::VecDupGpr { d: r.u8()?, src: r.vid()?, size: r.u8()?, q: r.u8()? != 0 },
         0x73 => IrOp::FpCvtIntScalar { d: r.u8()?, src: r.vid()?, to_dbl: r.u8()? != 0, signed: r.u8()? != 0, src_64: r.u8()? != 0, fbits: r.u8()? },
-        0x74 => IrOp::FpCvtToIntScalar { dst: r.vid()?, n: r.u8()?, from_dbl: r.u8()? != 0, to_64: r.u8()? != 0, round: r.round()?, signed: r.u8()? != 0 },
+        0x74 => IrOp::FpCvtToIntScalar { dst: r.vid()?, n: r.u8()?, from_dbl: r.u8()? != 0, to_64: r.u8()? != 0, round: r.round()?, signed: r.u8()? != 0, fbits: r.u8()? },
         0x5C => IrOp::VecExtractLane {
             dst: r.vid()?, n: r.u8()?, lane: r.u8()?, size: r.u8()?, signed: r.u8()? != 0,
         },

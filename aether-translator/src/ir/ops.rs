@@ -1205,7 +1205,9 @@ pub enum IrOp {
     /// `dst` (a GPR result, consumed by a following write_reg). `from_dbl` = S vs
     /// D source; `to_64` = W vs X result; `round` selects the rounding mode.
     /// Defines `dst` (mirrors `VecExtractLane`); lowered in IntLower.
-    FpCvtToIntScalar { dst: IrValueId, n: u8, from_dbl: bool, to_64: bool, round: RoundMode, signed: bool },
+    /// `fbits` != 0 is the fixed-point form (`FCVTZS Wd, Sn, #fbits`): the value
+    /// is scaled by 2^fbits (exact) before the rounding convert.
+    FpCvtToIntScalar { dst: IrValueId, n: u8, from_dbl: bool, to_64: bool, round: RoundMode, signed: bool, fbits: u8 },
 
     /// AES round step. kind: 0=AESE 1=AESD 2=AESMC 3=AESIMC 4=FusedEnc 5=FusedDec.
     CryptoAesR { kind: u8, d: u8, n: u8, m: u8 },

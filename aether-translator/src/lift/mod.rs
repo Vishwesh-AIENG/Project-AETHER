@@ -2073,7 +2073,21 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
         // ===== SIMD/FP/Crypto =====
         // M4b-6: typed NEON 3-same -> V-register-numbered ctx-template IR ops.
         SimdThreeSame { q, u, size, opcode, rm, rn, rd } => {
-            lift_simd_3same(cx, q, u, size, opcode, rd.0, rn.0, rm.0);
+            // Forms the typed lowering cannot do go to simd_rt (exact): saturating
+            // add/sub on .4s/.2d (x86 only saturates B/H), SQDMULH/SQRDMULH, and the
+            // FP FACGE/FACGT/FMAXP/FMINP pairs (no typed IR op; they were UD2).
+            let word = 0x0E20_0400
+                | ((q as u32) << 30) | ((u as u32) << 29) | ((size as u32) << 22)
+                | ((rm.0 as u32) << 16) | ((opcode as u32) << 11)
+                | ((rn.0 as u32) << 5) | rd.0 as u32;
+            let typed_gap = matches!(opcode, 0b00001 | 0b00101) && size >= 2
+                || opcode == 0b10110
+                || (u && matches!(opcode, 0b11101 | 0b11110));
+            if typed_gap && crate::runtime::simd_rt::supports(word) {
+                cx.push(IrOp::SimdInterp { word });
+            } else {
+                lift_simd_3same(cx, q, u, size, opcode, rd.0, rn.0, rm.0);
+            }
         }
 
         // Coarse fallback for SIMD/FP families not yet typed (semantics Phase B).
@@ -2176,7 +2190,25 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                         let dst = cx.val(if to_64 { IrValueKind::I64 } else { IrValueKind::I32 });
                         // opc bit0: 0=signed (FCVT..S), 1=unsigned (FCVT..U). B31.
                         let signed = opc & 1 == 0;
-                        cx.push(IrOp::FpCvtToIntScalar { dst, n: rn, from_dbl: dbl, to_64, round, signed });
+                        cx.push(IrOp::FpCvtToIntScalar { dst, n: rn, from_dbl: dbl, to_64, round, signed, fbits: 0 });
+                        cx.write_reg(Reg(rd), dst, to_64);
+                        done = true;
+                    }
+                }
+                // FCVTZS/FCVTZU (FP → fixed-point) Wd/Xd, Sn/Dn, #fbits: bit21=0,
+                // rmode=11, opcode=00x, scale[15:10], fbits = 64 - scale (W form needs
+                // scale >= 32). 43 distinct framework words lowered to UD2.
+                else if (w & 0x7F3E_0000) == 0x1E18_0000 {
+                    let sf = (w >> 31) & 1;
+                    let scale = (w >> 10) & 0x3F;
+                    if sf == 1 || scale >= 32 {
+                        use crate::ir::ops::RoundMode;
+                        let to_64 = sf == 1;
+                        let dst = cx.val(if to_64 { IrValueKind::I64 } else { IrValueKind::I32 });
+                        cx.push(IrOp::FpCvtToIntScalar {
+                            dst, n: rn, from_dbl: dbl, to_64, round: RoundMode::Zero,
+                            signed: (w >> 16) & 1 == 0, fbits: (64 - scale) as u8,
+                        });
                         cx.write_reg(Reg(rd), dst, to_64);
                         done = true;
                     }
@@ -2306,6 +2338,12 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                     cx.push(IrOp::VecMoviImm { d: rd, lo, hi: 0 });
                     done = true;
                 }
+            }
+            // Forms the simd_rt helper implements exactly (e.g. scalar FCVT to/from
+            // half precision) run there instead of the fail-loud UD2.
+            if !done && crate::runtime::simd_rt::supports(raw) {
+                cx.push(IrOp::SimdInterp { word: raw });
+                done = true;
             }
             if !done {
                 let v = cx.val(IrValueKind::I32);

@@ -8872,19 +8872,22 @@ fn fp_vector_fcvtzs_saturation() {
 }
 
 /// F1 - FRECPE.4s must NOT silently int-convert (was mis-decoded as SCVTF ->
-/// cvtdq2ps). It is not implemented, so it must fail loud (translate error or UD2).
+/// cvtdq2ps). It used to be fail-loud; it now runs through simd_rt with the exact
+/// ARMv8.0 RecipEstimate, so check the real ARM result per lane.
 #[test]
-fn fp_frecpe_is_fail_loud_not_int_convert() {
+fn fp_frecpe_is_exact_estimate_not_int_convert() {
     let _serial = serial();
-    // FRECPE v0.4s, v1.4s = 0x4EA1D820.
-    match decode_instruction(0x4EA1_D820u32) {
-        Err(_) => { /* fail-loud at decode - correct */ }
-        Ok(_) => {
-            let code = translate_straight_line(&[0x4EA1_D820u32], 0x1000);
-            assert!(code.windows(2).any(|w| w == [0x0F, 0x0B]),
-                    "FRECPE must lower to UD2, not a silent int convert");
-        }
-    }
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    // FRECPE v0.4s, v1.4s = 0x4EA1D820. Lanes [1.0, 2.0, 0.0, -inf].
+    let ctx = fp_run1(0x4EA1_D820, |c| {
+        c[vd(1)] = f32::to_bits(1.0) as u64 | ((f32::to_bits(2.0) as u64) << 32);
+        c[vd(1) + 1] = 0 | (0xFF80_0000u64 << 32);
+    });
+    assert_eq!(ctx[vd(0)] & 0xFFFF_FFFF, 0x3F7F_8000, "FRECPE(1.0) = 0.998046875");
+    assert_eq!(ctx[vd(0)] >> 32, 0x3EFF_8000, "FRECPE(2.0)");
+    assert_eq!(ctx[vd(0) + 1] & 0xFFFF_FFFF, 0x7F80_0000, "FRECPE(+0) = +inf");
+    assert_eq!(ctx[vd(0) + 1] >> 32, 0x8000_0000, "FRECPE(-inf) = -0");
 }
 
 /// F1 companion - genuine vector SCVTF.4s (signed int32 -> f32) must decode and
@@ -9163,6 +9166,31 @@ fn fp_fixed_point_scvtf_ucvtf_execute() {
     // UCVTF D0, X1, #64 (scale 0 -> 0x9E430020): 2^64-1 / 2^64 rounds to 1.0.
     let ctx = fp_run1(0x9E43_0020, |c| { c[1] = u64::MAX; });
     assert_eq!(f64::from_bits(ctx[vd(0)]), 1.0, "UCVTF D0,X1,#64 (u64 max)");
+}
+
+/// Fixed-point FCVTZS/FCVTZU to a GPR (FP × 2^fbits, truncate, saturate), e.g.
+/// `fcvtzu w8, s8, #?` (0x1E19E108) and `fcvtzs w10, s1, #20` (0x1E18B02A).
+#[test]
+fn fp_fixed_point_fcvtzs_fcvtzu_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    // FCVTZS W10, S1, #20 = 0x1E18B02A: 1.5 * 2^20 = 1572864; -2.25 -> -2359296.
+    let ctx = fp_run1(0x1E18_B02A, |c| { c[vd(1)] = f32::to_bits(1.5) as u64; });
+    assert_eq!(ctx[10], 1_572_864, "FCVTZS W10,S1,#20");
+    let ctx = fp_run1(0x1E18_B02A, |c| { c[vd(1)] = f32::to_bits(-2.25) as u64; });
+    assert_eq!(ctx[10], (-2_359_296i32) as u32 as u64, "FCVTZS negative (W zero-extends)");
+    // FCVTZU W8, S8, #8 (scale 56 -> 0x1E19E108): 300.7 * 256 = 76979.2 -> 76979.
+    let ctx = fp_run1(0x1E19_E108, |c| { c[vd(8)] = f32::to_bits(300.7) as u64; });
+    assert_eq!(ctx[8], (300.7f32 * 256.0) as u32 as u64, "FCVTZU W8,S8,#8");
+    // Saturation: 1e9 * 2^8 overflows u32 -> 0xFFFFFFFF; negative -> 0.
+    let ctx = fp_run1(0x1E19_E108, |c| { c[vd(8)] = f32::to_bits(1.0e9) as u64; });
+    assert_eq!(ctx[8], 0xFFFF_FFFF, "FCVTZU saturates");
+    let ctx = fp_run1(0x1E19_E108, |c| { c[vd(8)] = f32::to_bits(-1.0) as u64; });
+    assert_eq!(ctx[8], 0, "FCVTZU negative -> 0");
+    // FCVTZS X0, D1, #32 (sf=1, ftype=01, scale 32 -> 0x9E588020): 0.5 * 2^32.
+    let ctx = fp_run1(0x9E58_8020, |c| { c[vd(1)] = 0.5f64.to_bits(); });
+    assert_eq!(ctx[0], 1u64 << 31, "FCVTZS X0,D1,#32");
 }
 
 /// FCCMP: NZCV = cond(NZCV_in) ? FPCompare(n, m) : #nzcv. The top UD2 in the

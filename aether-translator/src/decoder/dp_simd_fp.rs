@@ -856,6 +856,11 @@ fn decode_simd_fp_2reg_misc(word: u32) -> Result<DecodedInsn, DecodeErr> {
         _ => None,
     };
     if let Some(to_fp) = cvt {
+        // lower_veccvtfp covers signed 32-bit lanes only; unsigned and .2d forms
+        // run in the simd_rt helper (exact) instead of its fail-loud UD2.
+        if u == 1 || dbl {
+            return Ok(DecodedInsn::AdvSimd { raw: word });
+        }
         return Ok(DecodedInsn::SimdCvtFp {
             rd: VReg(rd),
             rn: VReg(rn),
