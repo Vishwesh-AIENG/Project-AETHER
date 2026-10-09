@@ -217,6 +217,17 @@ pub fn decode(word: u32) -> Result<DecodedInsn, DecodeErr> {
             dbl: (word >> 22) & 1 == 1,
         });
     }
+    // Scalar SIMD FABD Sd,Sn,Sm / Dd,Dn,Dm — the most common decode gap in the
+    // Android framework corpus (231 distinct words; vector FABD was already handled).
+    // Frame: 01 1 11110 1 sz 1 Rm 11010 1 Rn Rd; leave sz(22) free.
+    if (word & 0xFFA0_FC00) == 0x7EA0_D400 {
+        return Ok(DecodedInsn::SimdScalarFabd {
+            rd: VReg((word & 0x1F) as u8),
+            rn: VReg(((word >> 5) & 0x1F) as u8),
+            rm: VReg(((word >> 16) & 0x1F) as u8),
+            dbl: (word >> 22) & 1 == 1,
+        });
+    }
     // FP 2reg-misc — FABS/FNEG/FSQRT + FP compare-vs-#0 (FCMEQ/FCMGT/FCMGE/FCMLT/
     // FCMLE) + FCVTZS/FCVTZU + FRECPE/FRSQRTE(reserved). These have bit23=1 (FP
     // block) AND opcode[3]=1 (bit15). The integer 2reg-misc mask below pins bit15=0

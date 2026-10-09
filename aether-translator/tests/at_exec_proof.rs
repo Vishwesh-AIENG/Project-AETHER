@@ -8990,6 +8990,58 @@ fn simd_scalar_scvtf_ucvtf_execute() {
     assert_eq!(ctx[vd(0)], f32::to_bits(4294967296.0) as u64, "UCVTF S0,S1 (0xFFFFFFFE)");
 }
 
+/// Scalar SIMD FABD (`|n - m|`): the top decode gap in the framework corpus.
+#[test]
+fn simd_scalar_fabd_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    // FABD S0, S1, S2 = 0x7EA2D420: |1.5 - 4.0| = 2.5; upper bits of V0 zeroed.
+    let ctx = fp_run1(0x7EA2_D420, |c| {
+        c[vd(1)] = f32::to_bits(1.5) as u64;
+        c[vd(2)] = f32::to_bits(4.0) as u64;
+        c[vd(0)] = !0; c[vd(0) + 1] = !0;
+    });
+    assert_eq!(ctx[vd(0)], f32::to_bits(2.5) as u64, "FABD S (|1.5-4.0|)");
+    assert_eq!(ctx[vd(0) + 1], 0, "scalar FABD zeroes the upper 64");
+    // FABD D0, D1, D2 = 0x7EE2D420: |-3 - 5| = 8.
+    let ctx = fp_run1(0x7EE2_D420, |c| {
+        c[vd(1)] = (-3.0f64).to_bits();
+        c[vd(2)] = 5.0f64.to_bits();
+    });
+    assert_eq!(f64::from_bits(ctx[vd(0)]), 8.0, "FABD D (|-3-5|)");
+    // NaN: FPSub returns the quieted -NaN operand, FPAbs clears its sign -> +qNaN.
+    let ctx = fp_run1(0x7EA2_D420, |c| {
+        c[vd(1)] = 0xFFC0_0000; // -qNaN
+        c[vd(2)] = f32::to_bits(1.0) as u64;
+    });
+    assert_eq!(ctx[vd(0)], 0x7FC0_0000, "FABD S (-NaN, 1) = +qNaN");
+}
+
+/// FCCMP: NZCV = cond(NZCV_in) ? FPCompare(n, m) : #nzcv. The top UD2 in the
+/// framework corpus. Checks both branches, all compare outcomes and unordered.
+#[test]
+fn fp_fccmp_execute() {
+    let _serial = serial();
+    use aether_translator::runtime::context::vec_disp;
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    // FCCMP S1, S2, #0b0010, EQ = 0x1E220422 (D form: 0x1E620422).
+    let run = |word: u32, nzcv_in: u64, a: u64, b: u64| -> u64 {
+        let ctx = fp_run1(word, |c| { c[NZCV_SLOT] = nzcv_in; c[vd(1)] = a; c[vd(2)] = b; });
+        ctx[NZCV_SLOT] & 0xF000_0000
+    };
+    let s = |x: f32| f32::to_bits(x) as u64;
+    let z = 1u64 << 30;
+    assert_eq!(run(0x1E22_0422, z, s(1.0), s(1.0)), 0x6000_0000, "EQ true, 1==1 -> Z,C");
+    assert_eq!(run(0x1E22_0422, z, s(1.0), s(2.0)), 0x8000_0000, "EQ true, 1<2 -> N");
+    assert_eq!(run(0x1E22_0422, z, s(3.0), s(2.0)), 0x2000_0000, "EQ true, 3>2 -> C");
+    assert_eq!(run(0x1E22_0422, z, 0x7FC0_0000, s(2.0)), 0x3000_0000, "EQ true, NaN -> C,V");
+    assert_eq!(run(0x1E22_0422, 0, s(1.0), s(1.0)), 0x2000_0000, "EQ false -> #nzcv (C)");
+    let d = |x: f64| x.to_bits();
+    assert_eq!(run(0x1E62_0422, z, d(-1.0), d(1.0)), 0x8000_0000, "D form, EQ true, -1<1 -> N");
+    assert_eq!(run(0x1E62_0422, 0, d(-1.0), d(1.0)), 0x2000_0000, "D form, EQ false -> #nzcv");
+}
+
 /// FRINTA keeps the sign of a zero result: x in (-0.5, -0] rounds to -0.0, not +0.0.
 /// The ties-away emulation adds a masked addend that is +0.0 when |x - trunc(x)| < 0.5,
 /// and -0.0 + +0.0 = +0.0 under round-to-nearest. Found by the 2026-10-08 oracle

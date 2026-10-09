@@ -1377,6 +1377,13 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // SCVTF/UCVTF/FCVTZS/FCVTZU (vector) — int↔FP convert.
             cx.push(IrOp::VecCvtFp { to_fp, signed, dbl, q, d: rd.0, n: rn.0 });
         }
+        DecodedInsn::SimdScalarFabd { rd, rn, rm, dbl } => {
+            // FABD = FPAbs(FPSub(n, m)) per the ARM pseudocode, so the scalar
+            // FSUB then FABS ops give the exact result (incl. a NaN's cleared sign).
+            use crate::ir::ops::{FpBinOp, FpUnOp};
+            cx.push(IrOp::FpBin { op: FpBinOp::Sub, dbl, d: rd.0, n: rn.0, m: rm.0 });
+            cx.push(IrOp::FpUn { op: FpUnOp::Abs, dbl, d: rd.0, n: rd.0 });
+        }
         DecodedInsn::SimdScalarCvtIntFp { rd, rn, signed, dbl } => {
             // Scalar SCVTF/UCVTF Vd,Vn = read the low integer element (as FMOV Xd,Dn
             // does), then the same convert as SCVTF/UCVTF Vd,Xn. Integer width ==
@@ -2186,6 +2193,30 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 if !done && (w & 0x5F20_0C00) == 0x1E20_0C00 {
                     let cond = crate::decoder::Cond::from_bits(((w >> 12) & 0xF) as u8);
                     cx.push(IrOp::FpCsel { d: rd, n: rn, m: rm, cond, dbl });
+                    done = true;
+                }
+                // FCCMP/FCCMPE Sn,Sm,#nzcv,cond — bits[11:10]=01:
+                //   NZCV = cond(NZCV_in) ? FPCompare(Sn, Sm) : #nzcv
+                // (FCCMPE only differs in signalling quiet NaNs; same flags). The
+                // most common UD2 in the framework corpus (295 distinct words).
+                // Built from existing ops with the Cbz/Tbz NZCV-bracketing idiom:
+                // save NZCV, compare (clobbers NZCV), capture the compare's NZCV,
+                // restore the input NZCV so Csel evaluates `cond` on it, then select
+                // compare-flags vs #nzcv and write the winner back.
+                if !done && (w & 0x5F20_0C00) == 0x1E20_0400 {
+                    use crate::decoder::sysreg::SysReg;
+                    let cond = crate::decoder::Cond::from_bits(((w >> 12) & 0xF) as u8);
+                    let v_in = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Mrs { dst: v_in, reg: SysReg::NzcvEl0 });
+                    cx.push(IrOp::FpCmpN { n: rn, m: rm, dbl, zero: false });
+                    let v_cmp = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Mrs { dst: v_cmp, reg: SysReg::NzcvEl0 });
+                    cx.push(IrOp::Msr { reg: SysReg::NzcvEl0, val: v_in });
+                    let v_imm = cx.const_i64(((w & 0xF) as i64) << 28);
+                    let f = cx.flags();
+                    let v_res = cx.val(IrValueKind::I64);
+                    cx.push(IrOp::Csel { dst: v_res, a: v_cmp, b: v_imm, cond, flags: f, variant: 0 });
+                    cx.push(IrOp::Msr { reg: SysReg::NzcvEl0, val: v_res });
                     done = true;
                 }
                 // FP data-processing (3 source): FMADD/FMSUB/FNMADD/FNMSUB

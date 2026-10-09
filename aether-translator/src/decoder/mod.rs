@@ -822,6 +822,14 @@ pub enum DecodedInsn {
         signed: bool,
         dbl: bool,
     },
+    /// Scalar SIMD `FABD Sd,Sn,Sm` / `Dd,Dn,Dm` (scalar 3-same, U=1 a=1 opcode 11010):
+    /// `|Sn - Sm|`, defined by ARM as FPAbs(FPSub(n, m)).
+    SimdScalarFabd {
+        rd: VReg,
+        rn: VReg,
+        rm: VReg,
+        dbl: bool,
+    },
     /// NEON `ZIP1`/`ZIP2`/`TRN1`/`TRN2` permute. `kind`: 0=ZIP1 1=ZIP2 2=TRN1
     /// 3=TRN2. `size`: log2 element bytes. Interleaves the lanes of V`rn`:V`rm`.
     /// RGBA channel interleave + matrix transpose (graphics).
