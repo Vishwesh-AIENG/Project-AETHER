@@ -6752,13 +6752,22 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                 // halting the whole system. translate_block only fails when the
                 // FIRST word of the block fails (later bad words end the block
                 // early), so fpc == pc and ELR_EL1 points at the offending word.
-                // Kernel-side (EL1) gaps still halt: they are DBT bugs to fix.
+                // At EL1 the same injection makes the kernel Oops and kill the current
+                // task (a panic only if it hits a fatal context) — also not a halt, so
+                // one boot can run on and record EVERY gap. Each event prints one
+                // greppable `[gap]` line: the full fix list is `grep '^\[gap\]'`.
                 // The 2026-10-08 WHPX boot halted here post-zygote on one such word.
-                if cur_el == 0 && fpc == pc && (fkind == 1 || fkind == 2) {
-                    static mut EL0_UNDEF_TF: u32 = 0;
-                    *ptr::addr_of_mut!(EL0_UNDEF_TF) = (*ptr::addr_of!(EL0_UNDEF_TF)).saturating_add(1);
-                    dual_puts(b"[dbt]   EL0 TranslateFail -> inject undef (SIGILL to process) count=");
-                    dual_puthex64(*ptr::addr_of!(EL0_UNDEF_TF) as u64);
+                if fpc == pc && (fkind == 1 || fkind == 2) {
+                    static mut UNDEF_TF: u32 = 0;
+                    *ptr::addr_of_mut!(UNDEF_TF) = (*ptr::addr_of!(UNDEF_TF)).saturating_add(1);
+                    dual_puts(b"[gap] kind=TRANSLATE el=");
+                    dual_puthex64(cur_el);
+                    dual_puts(b" pc=");
+                    dual_puthex64(fpc);
+                    dual_puts(b" word=");
+                    dual_puthex64(fw as u64);
+                    dual_puts(b" n=");
+                    dual_puthex64(*ptr::addr_of!(UNDEF_TF) as u64);
                     dual_puts(b"\n");
                     let ctx_slice: &mut [u64] = &mut *ptr::addr_of_mut!(NPF_GUEST_CTX);
                     aether_translator::runtime::exceptions::inject(
@@ -7024,11 +7033,40 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                 // do_undefinstr → die or fixup; in the worst case it
                 // kernel-panics, but at least subsequent boot still runs
                 // (the dispatcher's BRK path then catches the panic
-                // BRK and ERETs cleanly). Bounded by an UNSAFE counter so
-                // a true runaway loop still halts.
+                // BRK and ERETs cleanly). The counter only bounds the verbose dump
+                // below (first 32); every hit is injected and logged, never halted.
                 static mut UNSAFE_COUNT: u32 = 0;
                 let cur_unsafe = *ptr::addr_of_mut!(UNSAFE_COUNT);
                 *ptr::addr_of_mut!(UNSAFE_COUNT) = cur_unsafe.saturating_add(1);
+                // One greppable `[gap]` line per hit naming the offending op (the
+                // fix list is `grep '^\[gap\]'`). SPILL = register pressure in the
+                // lowering, UNIMPL = missing lowering for that ARM op.
+                {
+                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
+                    const SR0: usize = aether_translator::runtime::context::SYSREG_SLOT0;
+                    let cur_el = (g[SR0 + 42] >> 2) & 0b11;
+                    let (op_pc, reason) = aether_translator::backend::encode::unsafe_op_info();
+                    dual_puts(b"[gap] kind=");
+                    if reason == aether_translator::backend::encode::UNSAFE_REASON_SPILL {
+                        dual_puts(b"SPILL");
+                    } else {
+                        dual_puts(b"UNIMPL");
+                    }
+                    dual_puts(b" el=");
+                    dual_puthex64(cur_el);
+                    dual_puts(b" pc=");
+                    dual_puthex64(op_pc);
+                    dual_puts(b" word=");
+                    match if op_pc != 0 { npf_fetch_guest_pa(op_pc) } else { None } {
+                        Some(gpa) => dual_puthex64(core::ptr::read_volatile(gpa as *const u32) as u64),
+                        None => dual_puts(b"<none>"),
+                    }
+                    dual_puts(b" block=");
+                    dual_puthex64(pc);
+                    dual_puts(b" n=");
+                    dual_puthex64(cur_unsafe as u64);
+                    dual_puts(b"\n");
+                }
                 if cur_unsafe < 32 {
                     dual_puts(b"[dbt] block UNSAFE -> inject undef at pc=");
                     dual_puthex64(pc);
@@ -7179,34 +7217,19 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                     );
                     continue;
                 }
-                dual_puts(b"[dbt] block UNSAFE storm (32 hits) -- halting pc=");
-                dual_puthex64(pc);
-                dual_puts(b" iter=");
-                dual_puthex64(iter);
-                dual_puts(b"\n");
-                // EL0-undef capture (2026-06-30): even past the inject cap, pin the
-                // halting block's EL + ARM word so a late (post-apexd, EL0) undef
-                // that exhausted the cap is still identified rather than silently
-                // halting on a stale storm. Mirrors the in-cap capture above.
-                {
-                    let g = &*ptr::addr_of!(NPF_GUEST_CTX);
-                    const SR0: usize = aether_translator::runtime::context::SYSREG_SLOT0;
-                    let cur_el = (g[SR0 + 42] >> 2) & 0b11;
-                    dual_puts(b"[dbt]   EL=");
-                    dual_puthex64(cur_el);
-                    dual_puts(b" (0=EL0/userspace 1=EL1/kernel) word@pc=");
-                    if let Some(gpa) = npf_fetch_guest_pa(pc) {
-                        dual_puthex64(core::ptr::read_volatile(gpa as *const u32) as u64);
-                    } else {
-                        dual_puts(b"<fetch-flt>");
-                    }
-                    dual_puts(b"\n");
-                }
-                exit_code = 2;
-                sum_pc = pc;
-                sum_a = insn0 as u64;
-                sum_iter = iter;
-                break;
+                // Past the verbose-dump budget: no longer halt (the old 32-hit
+                // "UNSAFE storm" stop). The `[gap]` line was already printed above;
+                // inject the undef and keep booting so one run records every gap.
+                // A process that keeps hitting it dies of SIGILL.
+                let ctx_slice: &mut [u64] = &mut *ptr::addr_of_mut!(NPF_GUEST_CTX);
+                aether_translator::runtime::exceptions::inject(
+                    ctx_slice,
+                    aether_translator::runtime::exceptions::ExceptionKind::Sync,
+                    1u64 << 25, // EC=0 (Unknown), IL=1
+                    0,
+                    false,
+                );
+                continue;
             }
 
             // First-fault tracker: log block PC + far/esr the first time the
