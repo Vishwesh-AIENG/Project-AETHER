@@ -16,6 +16,11 @@ use crate::regalloc::x86_regs::{ALLOCATABLE_GPRS, ALLOCATABLE_XMMS};
 use super::encode::X86Encoder;
 
 // x86 condition codes (low nibble of Jcc / SETcc / CMOVcc).
+/// ch66: inline software-TLB fast path on/off (runtime switch for bisecting a
+/// suspected miscompile without a rebuild). Default on.
+pub static INLINE_TLB_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
 pub mod cc {
     pub const O:   u8 = 0x0; // overflow
     pub const NO:  u8 = 0x1;
@@ -388,7 +393,138 @@ impl IntLower {
         enc.emit_ret();
     }
 
+    /// ch66 inline software-TLB fast path, emitted at the top of the MMU helper
+    /// calls. Replicates `xlate_page`'s hit test exactly (MMU on, no page cross,
+    /// tag == page, EGEN == GEN, ASID == live TTBR for the VA half, writable for
+    /// a write, no pending cross-page scatter). MMIO PAs are never cached, so a
+    /// hit always means plain RAM and a direct host deref is safe. On a hit it
+    /// leaves the host PA in RAX (and, for a store, performs the sized store from
+    /// `store_val`) then emits a `jmp rel32` whose patch offset is returned — the
+    /// caller patches it to the point AFTER the slow call (success path, RAX =
+    /// host PA). On any miss it falls through to the slow call. Clobbers only
+    /// RAX/RCX and EL2-private ctx scratch slots 31..34; `addr_reg` and
+    /// `store_val` (both live for the slow path) are preserved.
+    fn emit_inline_tlb_probe(
+        enc: &mut X86Encoder,
+        addr_reg: u8,
+        is_write: bool,
+        size: i32,
+        store_val: Option<u8>,
+    ) -> Option<usize> {
+        use core::sync::atomic::Ordering;
+        if !INLINE_TLB_ENABLED.load(Ordering::Relaxed) {
+            return None;
+        }
+        const RAX: u8 = 0;
+        const RCX: u8 = 1;
+        const R15: u8 = CONTEXT_REG;
+        // ctx sysreg slots: 0=SCTLR, 1=TTBR0, 2=TTBR1 (bytes 0x328/0x330/0x338);
+        // 31..34 = EL2-private inline-probe scratch (unused by the sysreg map).
+        const SCTLR: i32 = 0x328;
+        const TTBR0: i32 = 0x330;
+        const TTBR1: i32 = 0x338;
+        const SCR_VA: i32 = 0x328 + 31 * 8;
+        const SCR_PAGE: i32 = 0x328 + 32 * 8;
+        const SCR_IDX8: i32 = 0x328 + 33 * 8;
+        const SCR_SPACE: i32 = 0x328 + 34 * 8;
+        let a = crate::runtime::mmu::tlb_fast_addrs();
+        let mask = crate::runtime::mmu::TLB_ENTRIES_MASK as i32;
+        let mut miss: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+
+        // MMU on? (SCTLR.M = bit 0). Off => flat path only, handled by the call.
+        enc.emit_mov_r64_mem(RCX, R15, SCTLR);
+        enc.emit_and_r64_imm32(RCX, 1);
+        miss.push(enc.emit_jcc_rel32(cc::Z));
+        // Pending cross-page scatter? Let the helper flush it first.
+        enc.emit_mov_r64_imm64(RAX, a.scatter_pending as i64);
+        enc.emit_movzx_r64_mem8(RCX, RAX, 0);
+        enc.emit_test_rr64(RCX, RCX);
+        miss.push(enc.emit_jcc_rel32(cc::NZ));
+        // Stash VA (reloaded for the space select + in-page offset).
+        enc.emit_mov_mem_r64(R15, SCR_VA, addr_reg);
+        // Cross-page guard: (va & 0xFFF) > 0x1000 - size => the access straddles
+        // two pages; the helper's bounce buffer handles it.
+        enc.emit_mov_rr64(RAX, addr_reg);
+        enc.emit_and_r64_imm32(RAX, 0xFFF);
+        enc.emit_cmp_r64_imm32(RAX, 0x1000 - size);
+        miss.push(enc.emit_jcc_rel32(cc::NBE));
+        // page = va >> 12 ; idx8 = (page & mask) << 3
+        enc.emit_mov_rr64(RCX, addr_reg);
+        enc.emit_shr_r64_imm8(RCX, 12);
+        enc.emit_mov_mem_r64(R15, SCR_PAGE, RCX);
+        enc.emit_mov_rr64(RAX, RCX);
+        enc.emit_and_r64_imm32(RAX, mask);
+        enc.emit_shl_r64_imm8(RAX, 3);
+        enc.emit_mov_mem_r64(R15, SCR_IDX8, RAX);
+        // tag: TLB_TAG[idx] == page
+        enc.emit_mov_r64_imm64(RAX, a.tag as i64);
+        enc.emit_mov_r64_mem(RCX, R15, SCR_IDX8);
+        enc.emit_add_rr64(RAX, RCX);
+        enc.emit_mov_r64_mem(RCX, RAX, 0);
+        enc.emit_mov_r64_mem(RAX, R15, SCR_PAGE);
+        enc.emit_cmp_rr64(RCX, RAX);
+        miss.push(enc.emit_jcc_rel32(cc::NZ));
+        // generation: TLB_EGEN[idx] == TLB_GEN
+        enc.emit_mov_r64_imm64(RAX, a.egen as i64);
+        enc.emit_mov_r64_mem(RCX, R15, SCR_IDX8);
+        enc.emit_add_rr64(RAX, RCX);
+        enc.emit_mov_r64_mem(RCX, RAX, 0);
+        enc.emit_mov_r64_imm64(RAX, a.gen_ptr as i64);
+        enc.emit_mov_r64_mem(RAX, RAX, 0);
+        enc.emit_cmp_rr64(RCX, RAX);
+        miss.push(enc.emit_jcc_rel32(cc::NZ));
+        // space = bit55(va) ? TTBR1 : TTBR0 ; TLB_ASID[idx] == space
+        enc.emit_mov_r64_mem(RCX, R15, TTBR0);
+        enc.emit_bt_mem(R15, SCR_VA, 55);
+        let lo = enc.emit_jcc_rel32(cc::NB); // CF=0 (low VA) -> keep TTBR0
+        enc.emit_mov_r64_mem(RCX, R15, TTBR1);
+        let lo_end = enc.pos();
+        enc.patch_rel32(lo, lo_end);
+        enc.emit_mov_mem_r64(R15, SCR_SPACE, RCX);
+        enc.emit_mov_r64_imm64(RAX, a.asid as i64);
+        enc.emit_mov_r64_mem(RCX, R15, SCR_IDX8);
+        enc.emit_add_rr64(RAX, RCX);
+        enc.emit_mov_r64_mem(RCX, RAX, 0);
+        enc.emit_mov_r64_mem(RAX, R15, SCR_SPACE);
+        enc.emit_cmp_rr64(RCX, RAX);
+        miss.push(enc.emit_jcc_rel32(cc::NZ));
+        // writable? (store only) TLB_W[idx] (byte) != 0
+        if is_write {
+            enc.emit_mov_r64_imm64(RAX, a.w as i64);
+            enc.emit_mov_r64_mem(RCX, R15, SCR_PAGE);
+            enc.emit_and_r64_imm32(RCX, mask);
+            enc.emit_add_rr64(RAX, RCX);
+            enc.emit_movzx_r64_mem8(RCX, RAX, 0);
+            enc.emit_test_rr64(RCX, RCX);
+            miss.push(enc.emit_jcc_rel32(cc::Z));
+        }
+        // HIT: host PA = TLB_PA[idx] | (va & 0xFFF)
+        enc.emit_mov_r64_imm64(RAX, a.pa as i64);
+        enc.emit_mov_r64_mem(RCX, R15, SCR_IDX8);
+        enc.emit_add_rr64(RAX, RCX);
+        enc.emit_mov_r64_mem(RAX, RAX, 0); // RAX = page-base host PA
+        enc.emit_mov_r64_mem(RCX, R15, SCR_VA);
+        enc.emit_and_r64_imm32(RCX, 0xFFF);
+        enc.emit_add_rr64(RAX, RCX); // low 12 bits were 0 -> add == or
+        if let Some(val) = store_val {
+            match size {
+                1 => enc.emit_mov_mem_r8(RAX, 0, val),
+                2 => enc.emit_mov_mem_r16(RAX, 0, val),
+                4 => enc.emit_mov_mem_r32(RAX, 0, val),
+                _ => enc.emit_mov_mem_r64(RAX, 0, val),
+            }
+        }
+        let hit_jmp = enc.emit_jmp_rel32();
+        // MISS label = fall-through into the slow call below.
+        let miss_pos = enc.pos();
+        for j in miss {
+            enc.patch_rel32(j, miss_pos);
+        }
+        Some(hit_jmp)
+    }
+
     fn emit_mmu_xlate_call(enc: &mut X86Encoder, addr_reg: u8, is_write: bool, size: i32) {
+        let hit = Self::emit_inline_tlb_probe(enc, addr_reg, is_write, size, None);
         const RAX: u8 = 0;
         const RCX: u8 = 1;
         const RDX: u8 = 2;
@@ -434,6 +570,11 @@ impl IntLower {
         //    and every block-live GPR is back to its pre-call value.
         for &r in Self::MMU_SAVE_REGS.iter().rev() {
             enc.emit_pop_r64(r);
+        }
+        // ch66: inline-TLB hit lands here with RAX already = host PA.
+        if let Some(j) = hit {
+            let end = enc.pos();
+            enc.patch_rel32(j, end);
         }
     }
 
@@ -518,6 +659,7 @@ impl IntLower {
     /// (including `R8`/`R9`). Both MUST be real allocated GPRs (the Store arm
     /// fails loud / UD2 on a spilled operand before calling this).
     fn emit_mmu_store_call(enc: &mut X86Encoder, addr_reg: u8, val_reg: u8, size: i32) {
+        let hit = Self::emit_inline_tlb_probe(enc, addr_reg, true, size, Some(val_reg));
         const RAX: u8 = 0;
         const RCX: u8 = 1;
         const RDX: u8 = 2;
@@ -552,6 +694,11 @@ impl IntLower {
         //    proceeds to its next op (no deref).
         for &r in Self::MMU_SAVE_REGS.iter().rev() {
             enc.emit_pop_r64(r);
+        }
+        // ch66: inline-TLB hit lands here, having already performed the store.
+        if let Some(j) = hit {
+            let end = enc.pos();
+            enc.patch_rel32(j, end);
         }
     }
 

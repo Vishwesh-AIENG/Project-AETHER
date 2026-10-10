@@ -396,6 +396,29 @@ impl X86Encoder {
         self.modrm_mem(src, base, disp);
     }
 
+    /// MOV [base + disp], r32 (stores the low 32 bits).
+    pub fn emit_mov_mem_r32(&mut self, base: u8, disp: i32, src: u8) {
+        self.rex_opt(false, src, 0, base);
+        self.buf.push(0x89);
+        self.modrm_mem(src, base, disp);
+    }
+
+    /// MOV [base + disp], r16 (stores the low 16 bits).
+    pub fn emit_mov_mem_r16(&mut self, base: u8, disp: i32, src: u8) {
+        self.buf.push(0x66);
+        self.rex_opt(false, src, 0, base);
+        self.buf.push(0x89);
+        self.modrm_mem(src, base, disp);
+    }
+
+    /// MOV [base + disp], r8 (stores the low 8 bits). REX is always emitted so
+    /// SIL/DIL/SPL/BPL select the low byte (not AH/CH/DH/BH).
+    pub fn emit_mov_mem_r8(&mut self, base: u8, disp: i32, src: u8) {
+        self.rex_always(false, src, 0, base);
+        self.buf.push(0x88);
+        self.modrm_mem(src, base, disp);
+    }
+
     /// MOV r8, [base + disp]  (zero-extended to 64-bit via MOVZX).
     pub fn emit_movzx_r64_mem8(&mut self, dst: u8, base: u8, disp: i32) {
         self.rex_opt(true, dst, 0, base);

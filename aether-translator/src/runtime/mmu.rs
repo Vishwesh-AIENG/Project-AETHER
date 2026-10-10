@@ -1169,6 +1169,34 @@ fn finish_leaf(
 // instead of a loop over every slot (flushes are frequent: every TLBI).
 const TLB_ENTRIES: usize = 4096;
 const TLB_EMPTY: u64 = u64::MAX;
+/// ch66 inline-TLB index mask (entries is a power of two).
+pub const TLB_ENTRIES_MASK: u64 = (TLB_ENTRIES as u64) - 1;
+
+/// ch66: raw addresses of the software-TLB arrays + the generation counter and
+/// the scatter-pending flag, so `IntLower` can emit an inline fast-path probe
+/// that replicates `xlate_page`'s hit conditions exactly. All are EL2-private
+/// statics with a fixed address for the life of the process.
+pub struct TlbFastAddrs {
+    pub tag: u64,
+    pub pa: u64,
+    pub w: u64,
+    pub asid: u64,
+    pub egen: u64,
+    pub gen_ptr: u64,
+    pub scatter_pending: u64,
+}
+pub fn tlb_fast_addrs() -> TlbFastAddrs {
+    // Taking the address of a static performs no access, so this is safe.
+    TlbFastAddrs {
+        tag: core::ptr::addr_of!(TLB_TAG) as u64,
+        pa: core::ptr::addr_of!(TLB_PA) as u64,
+        w: core::ptr::addr_of!(TLB_W) as u64,
+        asid: core::ptr::addr_of!(TLB_ASID) as u64,
+        egen: core::ptr::addr_of!(TLB_EGEN) as u64,
+        gen_ptr: core::ptr::addr_of!(TLB_GEN) as u64,
+        scatter_pending: core::ptr::addr_of!(SCATTER_PENDING) as u64,
+    }
+}
 
 static mut TLB_TAG: [u64; TLB_ENTRIES] = [TLB_EMPTY; TLB_ENTRIES];
 static mut TLB_PA: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
@@ -1395,8 +1423,10 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
             // would poison KERNEL_PGD_SNAPSHOT. The snapshot is set ONLY from the
             // Err-branch differential resolve below, which PROVES tramp↔swapper.
             // Cache the walked translation (high VAs only when TLB_CACHE_HIGH)
-            // — see top-of-fn rationale.
-            if cache_ok {
+            // — see top-of-fn rationale. ch66: NEVER cache an emulated-MMIO PA:
+            // the inline-TLB fast path derefs a hit directly, so a cached MMIO
+            // entry would bypass device emulation. MMIO stays helper-only.
+            if cache_ok && !is_mmio(pa & !0xFFF) {
                 // SAFETY: EL2-private, single-vCPU.
                 unsafe {
                     *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
@@ -1436,7 +1466,7 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
                 if in_window(pa) {
                     // SAFETY: EL2-private, single-vCPU. Don't cache TTBR1.
                     unsafe {
-                        if !va_high {
+                        if !va_high && !is_mmio(pa & !0xFFF) {
                             *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
                             *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
                             *core::ptr::addr_of_mut!(TLB_W[idx]) = true;

@@ -9578,3 +9578,74 @@ fn jump_cache_bl_ret_loop_executes() {
     let (x0, _) = run(&mut rt);
     assert_eq!(x0, 150, "exact after invalidate_all (jump cache cleared)");
 }
+
+/// ch66 INLINE TLB: with the MMU on, the second access to a page executes the
+/// inline software-TLB fast path (the first fills the TLB via the helper). This
+/// proves the inline path (a) returns the correct host PA on a hit, (b) honours
+/// read-only permission on a store, and (c) goes stale after a TLBI so a remap
+/// is seen — i.e. it is behaviourally identical to the helper.
+#[test]
+fn inline_tlb_hit_store_perm_and_tlbi_staleness() {
+    let _serial = serial();
+    use aether_translator::runtime::mmu::aether_mmu_tlbi_va;
+    let va = 0x0000_0055_0000_0000u64;
+    let (mut ctx, _l0, l3, l3_slot, data_a, data_b) = build_remappable_ctx(va);
+    // SAFETY: both data pages are in the mapped arena window.
+    unsafe {
+        core::ptr::write_volatile(data_a as *mut u64, 0xA1A1_A1A1_0000_0000);
+        core::ptr::write_volatile(data_b as *mut u64, 0);
+    }
+    let pend = SYSREG_SLOT0 + aether_translator::runtime::mmu::SLOT_PEND_PENDING;
+
+    // (1) Two loads of the same VA: the 2nd takes the inline hit path; both read
+    // dataA. LDR X1,[X0] twice in one block.
+    let ld2 = translate_straight_line(&[0xF940_0001u32, 0xF940_0001u32], 0x8000);
+    let e = winexec::make_executable(&ld2);
+    ctx[0] = va;
+    // SAFETY: RWX RET-terminated block; MMU-on ctx; both loads walk/hit the TLB.
+    unsafe { enter_block(e, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 0xA1A1_A1A1_0000_0000, "inline-hit load reads the correct PA");
+    assert_eq!(ctx[pend], 0, "no fault on the mapped load");
+
+    // (2) Inline-hit STORE to the writable page: STR X2,[X0] (TLB already warm).
+    let st = translate_straight_line(&[0xF900_0002u32], 0x8100);
+    let e = winexec::make_executable(&st);
+    ctx[0] = va;
+    ctx[2] = 0xDEAD_BEEF_0000_0001;
+    // SAFETY: as above.
+    unsafe { enter_block(e, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[pend], 0, "inline-hit store to a writable page must not fault");
+    // SAFETY: data_a is in-arena.
+    assert_eq!(unsafe { core::ptr::read_volatile(data_a as *const u64) },
+               0xDEAD_BEEF_0000_0001, "inline-hit store wrote the correct PA");
+
+    // (3) Remap the leaf READ-ONLY, TLBI the VA (generation bump). A fresh load
+    // warms a read-only TLB entry (TLB_W=false); a following STORE must then
+    // MISS the inline fast path (not writable) and fault in the helper.
+    put_desc(l3, l3_slot, leaf_4k(data_a, true)); // now read-only
+    aether_mmu_tlbi_va(va);
+    let ld_then_st = translate_straight_line(&[0xF940_0001u32, 0xF900_0002u32], 0x8200);
+    let e = winexec::make_executable(&ld_then_st);
+    ctx[0] = va;
+    ctx[1] = 0;
+    ctx[2] = 0x1234;
+    ctx[pend] = 0;
+    // SAFETY: as above.
+    unsafe { enter_block(e, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 0xDEAD_BEEF_0000_0001, "post-TLBI load re-walks RO page, reads prior store");
+    assert_eq!(ctx[pend], 1, "store to a read-only page must fault (inline respects TLB_W)");
+
+    // (4) TLBI + remap to dataB proves the inline cache is not stale across TLBI.
+    put_desc(l3, l3_slot, leaf_4k(data_b, false));
+    aether_mmu_tlbi_va(va);
+    // SAFETY: data_b in-arena.
+    unsafe { core::ptr::write_volatile(data_b as *mut u64, 0xB2B2_0000_0000_0000); }
+    let ld = translate_straight_line(&[0xF940_0001u32], 0x8300);
+    let e = winexec::make_executable(&ld);
+    ctx[0] = va;
+    ctx[1] = 0;
+    ctx[pend] = 0;
+    // SAFETY: as above.
+    unsafe { enter_block(e, ctx.as_mut_ptr()); }
+    assert_eq!(ctx[1], 0xB2B2_0000_0000_0000, "post-TLBI load sees the remapped page (no stale hit)");
+}

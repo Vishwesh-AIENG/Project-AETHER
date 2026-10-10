@@ -254,20 +254,21 @@ fn at12_store_u64() {
     let alloc = AllocResult { assignments, n_spill_slots: 0, n_intervals: 2, n_spilled: 0 };
 
     let bytes = lower(&blk, &alloc);
-    // M4b-5: a single STR now routes through aether_mmu_store (a Win64 CALL that
-    // performs the store itself — RAM write OR MMIO emulation) rather than the
-    // old xlate-then-`mov [rax],rs` deref. The call scaffold is identical, but
-    // there is NO trailing memory-write deref: the sequence ends with the
-    // save-set restore (the success path pops the 12-reg set in reverse, so the
-    // last byte is `pop rdx` = 0x5A, RDX being first in MMU_SAVE_REGS).
-    assert!(has_mmu_xlate_scaffold(&bytes), "Store must CALL the MMU runtime");
+    // M4b-5: a single STR routes through aether_mmu_store (a Win64 CALL that
+    // performs the store itself — RAM write OR MMIO emulation). ch66 prepends an
+    // inline software-TLB fast path: on a TLB hit the emitted code performs the
+    // store directly (`mov [rax], rbx` = 48 89 18, rax = host PA) and jumps past
+    // the call; on a miss it falls through to the call scaffold. So the block now
+    // contains BOTH the inline store AND the call, and still ends with the slow
+    // path's save-set restore (last byte `pop rdx` = 0x5A).
+    assert!(has_mmu_xlate_scaffold(&bytes), "Store must CALL the MMU runtime (miss path)");
     assert!(
         !bytes.windows(2).any(|w| w == [0x0F, 0x0B]),
         "in-register Store must not emit UD2"
     );
     assert!(
-        !bytes.windows(3).any(|w| w == [0x48, 0x89, 0x18]),
-        "M4b-5 Store must NOT emit a `mov [rax],rbx` deref — the runtime stores"
+        bytes.windows(3).any(|w| w == [0x48, 0x89, 0x18]),
+        "ch66 Store must emit the inline-hit `mov [rax],rbx` fast-path store"
     );
     assert_eq!(*bytes.last().unwrap(), 0x5A, "tail = pop rdx (save-set restore)");
 }
