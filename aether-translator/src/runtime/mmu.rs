@@ -783,6 +783,12 @@ fn regime_start_level(tcr: u64, va_high: bool) -> Option<u8> {
 
 // ── Fault classification ────────────────────────────────────────────────────
 
+/// ch66: crate-visible serialization lock for any test that touches the global
+/// MMU state (window + software TLB) — shared by `mmu::tests` and
+/// `shadow::tests` so they never run concurrently.
+#[cfg(test)]
+pub(crate) static MMU_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Stage-1 translation fault kind (maps to an ESR DFSC code).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FaultKind {
@@ -2623,12 +2629,11 @@ mod tests {
     use super::*;
     use crate::runtime::context::CTX_U64S;
     use std::alloc::{alloc_zeroed, Layout};
-    use std::sync::Mutex;
 
     // The walker uses process-global state (the software TLB + the configured
     // window), so the tests must run serially. This mutex serializes them and
     // recovers from poison (a panicking test must not wedge the rest).
-    static MMU_TEST_LOCK: Mutex<()> = Mutex::new(());
+    use super::MMU_TEST_LOCK;
 
     /// Acquire the serialization lock, flush the TLB, and open the window wide
     /// so geometry tests can use host-allocated tables (whose addresses are not
