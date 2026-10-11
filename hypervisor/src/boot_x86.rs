@@ -637,7 +637,7 @@ pub unsafe fn com1_puthex64(mut v: u64) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[repr(C, align(4096))]
-struct Page4K([u8; 4096]);
+pub(crate) struct Page4K(pub(crate) [u8; 4096]);
 
 static mut VMXON_REGION:  VmxonRegion = VmxonRegion::new();
 static mut VMCS_REGION:   VmcsRegion  = VmcsRegion::new();
@@ -5511,6 +5511,9 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                 (*ptr::addr_of!(NPF_GUEST_CTX))[aether_translator::runtime::context::SYSREG_SLOT0
                     + aether_translator::runtime::mmu::SLOT_TTBR0],
             );
+            // ch66 P3b: one-shot hardware-MMU self-test on the first kernel-VA
+            // block (gated + idempotent; no-op once done or when disabled).
+            crate::shadow_mmu::maybe_selftest(ptr::addr_of!(NPF_GUEST_CTX) as *const u64, pc);
             last_pc = pc;
             // [vma] record the just-allocated vm_area_struct (x0) at vm_area_dup+0x2c
             // (the block after `bl kmem_cache_alloc`). At the fork-corruption fault

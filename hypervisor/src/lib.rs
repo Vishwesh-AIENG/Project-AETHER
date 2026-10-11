@@ -237,7 +237,9 @@ pub mod arm64; // ch04: ARM64 substrate — regs, barriers, paging constants
 // Part III — The Hypervisor (Chapters 7–11)
 pub mod boot;        // ch07: UEFI handoff, ExitBootServices, ACPI discovery, guest ERET
 #[cfg(target_arch = "x86_64")]
-pub mod boot_x86;     // x86_64 boot pipeline: ExitBootServices -> EPT/NPT build ->
+pub mod boot_x86;
+#[cfg(target_arch = "x86_64")]
+pub mod shadow_mmu;  // ch66 P3b: hardware-MMU shadow paging (self-test + build-up)     // x86_64 boot pipeline: ExitBootServices -> EPT/NPT build ->
                       //       init_vtx/svm_foundation -> VMLAUNCH/VMRUN -> first VMEXIT.
 #[cfg(target_arch = "x86_64")]
 pub mod virtio_blk_pci; // Phase 3: host virtio-blk-pci driver — AETHER drives the
