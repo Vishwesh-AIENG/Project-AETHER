@@ -27,8 +27,12 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::boot_x86::{dual_puthex64, dual_puts, Page4K};
 
-/// Run the one-shot self-test when a guest kernel VA is first executed.
-pub static HW_MMU_SELFTEST: AtomicBool = AtomicBool::new(true);
+/// Run the one-shot self-test when a guest kernel VA is first executed. Default
+/// OFF so the committed normal boot is pristine (no shadow activity); flip to
+/// true (or wire an env/boot arg) to re-run the on-HW validation. The resumable
+/// #PF fill it exercises was PROVEN on a 2026-10-12 WHPX boot
+/// (alias_now==ref_pa).
+pub static HW_MMU_SELFTEST: AtomicBool = AtomicBool::new(false);
 static SELFTEST_DONE: AtomicBool = AtomicBool::new(false);
 
 /// Shadow page-table pool: 2048 × 4 KiB = 8 MiB of intermediate tables, enough
