@@ -162,9 +162,152 @@ pub unsafe fn selftest(ctx: *const u64, va: u64) {
             dual_puts(b" PASS\n");
         } else {
             dual_puts(b" FAIL(mismatch)\n");
+            return;
+        }
+
+        // --- Increment 3a: resumable #PF on the LIVE CR3 via the gap alias ---
+        // The 40-bit-mask alias lands in PML4[0x100] (empty under the firmware
+        // identity map), so a direct read faults once; shadow_pf_try fills the
+        // live CR3's gap slot from the guest tables; iretq re-runs the read, now
+        // served by the x86 MMU. Proves the resumable #PF end-to-end.
+        let alias = alias_of(va);
+        // DIAG: is the alias already mapped in the LIVE CR3 (it should NOT be)?
+        {
+            let live = read_cr3() & 0x000F_FFFF_FFFF_F000;
+            let rd = |pa: u64| ptr::read(pa as *const u64);
+            let wa = aether_translator::runtime::shadow::x86_walk(live, alias, &rd);
+            let wv = aether_translator::runtime::shadow::x86_walk(live, va, &rd);
+            dual_puts(b"[hwmmu] diag live_pml4=");
+            dual_puthex64(live);
+            dual_puts(b" pml4[0x100]=");
+            dual_puthex64(ptr::read((live + 0x100 * 8) as *const u64));
+            dual_puts(b" alias_mapped=");
+            dual_puthex64(match wa { Some((p, _)) => p, None => 0 });
+            dual_puts(b" va_mapped=");
+            dual_puthex64(match wv { Some((p, _)) => p, None => 0 });
+            dual_puts(b"\n");
+        }
+        let got2 = ptr::read_volatile(alias as *const u64);
+        // Ground truth: after the (faulting) read, the resumable #PF must have
+        // mapped the alias to the guest PA. A re-walk of the LIVE CR3 confirms it
+        // and the returned value matches. (The fills/calls counters are plain
+        // static-mut reads the compiler may CSE across the volatile read, since
+        // it can't see the #PF side effect — so this re-walk is authoritative.)
+        let live = read_cr3() & 0x000F_FFFF_FFFF_F000;
+        let rd = |pa: u64| ptr::read(pa as *const u64);
+        let alias_now = match aether_translator::runtime::shadow::x86_walk(live, alias, &rd) {
+            Some((p, _)) => p,
+            None => 0,
+        };
+        dual_puts(b"[hwmmu] pf-fill alias=");
+        dual_puthex64(alias);
+        dual_puts(b" got=");
+        dual_puthex64(got2);
+        dual_puts(b" alias_now=");
+        dual_puthex64(alias_now);
+        dual_puts(b" pf_cr2=");
+        dual_puthex64(ptr::read_volatile(ptr::addr_of!(SHADOW_PF_LAST_CR2)));
+        if got2 == want && alias_now == ref_pa {
+            dual_puts(b" PASS\n");
+        } else {
+            dual_puts(b" FAIL\n");
         }
     }
 }
+
+/// Gap base: guest VAs are accessed by translated code at `guest_va | GAP_BASE`
+/// so guest low user-VAs don't collide with the hypervisor's low identity map.
+/// User VAs (39-bit) alias into `[GAP_BASE, GAP_BASE + 512 GiB)`; kernel VAs
+/// (`0xFFFF_FFC0…`) already have these bits set, so the OR leaves them at their
+/// own high VA. Both land in high PML4 slots the low identity map never uses, so
+/// the shadow lives in the LIVE CR3 with no switch.
+pub const GAP_BASE: u64 = 0xFFFF_8000_0000_0000;
+/// 40-bit guest-VA window: a 39-bit guest splits into user `[0, 512 GiB)` (bit39
+/// clear) and kernel `[768 GiB, 1 TiB)` (bit39 set, i.e. `0xFFFF_FFC0…` low 40
+/// bits). Both alias into `[GAP_BASE, GAP_BASE + 1 TiB)` = PML4[0x100], which
+/// firmware leaves empty — UNLIKE the kernel's own PML4[0x1FF], which collides
+/// with UEFI high-canonical mappings. `alias = GAP_BASE | (va & VA40_MASK)`.
+const VA40_MASK: u64 = 0x0000_00FF_FFFF_FFFF;
+const GAP_HI: u64 = GAP_BASE + (1u64 << 40); // + 1 TiB
+/// Sign-extension to turn a bit39-set masked VA back into a kernel VA.
+const KERN_SEXT: u64 = 0xFFFF_FF00_0000_0000;
+
+/// The hardware-MMU access alias for a guest VA (what translated code dereferences
+/// and what the shadow is indexed by).
+#[inline]
+pub fn alias_of(guest_va: u64) -> u64 {
+    GAP_BASE | (guest_va & VA40_MASK)
+}
+
+/// Is `cr2` a guest-VA alias the hardware-MMU path owns (vs a real hypervisor
+/// fault)? True only within the single 1 TiB gap window.
+#[inline]
+fn is_guest_alias(cr2: u64) -> bool {
+    cr2 >= GAP_BASE && cr2 < GAP_HI
+}
+
+/// Reconstruct the guest VA from an alias `cr2`: strip the gap base to the 40-bit
+/// window, then sign-extend if it is a kernel (bit39-set) VA.
+#[inline]
+fn guest_va_of(cr2: u64) -> u64 {
+    let m = cr2 & VA40_MASK;
+    if m & (1 << 39) != 0 {
+        m | KERN_SEXT
+    } else {
+        m
+    }
+}
+
+/// Resumable-#PF fill. Called from the `#PF` stub. Returns 1 when the fault was
+/// a guest-alias shadow miss that we filled (the faulting `mov` should be
+/// re-executed via `iretq`), or 0 when it is NOT ours / not fillable (an ARM
+/// fault or MMIO or a genuine hypervisor bug) — the stub then falls to the
+/// post-mortem. `error` is the #PF error code (bit1 = write).
+///
+/// Fills the LIVE CR3's PML4 (its high slots are empty under the OVMF identity
+/// map) so there is no CR3 switch: the `mov [alias]` re-executes and the x86 MMU
+/// now walks the freshly-installed shadow entry.
+#[unsafe(no_mangle)]
+pub extern "C" fn shadow_pf_try(cr2: u64, error: u64) -> u64 {
+    // SAFETY: EL2-private single-vCPU diagnostic counter.
+    unsafe {
+        *ptr::addr_of_mut!(SHADOW_PF_CALLS) += 1;
+        *ptr::addr_of_mut!(SHADOW_PF_LAST_CR2) = cr2;
+    }
+    if !is_guest_alias(cr2) {
+        return 0;
+    }
+    // SAFETY: EL2-private single-vCPU; NPF_GUEST_CTX is the live guest context.
+    unsafe {
+        use aether_translator::runtime::context::CTX_U64S;
+        let ctx = ptr::addr_of!(crate::boot_x86::NPF_GUEST_CTX) as *const u64;
+        let sysregs = core::slice::from_raw_parts(ctx, CTX_U64S);
+        let guest_va = guest_va_of(cr2);
+        let is_write = error & 0x2 != 0;
+        let pml4 = read_cr3() & 0x000F_FFFF_FFFF_F000;
+        let mut alloc = pool_alloc;
+        let read = |pa: u64| ptr::read(pa as *const u64);
+        let mut write = |pa: u64, v: u64| ptr::write(pa as *mut u64, v);
+        match aether_translator::runtime::shadow::shadow_fill_at(
+            pml4, sysregs, guest_va, cr2, is_write, &mut alloc, &read, &mut write,
+        ) {
+            Ok(_) => {
+                *ptr::addr_of_mut!(SHADOW_FILLS) += 1;
+                1
+            }
+            // ARM fault / MMIO / pool exhaustion — not handled yet; fatal for now
+            // (surfaces in the post-mortem so these cases are diagnosed, not
+            // silently wrong). Increment 3b handles ARM-abort + MMIO unwinding.
+            Err(_) => 0,
+        }
+    }
+}
+
+/// Count of shadow fills served by the resumable #PF (diagnostic).
+pub static mut SHADOW_FILLS: u64 = 0;
+/// Count of #PF stub -> shadow_pf_try entries (diagnostic).
+pub static mut SHADOW_PF_CALLS: u64 = 0;
+pub static mut SHADOW_PF_LAST_CR2: u64 = 0;
 
 /// Dispatch-loop hook: run the self-test once, the first time a guest KERNEL VA
 /// (TTBR1, bit55 set) is about to execute with the MMU on. No-op afterwards and

@@ -58,13 +58,32 @@ pub fn shadow_fill(
     read_phys: &dyn Fn(u64) -> u64,
     write_phys: &mut dyn FnMut(u64, u64),
 ) -> Result<u64, (FaultKind, u8)> {
+    shadow_fill_at(pml4_pa, sysregs, va, va, is_write, alloc, read_phys, write_phys)
+}
+
+/// Like [`shadow_fill`], but the x86 shadow path is indexed by `index_va` while
+/// the guest ARM walk uses `guest_va`. This lets the hardware-MMU path map a
+/// guest VA at a non-identity **alias** (`guest_va | GAP_BASE`) so guest low
+/// user-VAs don't collide with the hypervisor's low identity map, without any
+/// CR3 switch (the alias lands in an otherwise-unused high PML4 slot).
+#[allow(clippy::too_many_arguments)]
+pub fn shadow_fill_at(
+    pml4_pa: u64,
+    sysregs: &[u64],
+    guest_va: u64,
+    index_va: u64,
+    is_write: bool,
+    alloc: &mut dyn FnMut() -> u64,
+    read_phys: &dyn Fn(u64) -> u64,
+    write_phys: &mut dyn FnMut(u64, u64),
+) -> Result<u64, (FaultKind, u8)> {
     // The guest's own walk decides reachability + permission, exactly as the
     // software-TLB path does. MMIO PAs fault out here (walk confines to the
     // window | MMIO; the caller leaves MMIO VAs unmapped so they re-fault into
     // the emulator) — shadow_fill is only asked to map plain RAM.
-    let (pa, writable) = walk(sysregs, va, is_write)?;
+    let (pa, writable) = walk(sysregs, guest_va, is_write)?;
 
-    let idx = x86_indices(va);
+    let idx = x86_indices(index_va);
     let mut table = pml4_pa;
     // Walk/create the three upper levels (PML4, PDPT, PD).
     for level in 0..3 {
@@ -279,6 +298,29 @@ mod tests {
         assert_eq!(r.expect_err("shadow_fill faults"), arm_fault,
                    "shadow_fill propagates the exact ARM fault");
         assert_eq!(w, None, "nothing mapped for the faulting VA");
+    }
+
+    #[test]
+    fn shadow_fill_at_alias_maps_guest_pa_at_alias_va() {
+        let _g = serial();
+        // Guest user VA, mapped RW; aliased into the high-canonical gap.
+        let guest_va = 0x0000_0033_0000_5000u64;
+        let (ctx, _l0, _d) = map_one(guest_va, false);
+        let (arm_pa, _w) = walk(&ctx, guest_va, false).expect("arm walk");
+        let gap = 0xFFFF_8000_0000_0000u64;
+        let alias = guest_va | gap; // the hardware-MMU access alias
+
+        let pm = PhysMem::new();
+        let pml4 = pm.alloc();
+        let read = |pa: u64| *pm.mem.borrow().get(&pa).unwrap_or(&0);
+        let mut alloc = || pm.alloc();
+        let mut write = |pa: u64, v: u64| { pm.mem.borrow_mut().insert(pa, v); };
+        let r = shadow_fill_at(pml4, &ctx, guest_va, alias, false, &mut alloc, &read, &mut write);
+        assert_eq!(r, Ok(arm_pa), "returns the ARM leaf PA");
+        // The x86 shadow maps the ALIAS VA to the guest PA; the un-aliased VA is
+        // NOT mapped (distinct top-level slots).
+        assert_eq!(x86_walk(pml4, alias, &read), Some((arm_pa, true)), "alias maps to guest PA");
+        assert_eq!(x86_walk(pml4, guest_va, &read), None, "the bare guest VA is not mapped");
     }
 
     #[test]

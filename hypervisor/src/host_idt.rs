@@ -114,6 +114,66 @@ host_isr_gp:
 
 .global host_isr_pf
 host_isr_pf:
+    // ch66 P3b: resumable #PF. CPU pushed [rsp]=error [+8]=RIP [+16]=CS
+    // [+24]=RFLAGS [+32]=RSP [+40]=SS. Save all GPRs, ask shadow_pf_try to fill a
+    // guest-alias shadow miss; on success iretq re-runs the faulting mov, now
+    // served by the x86 MMU. On a non-ours / non-fillable fault, fall to the
+    // post-mortem (push 14; host_isr_common) exactly as before.
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rcx, cr2
+    mov rdx, [rsp + 120]
+    sub rsp, 40
+    call shadow_pf_try
+    add rsp, 40
+    test rax, rax
+    jz host_isr_pf_fatal
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    add rsp, 8
+    iretq
+host_isr_pf_fatal:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
     push 14
     jmp host_isr_common
 
