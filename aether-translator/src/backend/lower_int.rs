@@ -21,6 +21,33 @@ use super::encode::X86Encoder;
 pub static INLINE_TLB_ENABLED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(true);
 
+/// ch66 phase 3b: hardware-MMU path. When enabled, a guest load/store does NOT
+/// probe the software TLB or call the MMU helper — it computes the gap alias
+/// `GAP_BASE | (va & 0xFF_FFFF_FFFF)` into RAX and the caller dereferences it
+/// directly, letting the x86 MMU walk the shadow page tables (a miss is a host
+/// #PF filled by `shadow_mmu::shadow_pf_try`). Default OFF: the software-TLB
+/// path is unchanged until the hypervisor turns this on once its resumable #PF
+/// handler + shadow address space are live.
+pub static HW_MMU_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+/// Gap base for the hardware-MMU alias (must match `shadow_mmu::GAP_BASE`).
+const HW_MMU_GAP_BASE: i64 = 0xFFFF_8000_0000_0000u64 as i64;
+
+impl IntLower {
+    /// Emit `RAX = GAP_BASE | (addr_reg & 0x0000_00FF_FFFF_FFFF)` — the
+    /// hardware-MMU access alias. Clobbers RAX/RCX (reserved scratch); addr_reg
+    /// is preserved.
+    fn emit_hw_mmu_alias(enc: &mut X86Encoder, addr_reg: u8) {
+        const RAX: u8 = 0;
+        const RCX: u8 = 1;
+        enc.emit_mov_rr64(RAX, addr_reg);
+        enc.emit_shl_r64_imm8(RAX, 24); // drop bits [63:40]…
+        enc.emit_shr_r64_imm8(RAX, 24); // …leaving va & 0xFF_FFFF_FFFF
+        enc.emit_mov_r64_imm64(RCX, HW_MMU_GAP_BASE);
+        enc.emit_or_rr64(RAX, RCX); // RAX = alias
+    }
+}
+
 /// ch66 phase 4: lazy NZCV. When on (default), the lowering skips the ~20-insn
 /// `build_nzcv` materialisation for a flag-setting op whose ARM NZCV result is
 /// provably dead — overwritten by a later pure NZCV writer before any consumer
@@ -597,6 +624,11 @@ impl IntLower {
     }
 
     fn emit_mmu_xlate_call(enc: &mut X86Encoder, addr_reg: u8, is_write: bool, size: i32) {
+        // ch66 P3b: hardware-MMU path — RAX = gap alias, caller derefs it.
+        if HW_MMU_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+            Self::emit_hw_mmu_alias(enc, addr_reg);
+            return;
+        }
         let hit = Self::emit_inline_tlb_probe(enc, addr_reg, is_write, size, None);
         const RAX: u8 = 0;
         const RCX: u8 = 1;
@@ -732,6 +764,13 @@ impl IntLower {
     /// (including `R8`/`R9`). Both MUST be real allocated GPRs (the Store arm
     /// fails loud / UD2 on a spilled operand before calling this).
     fn emit_mmu_store_call(enc: &mut X86Encoder, addr_reg: u8, val_reg: u8, size: i32) {
+        // ch66 P3b: hardware-MMU path — RAX = gap alias, store directly. An MMIO
+        // target is left unmapped in the shadow → #PF → shadow_pf_try emulates.
+        if HW_MMU_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+            Self::emit_hw_mmu_alias(enc, addr_reg);
+            Self::emit_w_store(enc, 0 /* RAX */, val_reg, size as u8);
+            return;
+        }
         let hit = Self::emit_inline_tlb_probe(enc, addr_reg, true, size, Some(val_reg));
         const RAX: u8 = 0;
         const RCX: u8 = 1;
