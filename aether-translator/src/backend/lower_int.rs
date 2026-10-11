@@ -500,93 +500,82 @@ impl IntLower {
         const RCX: u8 = 1;
         const R15: u8 = CONTEXT_REG;
         // ctx sysreg slots: 0=SCTLR, 1=TTBR0, 2=TTBR1 (bytes 0x328/0x330/0x338);
-        // 31..34 = EL2-private inline-probe scratch (unused by the sysreg map).
+        // slot 31 = EL2-private inline-probe scratch (unused by the sysreg map).
         const SCTLR: i32 = 0x328;
         const TTBR0: i32 = 0x330;
         const TTBR1: i32 = 0x338;
         const SCR_VA: i32 = 0x328 + 31 * 8;
         const SCR_PAGE: i32 = 0x328 + 32 * 8;
-        const SCR_IDX8: i32 = 0x328 + 33 * 8;
-        const SCR_SPACE: i32 = 0x328 + 34 * 8;
         let a = crate::runtime::mmu::tlb_fast_addrs();
         let mask = crate::runtime::mmu::TLB_ENTRIES_MASK as i32;
+        // entry stride is a power of two (32); shift = log2.
+        let stride_shift = a.entry_bytes.trailing_zeros() as u8;
         let mut miss: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
 
+        // Stash the guest VA. `addr_reg` may be a reserved scratch (RAX/RCX) when
+        // the Load/Store address was spilled (src_in materialises it into
+        // SCRATCH0=RAX). The probe uses RAX/RCX freely, so it reads the VA from
+        // this stash throughout and restores `addr_reg` from it on every miss
+        // path (where the slow call marshals `addr_reg`). For a normal GPR
+        // `addr_reg` the restore is a harmless reload of the same value.
+        enc.emit_mov_mem_r64(R15, SCR_VA, addr_reg);
         // MMU on? (SCTLR.M = bit 0). Off => flat path only, handled by the call.
-        enc.emit_mov_r64_mem(RCX, R15, SCTLR);
-        enc.emit_and_r64_imm32(RCX, 1);
+        enc.emit_mov_r64_mem(RAX, R15, SCTLR);
+        enc.emit_and_r64_imm32(RAX, 1);
         miss.push(enc.emit_jcc_rel32(cc::Z));
         // Pending cross-page scatter? Let the helper flush it first.
         enc.emit_mov_r64_imm64(RAX, a.scatter_pending as i64);
-        enc.emit_movzx_r64_mem8(RCX, RAX, 0);
-        enc.emit_test_rr64(RCX, RCX);
+        enc.emit_movzx_r64_mem8(RAX, RAX, 0);
+        enc.emit_test_rr64(RAX, RAX);
         miss.push(enc.emit_jcc_rel32(cc::NZ));
-        // Stash VA (reloaded for the space select + in-page offset).
-        enc.emit_mov_mem_r64(R15, SCR_VA, addr_reg);
         // Cross-page guard: (va & 0xFFF) > 0x1000 - size => the access straddles
         // two pages; the helper's bounce buffer handles it.
-        enc.emit_mov_rr64(RAX, addr_reg);
+        enc.emit_mov_r64_mem(RAX, R15, SCR_VA);
         enc.emit_and_r64_imm32(RAX, 0xFFF);
         enc.emit_cmp_r64_imm32(RAX, 0x1000 - size);
         miss.push(enc.emit_jcc_rel32(cc::NBE));
-        // page = va >> 12 ; idx8 = (page & mask) << 3
-        enc.emit_mov_rr64(RCX, addr_reg);
+        // page = va >> 12 ; stash it (the entry-address math consumes RCX/RAX).
+        enc.emit_mov_r64_mem(RCX, R15, SCR_VA);
         enc.emit_shr_r64_imm8(RCX, 12);
         enc.emit_mov_mem_r64(R15, SCR_PAGE, RCX);
+        // &entry = TLB + ((page & mask) << stride_shift)  (RAX = &entry, kept).
         enc.emit_mov_rr64(RAX, RCX);
         enc.emit_and_r64_imm32(RAX, mask);
-        enc.emit_shl_r64_imm8(RAX, 3);
-        enc.emit_mov_mem_r64(R15, SCR_IDX8, RAX);
-        // tag: TLB_TAG[idx] == page
-        enc.emit_mov_r64_imm64(RAX, a.tag as i64);
-        enc.emit_mov_r64_mem(RCX, R15, SCR_IDX8);
+        enc.emit_shl_r64_imm8(RAX, stride_shift);
+        enc.emit_mov_r64_imm64(RCX, a.tlb as i64);
         enc.emit_add_rr64(RAX, RCX);
-        enc.emit_mov_r64_mem(RCX, RAX, 0);
-        enc.emit_mov_r64_mem(RAX, R15, SCR_PAGE);
-        enc.emit_cmp_rr64(RCX, RAX);
+        // tag == page ?
+        enc.emit_mov_r64_mem(RCX, R15, SCR_PAGE);
+        enc.emit_cmp_r64_mem(RCX, RAX, a.off_tag);
         miss.push(enc.emit_jcc_rel32(cc::NZ));
-        // generation: TLB_EGEN[idx] == TLB_GEN
-        enc.emit_mov_r64_imm64(RAX, a.egen as i64);
-        enc.emit_mov_r64_mem(RCX, R15, SCR_IDX8);
-        enc.emit_add_rr64(RAX, RCX);
-        enc.emit_mov_r64_mem(RCX, RAX, 0);
-        enc.emit_mov_r64_imm64(RAX, a.gen_ptr as i64);
-        enc.emit_mov_r64_mem(RAX, RAX, 0);
-        enc.emit_cmp_rr64(RCX, RAX);
+        // egen == TLB_GEN ?
+        enc.emit_mov_r64_imm64(RCX, a.gen_ptr as i64);
+        enc.emit_mov_r64_mem(RCX, RCX, 0);
+        enc.emit_cmp_r64_mem(RCX, RAX, a.off_egen);
         miss.push(enc.emit_jcc_rel32(cc::NZ));
-        // space = bit55(va) ? TTBR1 : TTBR0 ; TLB_ASID[idx] == space
+        // space = bit55(va) ? TTBR1 : TTBR0 ; entry.asid == space ?
         enc.emit_mov_r64_mem(RCX, R15, TTBR0);
         enc.emit_bt_mem(R15, SCR_VA, 55);
         let lo = enc.emit_jcc_rel32(cc::NB); // CF=0 (low VA) -> keep TTBR0
         enc.emit_mov_r64_mem(RCX, R15, TTBR1);
         let lo_end = enc.pos();
         enc.patch_rel32(lo, lo_end);
-        enc.emit_mov_mem_r64(R15, SCR_SPACE, RCX);
-        enc.emit_mov_r64_imm64(RAX, a.asid as i64);
-        enc.emit_mov_r64_mem(RCX, R15, SCR_IDX8);
-        enc.emit_add_rr64(RAX, RCX);
-        enc.emit_mov_r64_mem(RCX, RAX, 0);
-        enc.emit_mov_r64_mem(RAX, R15, SCR_SPACE);
-        enc.emit_cmp_rr64(RCX, RAX);
+        enc.emit_cmp_r64_mem(RCX, RAX, a.off_asid);
         miss.push(enc.emit_jcc_rel32(cc::NZ));
-        // writable? (store only) TLB_W[idx] (byte) != 0
+        // Load pa_w (page-base host PA | writable-bit0).
+        enc.emit_mov_r64_mem(RCX, RAX, a.off_pa_w);
+        // writable? (store only) bit 0 set.
         if is_write {
-            enc.emit_mov_r64_imm64(RAX, a.w as i64);
-            enc.emit_mov_r64_mem(RCX, R15, SCR_PAGE);
-            enc.emit_and_r64_imm32(RCX, mask);
-            enc.emit_add_rr64(RAX, RCX);
-            enc.emit_movzx_r64_mem8(RCX, RAX, 0);
-            enc.emit_test_rr64(RCX, RCX);
+            enc.emit_mov_rr64(RAX, RCX);
+            enc.emit_and_r64_imm32(RAX, 1);
             miss.push(enc.emit_jcc_rel32(cc::Z));
         }
-        // HIT: host PA = TLB_PA[idx] | (va & 0xFFF)
-        enc.emit_mov_r64_imm64(RAX, a.pa as i64);
-        enc.emit_mov_r64_mem(RCX, R15, SCR_IDX8);
-        enc.emit_add_rr64(RAX, RCX);
-        enc.emit_mov_r64_mem(RAX, RAX, 0); // RAX = page-base host PA
-        enc.emit_mov_r64_mem(RCX, R15, SCR_VA);
-        enc.emit_and_r64_imm32(RCX, 0xFFF);
-        enc.emit_add_rr64(RAX, RCX); // low 12 bits were 0 -> add == or
+        // HIT: host PA = (pa_w & ~0xFFF) | (va & 0xFFF).  -4096 (imm32) sign-
+        // extends to 0xFFFF_FFFF_FFFF_F000 = ~0xFFF.
+        enc.emit_and_r64_imm32(RCX, -4096);
+        enc.emit_mov_r64_mem(RAX, R15, SCR_VA);
+        enc.emit_and_r64_imm32(RAX, 0xFFF);
+        enc.emit_add_rr64(RAX, RCX); // RAX = host PA
         if let Some(val) = store_val {
             match size {
                 1 => enc.emit_mov_mem_r8(RAX, 0, val),
@@ -596,11 +585,14 @@ impl IntLower {
             }
         }
         let hit_jmp = enc.emit_jmp_rel32();
-        // MISS label = fall-through into the slow call below.
+        // MISS label = fall-through into the slow call below. Restore `addr_reg`
+        // from the stash first (the probe clobbers RAX/RCX, which `addr_reg`
+        // aliases in the spilled case; a harmless same-value reload otherwise).
         let miss_pos = enc.pos();
         for j in miss {
             enc.patch_rel32(j, miss_pos);
         }
+        enc.emit_mov_r64_mem(addr_reg, R15, SCR_VA);
         Some(hit_jmp)
     }
 

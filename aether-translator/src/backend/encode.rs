@@ -374,6 +374,22 @@ impl X86Encoder {
         self.emit_i32(imm as i32);
     }
 
+    /// CMP r64, [base + disp] — sets flags from `reg - [mem]`.
+    pub fn emit_cmp_r64_mem(&mut self, reg: u8, base: u8, disp: i32) {
+        self.rex_opt(true, reg, 0, base);
+        self.buf.push(0x3B);
+        self.modrm_mem(reg, base, disp);
+    }
+
+    /// BT r64, imm8 — copies bit `bit` of `reg` into CF.
+    pub fn emit_bt_r64_imm(&mut self, reg: u8, bit: u8) {
+        self.rex_opt(true, 0, 0, reg);
+        self.buf.push(0x0F);
+        self.buf.push(0xBA);
+        self.modrm_rr(4, reg); // /4 = BT
+        self.buf.push(bit);
+    }
+
     /// SUB qword [base + disp], imm8 (sign-extended). Sets CF on borrow.
     pub fn emit_sub_mem64_imm8(&mut self, base: u8, disp: i32, imm: i8) {
         self.rex_opt(true, 0, 0, base);

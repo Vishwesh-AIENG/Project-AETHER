@@ -1183,33 +1183,50 @@ pub const TLB_ENTRIES_MASK: u64 = (TLB_ENTRIES as u64) - 1;
 /// that replicates `xlate_page`'s hit conditions exactly. All are EL2-private
 /// statics with a fixed address for the life of the process.
 pub struct TlbFastAddrs {
-    pub tag: u64,
-    pub pa: u64,
-    pub w: u64,
-    pub asid: u64,
-    pub egen: u64,
+    /// Base of the AoS `TLB` array; entry = base + (idx * `TLB_ENTRY_BYTES`).
+    pub tlb: u64,
+    /// Per-entry field byte offsets (tag, pa_w, asid, egen) and entry stride.
+    pub off_tag: i32,
+    pub off_pa_w: i32,
+    pub off_asid: i32,
+    pub off_egen: i32,
+    pub entry_bytes: u64,
     pub gen_ptr: u64,
     pub scatter_pending: u64,
 }
 pub fn tlb_fast_addrs() -> TlbFastAddrs {
     // Taking the address of a static performs no access, so this is safe.
     TlbFastAddrs {
-        tag: core::ptr::addr_of!(TLB_TAG) as u64,
-        pa: core::ptr::addr_of!(TLB_PA) as u64,
-        w: core::ptr::addr_of!(TLB_W) as u64,
-        asid: core::ptr::addr_of!(TLB_ASID) as u64,
-        egen: core::ptr::addr_of!(TLB_EGEN) as u64,
+        tlb: core::ptr::addr_of!(TLB) as u64,
+        off_tag: 0,
+        off_pa_w: 8,
+        off_asid: 16,
+        off_egen: 24,
+        entry_bytes: TLB_ENTRY_BYTES,
         gen_ptr: core::ptr::addr_of!(TLB_GEN) as u64,
         scatter_pending: core::ptr::addr_of!(SCATTER_PENDING) as u64,
     }
 }
 
-static mut TLB_TAG: [u64; TLB_ENTRIES] = [TLB_EMPTY; TLB_ENTRIES];
-static mut TLB_PA: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
-static mut TLB_W: [bool; TLB_ENTRIES] = [false; TLB_ENTRIES];
-/// Fill generation of each entry; live iff == `TLB_GEN`.
-static mut TLB_EGEN: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
-/// Current TLB generation (starts at 1 so the zero-initialised EGEN is stale).
+/// ch66: one software-TLB entry, 32 bytes (one cache line holds two). The
+/// inline fast-path probe computes the entry address once and reads all fields
+/// at fixed offsets, instead of indexing five separate arrays (array-of-structs
+/// cuts the probe's `mov imm64, base` loads from 5 to 1 and keeps a hit on one
+/// cache line). `pa_w` packs the writable flag into bit 0 of the (4 KiB-aligned)
+/// page-base host PA. Field byte offsets are baked into the probe in
+/// `backend/lower_int.rs` — keep them in sync (tag@0, pa_w@8, asid@16, egen@24).
+#[repr(C, align(32))]
+#[derive(Clone, Copy)]
+pub(crate) struct TlbEntry {
+    pub tag: u64,
+    pub pa_w: u64,
+    pub asid: u64,
+    pub egen: u64,
+}
+pub(crate) const TLB_ENTRY_BYTES: u64 = 32;
+const TLB_INIT: TlbEntry = TlbEntry { tag: TLB_EMPTY, pa_w: 0, asid: 0, egen: 0 };
+static mut TLB: [TlbEntry; TLB_ENTRIES] = [TLB_INIT; TLB_ENTRIES];
+/// Current TLB generation (starts at 1 so the zero-initialised egen is stale).
 static mut TLB_GEN: u64 = 1;
 /// ch66: cache kernel (TTBR1, high-VA) translations too, tagged with the live
 /// `TTBR1_EL1` value exactly as low VAs are tagged with `TTBR0_EL1`. Runtime
@@ -1223,7 +1240,8 @@ pub static mut TLB_CACHE_HIGH: bool = true;
 /// transient kernel pgd (idmap / create_kpti_ng_temp_pgd, a different TTBR1)
 /// never hits swapper's entries. This is the signal-11 "software-TLB staleness
 /// on forked TTBR0 pages" guard; because of it a TTBR write needs no flush.
-static mut TLB_ASID: [u64; TLB_ENTRIES] = [0; TLB_ENTRIES];
+/// (Stored in `TlbEntry::asid`.)
+const _: () = ();
 
 /// Invalidate the entire software TLB. Called on MSR to TTBR0/1_EL1, TCR_EL1,
 /// MAIR_EL1 and on broad TLBI (VMALLE1/ALLE1).
@@ -1245,9 +1263,9 @@ fn tlb_bump_gen() {
     unsafe {
         let g = (*core::ptr::addr_of!(TLB_GEN)).wrapping_add(1);
         if g == 0 {
-            let e = core::ptr::addr_of_mut!(TLB_EGEN);
+            let t = core::ptr::addr_of_mut!(TLB);
             for i in 0..TLB_ENTRIES {
-                (*e)[i] = 0;
+                (*t)[i].egen = 0;
             }
             *core::ptr::addr_of_mut!(TLB_GEN) = 1;
         } else {
@@ -1387,12 +1405,11 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
     if cache_ok {
         // SAFETY: EL2-private, single-vCPU.
         unsafe {
-            if *core::ptr::addr_of!(TLB_TAG[idx]) == page
-                && *core::ptr::addr_of!(TLB_EGEN[idx]) == gen
-                && *core::ptr::addr_of!(TLB_ASID[idx]) == space
-                && (!is_w || *core::ptr::addr_of!(TLB_W[idx]))
+            let e = &(*core::ptr::addr_of!(TLB))[idx];
+            if e.tag == page && e.egen == gen && e.asid == space
+                && (!is_w || e.pa_w & 1 != 0)
             {
-                return Ok(*core::ptr::addr_of!(TLB_PA[idx]) | (va & 0xFFF));
+                return Ok((e.pa_w & !0xFFF) | (va & 0xFFF));
             }
         }
     }
@@ -1435,11 +1452,12 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
             if cache_ok && !is_mmio(pa & !0xFFF) {
                 // SAFETY: EL2-private, single-vCPU.
                 unsafe {
-                    *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
-                    *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
-                    *core::ptr::addr_of_mut!(TLB_W[idx]) = writable;
-                    *core::ptr::addr_of_mut!(TLB_ASID[idx]) = space;
-                    *core::ptr::addr_of_mut!(TLB_EGEN[idx]) = gen;
+                    (*core::ptr::addr_of_mut!(TLB))[idx] = TlbEntry {
+                        tag: page,
+                        pa_w: (pa & !0xFFF) | (writable as u64),
+                        asid: space,
+                        egen: gen,
+                    };
                 }
             }
             Ok(pa)
@@ -1473,11 +1491,12 @@ fn xlate_page(sysregs: &[u64], va: u64, is_w: bool) -> Result<u64, (FaultKind, u
                     // SAFETY: EL2-private, single-vCPU. Don't cache TTBR1.
                     unsafe {
                         if !va_high && !is_mmio(pa & !0xFFF) {
-                            *core::ptr::addr_of_mut!(TLB_TAG[idx]) = page;
-                            *core::ptr::addr_of_mut!(TLB_PA[idx]) = pa & !0xFFF;
-                            *core::ptr::addr_of_mut!(TLB_W[idx]) = true;
-                            *core::ptr::addr_of_mut!(TLB_ASID[idx]) = ttbr0;
-                            *core::ptr::addr_of_mut!(TLB_EGEN[idx]) = gen;
+                            (*core::ptr::addr_of_mut!(TLB))[idx] = TlbEntry {
+                                tag: page,
+                                pa_w: (pa & !0xFFF) | 1,
+                                asid: ttbr0,
+                                egen: gen,
+                            };
                         }
                         *core::ptr::addr_of_mut!(MMU_KIMG_FALLBACK_HITS) =
                             (*core::ptr::addr_of!(MMU_KIMG_FALLBACK_HITS))
