@@ -9649,3 +9649,40 @@ fn inline_tlb_hit_store_perm_and_tlbi_staleness() {
     unsafe { enter_block(e, ctx.as_mut_ptr()); }
     assert_eq!(ctx[1], 0xB2B2_0000_0000_0000, "post-TLBI load sees the remapped page (no stale hit)");
 }
+
+/// ch66 phase 4 LAZY NZCV: a flag-setting op whose ARM NZCV is dead (overwritten
+/// by a later pure writer before any reader or block exit) skips `build_nzcv`.
+/// Proven two ways: (a) toggling LAZY_NZCV_ENABLED must not change the executed
+/// result or the final NZCV (behaviour-identical), and (b) the lazy encoding is
+/// strictly shorter (the ~20-insn pack was actually elided).
+#[test]
+fn lazy_nzcv_elides_dead_flags_without_changing_result() {
+    let _serial = serial();
+    use aether_translator::backend::lower_int::LAZY_NZCV_ENABLED;
+    use core::sync::atomic::Ordering;
+    // adds x0,x1,x2 ; adds x0,x0,x3 : the first ADDS's flags are dead (the second
+    // ADDS overwrites NZCV); the second is the last writer (live-out) -> only the
+    // first is elidable.
+    let words = [0xAB02_0020u32, 0xAB03_0000u32];
+
+    let run = |x1: u64, x2: u64, x3: u64| -> (u64, u64, usize) {
+        let code = translate_straight_line(&words, 0x9000);
+        let exec = winexec::make_executable(&code);
+        let mut ctx = vec![0u64; CTX_U64S];
+        ctx[1] = x1; ctx[2] = x2; ctx[3] = x3;
+        // SAFETY: RET-terminated translated block; ctx is CTX_U64S long.
+        unsafe { enter_block(exec, ctx.as_mut_ptr()); }
+        (ctx[0], ctx[NZCV_SLOT], code.len())
+    };
+
+    LAZY_NZCV_ENABLED.store(false, Ordering::Relaxed);
+    let (r_off, nzcv_off, len_off) = run(5, 7, 11);
+    LAZY_NZCV_ENABLED.store(true, Ordering::Relaxed);
+    let (r_on, nzcv_on, len_on) = run(5, 7, 11);
+
+    assert_eq!(r_on, 23, "x0 = x1+x2+x3 regardless of flag elision");
+    assert_eq!(r_on, r_off, "lazy NZCV must not change the executed result");
+    assert_eq!(nzcv_on, nzcv_off, "the live-out NZCV (2nd ADDS) is identical both ways");
+    assert!(len_on < len_off,
+            "lazy encoding must be shorter (dead build_nzcv elided): on={len_on} off={len_off}");
+}

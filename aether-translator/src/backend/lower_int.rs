@@ -21,6 +21,80 @@ use super::encode::X86Encoder;
 pub static INLINE_TLB_ENABLED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(true);
 
+/// ch66 phase 4: lazy NZCV. When on (default), the lowering skips the ~20-insn
+/// `build_nzcv` materialisation for a flag-setting op whose ARM NZCV result is
+/// provably dead — overwritten by a later pure NZCV writer before any consumer
+/// or block exit. Runtime switch for bisecting a suspected flag miscompile.
+pub static LAZY_NZCV_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
+/// How an IR op affects the architectural ARM NZCV word (`[R15+0x108]`), for the
+/// lazy-NZCV liveness scan. `Reader` consumes the incoming NZCV; `Writer` is a
+/// PURE overwrite (does not read it first); `Barrier` may transfer control out
+/// of the block (so NZCV is live-out); `Other` is NZCV-agnostic. The complete
+/// set of NZCV reads in the backend is enumerated here — every consumer in
+/// `lower_int` (Adcs/Sbcs BT, Csel/CCmp/CondBranch via emit_arm_cond_to_bool,
+/// Mrs NZCV) plus the ctx-template FpCsel — so any op not listed as Reader
+/// genuinely never reads NZCV.
+enum NzcvEff {
+    Reader,
+    Writer,
+    Barrier,
+    Other,
+}
+
+impl IntLower {
+    fn nzcv_effect(op: &IrOp) -> NzcvEff {
+        use crate::decoder::sysreg::SysReg;
+        use IrOp::*;
+        match op {
+            // Consume incoming NZCV (Adcs/Sbcs read C; the conditionals decode it).
+            Adcs { .. } | Sbcs { .. } | CCmp { .. } | NzcvBitOp { .. }
+            | CondBranch { .. } | ReadFlags { .. } | Csel { .. } | FpCsel { .. } => {
+                NzcvEff::Reader
+            }
+            Mrs { reg, .. } if matches!(reg, SysReg::NzcvEl0) => NzcvEff::Reader,
+            // Pure overwrites: set NZCV without reading it.
+            AddS { .. } | SubS { .. } | AndS { .. } | Cmp { .. } | Cmn { .. }
+            | Tst { .. } | FCmp { .. } | FpCmpN { .. } => NzcvEff::Writer,
+            Msr { reg, .. } if matches!(reg, SysReg::NzcvEl0) => NzcvEff::Writer,
+            // Control may leave the block -> NZCV is live-out to a handler/SPSR.
+            Hvc { .. } | Svc { .. } | Smc { .. } | Brk { .. } | Hlt { .. } | EretRt => {
+                NzcvEff::Barrier
+            }
+            _ => NzcvEff::Other,
+        }
+    }
+
+    /// True iff the flag-setting op at `ops[i]` may skip `build_nzcv` because its
+    /// NZCV result is dead: some later op is a PURE NZCV writer, with no NZCV
+    /// reader and no control-leaving barrier in between, and before end-of-block
+    /// (end-of-block = live-out to the successor, so NOT elidable). Only the
+    /// simple writers are elidable; CCmp / FpCmpN always materialise.
+    fn should_elide_nzcv(ops: &[IrOp], i: usize) -> bool {
+        use core::sync::atomic::Ordering;
+        if !LAZY_NZCV_ENABLED.load(Ordering::Relaxed) {
+            return false;
+        }
+        use IrOp::*;
+        match &ops[i] {
+            AddS { .. } | SubS { .. } | AndS { .. } | Cmp { .. } | Cmn { .. }
+            | Tst { .. } | Adcs { .. } | Sbcs { .. } => {}
+            _ => return false,
+        }
+        let mut j = i + 1;
+        while j < ops.len() {
+            match Self::nzcv_effect(&ops[j]) {
+                NzcvEff::Reader | NzcvEff::Barrier => return false,
+                NzcvEff::Writer => return true,
+                NzcvEff::Other => {}
+            }
+            j += 1;
+        }
+        false
+    }
+}
+
 pub mod cc {
     pub const O:   u8 = 0x0; // overflow
     pub const NO:  u8 = 0x1;
@@ -142,8 +216,9 @@ impl IntLower {
             // [RCX] = RAX
             enc.emit_mov_mem_r64(RCX, 0, RAX);
         }
-        for op in &blk.ops {
-            Self::lower_op(op, alloc, enc, branch_patches);
+        for (i, op) in blk.ops.iter().enumerate() {
+            let elide_nzcv = Self::should_elide_nzcv(&blk.ops, i);
+            Self::lower_op(op, alloc, enc, branch_patches, elide_nzcv);
         }
     }
 
@@ -294,7 +369,13 @@ impl IntLower {
     const NZCV_SUB: u8 = 1;
     const NZCV_LOG: u8 = 2;
 
-    fn build_nzcv(enc: &mut X86Encoder, kind: u8) {
+    fn build_nzcv(enc: &mut X86Encoder, kind: u8, elide: bool) {
+        // ch66 phase 4: NZCV result proven dead -> skip the ~20-insn pack. The
+        // x86 ALU/CMP that set EFLAGS already ran; nothing reads the ARM NZCV
+        // before it is overwritten.
+        if elide {
+            return;
+        }
         const RAX: u8 = 0;
         const RCX: u8 = 1;
         const RDX: u8 = 2;
@@ -1332,6 +1413,7 @@ impl IntLower {
         alloc: &AllocResult,
         enc: &mut X86Encoder,
         branch_patches: &mut alloc::vec::Vec<(usize, crate::ir::BlockId)>,
+        elide_nzcv: bool,
     ) {
         use IrOp::*;
 
@@ -1929,7 +2011,7 @@ impl IntLower {
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 if *sf { enc.emit_add_rr64(rd, rb); } else { enc.emit_add_rr32(rd, rb); }
                 Self::store_dest(alloc, enc, *dst, rd, sp);
-                Self::build_nzcv(enc, Self::NZCV_ADD);
+                Self::build_nzcv(enc, Self::NZCV_ADD, elide_nzcv);
             }
             SubS { dst, flags: _, a, b, sf } => {
                 let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
@@ -1938,7 +2020,7 @@ impl IntLower {
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 if *sf { enc.emit_sub_rr64(rd, rb); } else { enc.emit_sub_rr32(rd, rb); }
                 Self::store_dest(alloc, enc, *dst, rd, sp);
-                Self::build_nzcv(enc, Self::NZCV_SUB);
+                Self::build_nzcv(enc, Self::NZCV_SUB, elide_nzcv);
             }
             AndS { dst, flags: _, a, b, sf } => {
                 let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
@@ -1947,14 +2029,14 @@ impl IntLower {
                 if rd != ra { enc.emit_mov_rr64(rd, ra); }
                 if *sf { enc.emit_and_rr64(rd, rb); } else { enc.emit_and_rr32(rd, rb); }
                 Self::store_dest(alloc, enc, *dst, rd, sp);
-                Self::build_nzcv(enc, Self::NZCV_LOG);
+                Self::build_nzcv(enc, Self::NZCV_LOG, elide_nzcv);
             }
             Cmp { flags: _, a, b, sf } => {
                 // SUBS-discard: x86 CMP sets EFLAGS without a dest.
                 let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
                 let rb = Self::src_in(alloc, enc, *b, SCRATCH1);
                 if *sf { enc.emit_cmp_rr64(ra, rb); } else { enc.emit_cmp_rr32(ra, rb); }
-                Self::build_nzcv(enc, Self::NZCV_SUB);
+                Self::build_nzcv(enc, Self::NZCV_SUB, elide_nzcv);
             }
             Cmn { flags: _, a, b, sf } => {
                 // ADDS-discard: compute a+b into SCRATCH0 (don't disturb a/b regfile).
@@ -1962,14 +2044,14 @@ impl IntLower {
                 let rb = Self::src_in(alloc, enc, *b, SCRATCH1);
                 if ra != SCRATCH0 { enc.emit_mov_rr64(SCRATCH0, ra); }
                 if *sf { enc.emit_add_rr64(SCRATCH0, rb); } else { enc.emit_add_rr32(SCRATCH0, rb); }
-                Self::build_nzcv(enc, Self::NZCV_ADD);
+                Self::build_nzcv(enc, Self::NZCV_ADD, elide_nzcv);
             }
             Tst { flags: _, a, b, sf } => {
                 // ANDS-discard: x86 TEST sets EFLAGS without a dest. Logical C=V=0.
                 let ra = Self::src_in(alloc, enc, *a, SCRATCH0);
                 let rb = Self::src_in(alloc, enc, *b, SCRATCH1);
                 if *sf { enc.emit_test_rr64(ra, rb); } else { enc.emit_test_rr32(ra, rb); }
-                Self::build_nzcv(enc, Self::NZCV_LOG);
+                Self::build_nzcv(enc, Self::NZCV_LOG, elide_nzcv);
             }
             Adcs { dst, a, b, sf, .. } | Sbcs { dst, a, b, sf, .. } => {
                 // M4b-1: real carry-in. Seed x86 CF from the stored ARM NZCV C
@@ -2008,7 +2090,7 @@ impl IntLower {
                     enc.emit_adc_rr32(rd, rb);
                 }
                 Self::store_dest(alloc, enc, *dst, rd, sp);
-                Self::build_nzcv(enc, if is_sbc { Self::NZCV_SUB } else { Self::NZCV_ADD });
+                Self::build_nzcv(enc, if is_sbc { Self::NZCV_SUB } else { Self::NZCV_ADD }, elide_nzcv);
             }
             Csel { dst, a, b, cond, flags: _, variant } => {
                 // dst = cond ? a : transform(b), where transform is
@@ -2104,11 +2186,11 @@ impl IntLower {
                         enc.emit_mov_rr64(SCRATCH0, ra);
                     }
                     if *sf { enc.emit_add_rr64(SCRATCH0, rb); } else { enc.emit_add_rr32(SCRATCH0, rb); }
-                    Self::build_nzcv(enc, Self::NZCV_ADD);
+                    Self::build_nzcv(enc, Self::NZCV_ADD, elide_nzcv);
                 } else {
                     // CCMP: flags of (a - b). CMP is non-destructive.
                     if *sf { enc.emit_cmp_rr64(ra, rb); } else { enc.emit_cmp_rr32(ra, rb); }
-                    Self::build_nzcv(enc, Self::NZCV_SUB);
+                    Self::build_nzcv(enc, Self::NZCV_SUB, elide_nzcv);
                 }
                 let jmp_to_end = enc.emit_jmp_rel32();
                 // false path: store the literal NZCV.
