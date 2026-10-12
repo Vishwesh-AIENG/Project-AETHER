@@ -77,6 +77,14 @@ unsafe fn write_cr3(cr3: u64) {
     unsafe { core::arch::asm!("mov cr3, {}", in(reg) cr3, options(nostack)) };
 }
 
+/// Invalidate the TLB entry for one virtual address. REQUIRED after upgrading a
+/// present shadow leaf (read-only → writable): the stale RO entry would else
+/// re-fault the write forever. Harmless (cheap) after a first fill too.
+#[allow(unsafe_code)]
+unsafe fn invlpg(va: u64) {
+    unsafe { core::arch::asm!("invlpg [{}]", in(reg) va, options(nostack)) };
+}
+
 /// Build the shadow root: clone every PML4 entry from the live CR3 (so the whole
 /// hypervisor identity map — code, stack, ctx, JIT, IDT, the 4–8 GiB guest
 /// window — stays mapped), returning the shadow PML4's physical address. Guest
@@ -262,56 +270,281 @@ fn guest_va_of(cr2: u64) -> u64 {
     }
 }
 
-/// Resumable-#PF fill. Called from the `#PF` stub. Returns 1 when the fault was
-/// a guest-alias shadow miss that we filled (the faulting `mov` should be
-/// re-executed via `iretq`), or 0 when it is NOT ours / not fillable (an ARM
-/// fault or MMIO or a genuine hypervisor bug) — the stub then falls to the
-/// post-mortem. `error` is the #PF error code (bit1 = write).
+// A single `ret` in host_idt.rs: the ARM-abort redirect target. At a direct-mov
+// fault the translated block's stack is clean, so `iretq` to this (with the
+// frame's RSP) returns into `enter_host_block` → the dispatcher, which injects
+// the pending abort.
+unsafe extern "C" {
+    fn host_block_abort_ret();
+}
+
+/// `#PF`-frame layout (u64 indices), matching the push order in host_idt.rs's
+/// resumable #PF stub: r15@0 … rax@14, error@15, RIP@16, CS@17, RFLAGS@18,
+/// RSP@19, SS@20.
+const FRAME_RIP: usize = 16;
+/// x86 GPR number (0=rax..15=r15) → frame u64 index. 255 = RSP (never a mov reg
+/// here).
+const REG_SLOT: [u8; 16] = [14, 12, 11, 13, 255, 8, 10, 9, 7, 6, 5, 4, 3, 2, 1, 0];
+
+/// A decoded RAX-base `mov` (the alias deref the translator emits).
+struct MovInfo {
+    is_load: bool,
+    size: u8,   // 1/2/4/8
+    signed: bool,
+    reg: u8,    // x86 GPR number (0..15)
+    len: u8,    // instruction length in bytes
+}
+
+/// Decode the faulting alias-deref `mov` at `rip`. Only the exact RAX-base,
+/// disp-0 integer forms the hardware-MMU lowering emits are recognised (loads:
+/// mov r64/r32, movzx/movsx 8/16, movsxd 32; stores: mov sized) — anything else
+/// returns None (→ fatal post-mortem, so an unexpected form is diagnosed).
+#[allow(unsafe_code)]
+unsafe fn decode_mov(rip: u64) -> Option<MovInfo> {
+    let b = |i: u64| unsafe { ptr::read((rip + i) as *const u8) };
+    let mut i = 0u64;
+    let mut op66 = false;
+    if b(i) == 0x66 {
+        op66 = true;
+        i += 1;
+    }
+    let mut rex = 0u8;
+    if b(i) & 0xF0 == 0x40 {
+        rex = b(i);
+        i += 1;
+    }
+    let rex_w = rex & 0x08 != 0;
+    let rex_r = rex & 0x04 != 0;
+    let op = b(i);
+    i += 1;
+    let (is_load, size, signed, two_byte_op): (bool, u8, bool, bool) = match op {
+        0x8B => (true, if rex_w { 8 } else { 4 }, false, false), // mov r,[rax]
+        0x63 => (true, 4, true, false),                          // movsxd r64,m32
+        0x89 => (false, if rex_w { 8 } else if op66 { 2 } else { 4 }, false, false), // mov [rax],r
+        0x88 => (false, 1, false, false),                        // mov [rax],r8
+        0x0F => {
+            let op2 = b(i);
+            i += 1;
+            match op2 {
+                0xB6 => (true, 1, false, true),  // movzx r64,m8
+                0xB7 => (true, 2, false, true),  // movzx r64,m16
+                0xBE => (true, 1, true, true),   // movsx r64,m8
+                0xBF => (true, 2, true, true),   // movsx r64,m16
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let _ = two_byte_op;
+    let modrm = b(i);
+    i += 1;
+    // Require mod=00, rm=000 (base RAX, no SIB, no disp).
+    if modrm & 0xC0 != 0x00 || modrm & 0x07 != 0x00 {
+        return None;
+    }
+    let reg = ((modrm >> 3) & 0x07) | if rex_r { 8 } else { 0 };
+    Some(MovInfo { is_load, size, signed, reg, len: i as u8 })
+}
+
+/// Resumable-#PF handler for the hardware-MMU path. `frame` points at the saved
+/// GPRs (see FRAME_RIP). Returns 1 to `iretq` (possibly after patching the
+/// frame's RIP / a dest GPR), or 0 to fall to the post-mortem.
 ///
-/// Fills the LIVE CR3's PML4 (its high slots are empty under the OVMF identity
-/// map) so there is no CR3 switch: the `mov [alias]` re-executes and the x86 MMU
-/// now walks the freshly-installed shadow entry.
+/// Classifies the guest-alias fault by an ARM walk: RAM → fill the live CR3's
+/// gap slot and resume (re-run the mov); MMIO → emulate via the soft-MMU helpers
+/// and advance RIP past the mov; ARM fault → record the pending Data Abort and
+/// redirect to the block-abort ret stub.
 #[unsafe(no_mangle)]
-pub extern "C" fn shadow_pf_try(cr2: u64, error: u64) -> u64 {
-    // SAFETY: EL2-private single-vCPU diagnostic counter.
+pub extern "C" fn shadow_pf_try(cr2: u64, error: u64, frame: *mut u64) -> u64 {
+    // SAFETY: EL2-private single-vCPU diagnostics.
     unsafe {
         *ptr::addr_of_mut!(SHADOW_PF_CALLS) += 1;
         *ptr::addr_of_mut!(SHADOW_PF_LAST_CR2) = cr2;
     }
     if !is_guest_alias(cr2) {
-        return 0;
+        return 0; // not ours — genuine hypervisor fault → post-mortem
     }
     // SAFETY: EL2-private single-vCPU; NPF_GUEST_CTX is the live guest context.
     unsafe {
-        use aether_translator::runtime::context::CTX_U64S;
-        let ctx = ptr::addr_of!(crate::boot_x86::NPF_GUEST_CTX) as *const u64;
+        use aether_translator::runtime::context::{CTX_U64S, SYSREG_SLOT0};
+        use aether_translator::runtime::mmu::{
+            aether_mmu_resolve, aether_mmu_store, aether_mmu_xlate, data_abort_esr, pa_is_mmio,
+            SLOT_PEND_ESR, SLOT_PEND_FAR, SLOT_PEND_PENDING,
+        };
+        let ctx = ptr::addr_of_mut!(crate::boot_x86::NPF_GUEST_CTX) as *mut u64;
         let sysregs = core::slice::from_raw_parts(ctx, CTX_U64S);
         let guest_va = guest_va_of(cr2);
         let is_write = error & 0x2 != 0;
-        let pml4 = read_cr3() & 0x000F_FFFF_FFFF_F000;
-        let mut alloc = pool_alloc;
-        let read = |pa: u64| ptr::read(pa as *const u64);
-        let mut write = |pa: u64, v: u64| ptr::write(pa as *mut u64, v);
-        match aether_translator::runtime::shadow::shadow_fill_at(
-            pml4, sysregs, guest_va, cr2, is_write, &mut alloc, &read, &mut write,
-        ) {
-            Ok(_) => {
+
+        match aether_mmu_resolve(sysregs, guest_va, is_write) {
+            Err((kind, level)) => {
+                // ARM fault: record the pending Data Abort and redirect the block
+                // to the abort ret-stub (clean stack at a direct-mov).
+                *ctx.add(SYSREG_SLOT0 + SLOT_PEND_PENDING) = 1;
+                *ctx.add(SYSREG_SLOT0 + SLOT_PEND_FAR) = guest_va;
+                *ctx.add(SYSREG_SLOT0 + SLOT_PEND_ESR) = data_abort_esr(kind, level, is_write);
+                *frame.add(FRAME_RIP) = (host_block_abort_ret as unsafe extern "C" fn()) as usize as u64;
+                1
+            }
+            Ok(pa) if pa_is_mmio(pa) => {
+                // MMIO: emulate via the soft-MMU helpers, do NOT fill the shadow,
+                // advance RIP past the faulting mov.
+                let rip = *frame.add(FRAME_RIP);
+                let mi = match decode_mov(rip) {
+                    Some(m) => m,
+                    None => return 0, // unrecognised form → post-mortem
+                };
+                let slot = REG_SLOT[(mi.reg & 0xF) as usize];
+                if slot == 255 {
+                    return 0;
+                }
+                if mi.is_load {
+                    let mpa = aether_mmu_xlate(ctx, guest_va, 0, mi.size as u64);
+                    if mpa == 0 {
+                        return 0; // fault during emulation
+                    }
+                    let raw = match mi.size {
+                        1 => ptr::read(mpa as *const u8) as u64,
+                        2 => ptr::read(mpa as *const u16) as u64,
+                        4 => ptr::read(mpa as *const u32) as u64,
+                        _ => ptr::read(mpa as *const u64),
+                    };
+                    let val = if mi.signed {
+                        match mi.size {
+                            1 => raw as u8 as i8 as i64 as u64,
+                            2 => raw as u16 as i16 as i64 as u64,
+                            4 => raw as u32 as i32 as i64 as u64,
+                            _ => raw,
+                        }
+                    } else if mi.size == 4 {
+                        raw & 0xFFFF_FFFF // mov r32 zero-extends
+                    } else {
+                        raw
+                    };
+                    *frame.add(slot as usize) = val;
+                } else {
+                    let rv = *frame.add(slot as usize);
+                    let val = match mi.size {
+                        1 => rv & 0xFF,
+                        2 => rv & 0xFFFF,
+                        4 => rv & 0xFFFF_FFFF,
+                        _ => rv,
+                    };
+                    if aether_mmu_store(ctx, guest_va, mi.size as u64, val) == 0 {
+                        // store helper signalled a fault (its ABI) — but RAM/MMIO
+                        // writes return the PA/non-zero; 0 means a fault was
+                        // recorded. Redirect to the abort stub.
+                        *frame.add(FRAME_RIP) = (host_block_abort_ret as unsafe extern "C" fn()) as usize as u64;
+                        return 1;
+                    }
+                }
+                *frame.add(FRAME_RIP) = rip + mi.len as u64;
+                1
+            }
+            Ok(pa) => {
+                // Plain RAM: map the alias -> resolved PA page base in the live
+                // CR3 (writable = this access's intent; a write to a read-only
+                // fill re-faults and upgrades). iretq re-runs the mov.
+                // Pool guard: user-only resets don't reclaim pool pages, so when
+                // the bump nears the cap do a full reset (reclaims everything)
+                // before mapping — avoids pointing a leaf at pool page 0.
+                if *ptr::addr_of!(SHADOW_NEXT) + 4 >= POOL_PAGES {
+                    shadow_reset();
+                }
+                let pml4 = read_cr3() & 0x000F_FFFF_FFFF_F000;
+                let mut alloc = pool_alloc;
+                let read = |p: u64| ptr::read(p as *const u64);
+                let mut write = |p: u64, v: u64| ptr::write(p as *mut u64, v);
+                aether_translator::runtime::shadow::shadow_map_page(
+                    pml4, cr2, pa & !0xFFF, is_write, &mut alloc, &read, &mut write,
+                );
+                // Flush the (possibly stale read-only) TLB entry for this alias so
+                // a RO→RW upgrade takes effect; harmless on a first fill.
+                invlpg(cr2);
                 *ptr::addr_of_mut!(SHADOW_FILLS) += 1;
                 1
             }
-            // ARM fault / MMIO / pool exhaustion — not handled yet; fatal for now
-            // (surfaces in the post-mortem so these cases are diagnosed, not
-            // silently wrong). Increment 3b handles ARM-abort + MMIO unwinding.
-            Err(_) => 0,
         }
     }
 }
 
 /// Count of shadow fills served by the resumable #PF (diagnostic).
 pub static mut SHADOW_FILLS: u64 = 0;
+/// Count of shadow resets (diagnostic).
+pub static mut SHADOW_RESETS: u64 = 0;
+
+/// Drop the whole gap shadow: clear the live CR3's PML4[0x100] (user) and
+/// [0x101] (kernel) entries, reset the pool bump, and flush the TLB (CR3
+/// reload). Registered as the translator's shadow-reset callback and invoked on
+/// every TTBR/TCR/MAIR write and TLBI, so the shadow never goes stale. v1 is a
+/// whole-shadow drop (a refault storm after a TTBR0 switch); a per-ASID / PCID
+/// design is the follow-up optimisation.
+#[unsafe(no_mangle)]
+pub extern "C" fn shadow_reset() {
+    // SAFETY: EL2-private single-vCPU; the gap PML4 slots belong to the shadow.
+    unsafe {
+        let pml4 = read_cr3() & 0x000F_FFFF_FFFF_F000;
+        ptr::write((pml4 + 0x100 * 8) as *mut u64, 0); // user half
+        ptr::write((pml4 + 0x101 * 8) as *mut u64, 0); // kernel half
+        *ptr::addr_of_mut!(SHADOW_NEXT) = 0;
+        *ptr::addr_of_mut!(SHADOW_RESETS) += 1;
+        let c = read_cr3();
+        write_cr3(c); // flush non-global TLB
+    }
+}
+
+/// User-half reset (TTBR0 switch): clear only PML4[0x100]; the kernel aliases
+/// (PML4[0x101]) survive, so kernel code keeps its hardware-MMU mappings across
+/// the SW_TTBR0_PAN toggles that happen on every uaccess. Pool is NOT reset
+/// (kernel entries still reference it); user re-fills bump new pool pages.
+#[unsafe(no_mangle)]
+pub extern "C" fn shadow_reset_user() {
+    // SAFETY: EL2-private single-vCPU.
+    unsafe {
+        let pml4 = read_cr3() & 0x000F_FFFF_FFFF_F000;
+        ptr::write((pml4 + 0x100 * 8) as *mut u64, 0);
+        *ptr::addr_of_mut!(SHADOW_RESETS) += 1;
+        let c = read_cr3();
+        write_cr3(c);
+    }
+}
+
+/// Install the shadow machinery with the translator (once, at boot): the
+/// shadow-reset callback. Enables HW-MMU invalidation coherence.
+pub fn register() {
+    aether_translator::runtime::mmu::register_shadow_reset(shadow_reset, shadow_reset_user);
+}
 /// Count of #PF stub -> shadow_pf_try entries (diagnostic).
 pub static mut SHADOW_PF_CALLS: u64 = 0;
 pub static mut SHADOW_PF_LAST_CR2: u64 = 0;
+
+/// ch66 P3b: auto-enable the hardware-MMU path on the first guest kernel VA
+/// (MMU guaranteed on). Default OFF — flip to true for an exploratory HW-MMU
+/// boot. When it fires it registers the shadow-reset callback, turns on the
+/// translator's direct-mov lowering, and flushes the block cache so every block
+/// re-translates onto the hardware-MMU path.
+pub static HW_MMU_AUTOENABLE: AtomicBool = AtomicBool::new(false);
+static HW_MMU_ON: AtomicBool = AtomicBool::new(false);
+
+#[allow(unsafe_code)]
+pub unsafe fn maybe_enable_hw_mmu(pc: u64) {
+    if !HW_MMU_AUTOENABLE.load(Ordering::Relaxed) || HW_MMU_ON.load(Ordering::Relaxed) {
+        return;
+    }
+    if (pc >> 55) & 1 != 1 {
+        return; // wait for the first kernel VA (guest MMU on)
+    }
+    HW_MMU_ON.store(true, Ordering::Relaxed);
+    register(); // shadow-reset callback (coherence) BEFORE enabling
+    aether_translator::backend::lower_int::HW_MMU_ENABLED.store(true, Ordering::Relaxed);
+    let _ = aether_translator::dbt::aether_dbt_invalidate_all(); // re-translate onto HW path
+    // SAFETY: diagnostic print on the established path.
+    unsafe {
+        dual_puts(b"[hwmmu] ENABLED at pc=");
+        dual_puthex64(pc);
+        dual_puts(b"\n");
+    }
+}
 
 /// Dispatch-loop hook: run the self-test once, the first time a guest KERNEL VA
 /// (TTBR1, bit55 set) is about to execute with the MMU on. No-op afterwards and

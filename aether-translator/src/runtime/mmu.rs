@@ -194,6 +194,39 @@ const MMIO_RANGES: [MmioRange; 4] = [
 ];
 
 /// True iff `pa` is in a known emulated-device MMIO window.
+/// Public wrapper: is `pa` in an emulated-device MMIO window? Used by the
+/// hardware-MMU #PF path to route an MMIO access to the emulator.
+pub fn pa_is_mmio(pa: u64) -> bool {
+    is_mmio(pa)
+}
+
+/// ch66 P3b: resolve a guest VA to its host PA using the FULL software-MMU path
+/// (TBI mask, flat when MMU off, else `xlate_page` — which carries the TLB and
+/// the kernel-image / KPTI-swapper fallbacks the boot depends on), returning the
+/// real PA (RAM or MMIO — the caller checks `pa_is_mmio`) or the ARM fault. It
+/// does NOT record a pending fault or park MMIO (unlike `aether_mmu_xlate`), so
+/// the hardware-MMU #PF handler can classify RAM / MMIO / abort itself. This is
+/// the translation `shadow_pf_try` must use (raw `walk` lacks the fallbacks and
+/// would spuriously abort kernel accesses -> boot hang).
+pub fn aether_mmu_resolve(
+    sysregs: &[u64],
+    va: u64,
+    is_write: bool,
+) -> Result<u64, (FaultKind, u8)> {
+    let va = tbi_mask_va(sysregs, va);
+    let mmu_on = sysregs[SYSREG_SLOT0 + SLOT_SCTLR] & SCTLR_M != 0;
+    if !mmu_on {
+        // Flat (VA == PA), confined to the guest window (No-Boundary).
+        if in_window(va) || is_mmio(va) {
+            Ok(va)
+        } else {
+            Err((FaultKind::Translation, 0))
+        }
+    } else {
+        xlate_page(sysregs, va, is_write)
+    }
+}
+
 fn is_mmio(pa: u64) -> bool {
     let mut i = 0;
     while i < MMIO_RANGES.len() {
@@ -1253,6 +1286,52 @@ pub extern "C" fn aether_mmu_flush_all() {
         let t = core::ptr::addr_of_mut!(MMU_TLBI_FLUSH_ALL_TOTAL);
         *t = (*t).saturating_add(1);
     }
+    aether_shadow_reset();
+}
+
+// ── ch66 P3b: hardware-MMU shadow-reset callback ────────────────────────────
+// Under the hardware-MMU path the guest's VA->PA mapping is also cached in x86
+// shadow page tables (the gap aliases). Those are NOT ASID-tagged, so any event
+// that can change the mapping — TLBI, TCR/MAIR write, TTBR switch — must drop
+// the shadow. The hypervisor registers a reset fn here; it is invoked from every
+// soft-TLB flush / block invalidate so the shadow stays coherent with the SW
+// TLB. No-op (zero cost) on host/test builds and until HW-MMU is enabled.
+pub type ShadowResetFn = unsafe extern "C" fn();
+static SHADOW_RESET_ALL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static SHADOW_RESET_USER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Install the hypervisor's shadow-reset callbacks (once, at boot): `all` drops
+/// the whole gap shadow (TLBI / TCR / MAIR / TTBR1), `user` drops only the user
+/// (TTBR0) half so a TTBR0 switch — which SW_TTBR0_PAN does on every uaccess —
+/// does NOT storm the kernel aliases.
+pub fn register_shadow_reset(all: ShadowResetFn, user: ShadowResetFn) {
+    SHADOW_RESET_ALL.store(all as usize, core::sync::atomic::Ordering::Release);
+    SHADOW_RESET_USER.store(user as usize, core::sync::atomic::Ordering::Release);
+}
+
+/// Invoke the registered whole-shadow reset (TLBI / TCR / MAIR / TTBR1).
+#[allow(unsafe_code)]
+pub extern "C" fn aether_shadow_reset() {
+    let raw = SHADOW_RESET_ALL.load(core::sync::atomic::Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+    // SAFETY: registered via register_shadow_reset.
+    let f: ShadowResetFn = unsafe { core::mem::transmute(raw) };
+    unsafe { f() };
+}
+
+/// Invoke the registered user-half shadow reset (TTBR0 switch). Emitted into
+/// translated code for an `MSR TTBR0_EL1`.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_shadow_reset_user() {
+    let raw = SHADOW_RESET_USER.load(core::sync::atomic::Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+    // SAFETY: registered via register_shadow_reset.
+    let f: ShadowResetFn = unsafe { core::mem::transmute(raw) };
+    unsafe { f() };
 }
 
 /// O(1) whole-TLB invalidate: advance the generation so every entry is stale.
@@ -1321,6 +1400,7 @@ pub extern "C" fn aether_mmu_tlbi_va(va: u64) {
             }
         }
     }
+    aether_shadow_reset();
 }
 
 /// Phase-E: spurious-fault loop breaker. The kernel's

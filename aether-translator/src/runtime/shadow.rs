@@ -109,6 +109,44 @@ pub fn shadow_fill_at(
     Ok(pa)
 }
 
+/// Install a single x86 shadow leaf: map `index_va` → `pa_page_base` (4 KiB
+/// aligned) with the given writability, creating intermediate tables from
+/// `alloc` as needed. Unlike [`shadow_fill`]/[`shadow_fill_at`] it does NOT walk
+/// the guest ARM tables — the caller already resolved the PA (via
+/// `aether_mmu_resolve`, which carries the kernel fallbacks). Used by the
+/// hardware-MMU #PF handler. `writable` sets the leaf R/W bit (map read-only on
+/// a read fill; a later write re-faults and upgrades).
+#[allow(clippy::too_many_arguments)]
+pub fn shadow_map_page(
+    pml4_pa: u64,
+    index_va: u64,
+    pa_page_base: u64,
+    writable: bool,
+    alloc: &mut dyn FnMut() -> u64,
+    read_phys: &dyn Fn(u64) -> u64,
+    write_phys: &mut dyn FnMut(u64, u64),
+) {
+    let idx = x86_indices(index_va);
+    let mut table = pml4_pa;
+    for level in 0..3 {
+        let entry_pa = table + (idx[level] as u64) * 8;
+        let entry = read_phys(entry_pa);
+        table = if entry & X86_P != 0 {
+            entry & X86_ADDR_MASK
+        } else {
+            let next = alloc();
+            write_phys(entry_pa, (next & X86_ADDR_MASK) | X86_P | X86_RW);
+            next
+        };
+    }
+    let leaf_pa = table + (idx[3] as u64) * 8;
+    let mut pte = (pa_page_base & X86_ADDR_MASK) | X86_P;
+    if writable {
+        pte |= X86_RW;
+    }
+    write_phys(leaf_pa, pte);
+}
+
 /// Software walk of x86 shadow tables (the inverse of [`shadow_fill`]), for
 /// tests and diagnostics. Returns `(host_pa, writable)` or `None` if any level
 /// is not present. 4 KiB leaves only (shadow_fill never creates large pages).

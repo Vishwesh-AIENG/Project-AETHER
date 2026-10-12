@@ -136,6 +136,7 @@ host_isr_pf:
     push r15
     mov rcx, cr2
     mov rdx, [rsp + 120]
+    mov r8, rsp
     sub rsp, 40
     call shadow_pf_try
     add rsp, 40
@@ -187,6 +188,10 @@ host_isr_generic:
 host_isr_generic_err:
     push 254
     jmp host_isr_common
+
+.global host_block_abort_ret
+host_block_abort_ret:
+    ret
 
 host_isr_common:
     mov rcx, [rsp]

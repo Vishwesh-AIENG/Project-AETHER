@@ -5511,9 +5511,10 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                 (*ptr::addr_of!(NPF_GUEST_CTX))[aether_translator::runtime::context::SYSREG_SLOT0
                     + aether_translator::runtime::mmu::SLOT_TTBR0],
             );
-            // ch66 P3b: one-shot hardware-MMU self-test on the first kernel-VA
-            // block (gated + idempotent; no-op once done or when disabled).
+            // ch66 P3b: one-shot hardware-MMU self-test + auto-enable on the
+            // first kernel-VA block (gated + idempotent; no-op when disabled).
             crate::shadow_mmu::maybe_selftest(ptr::addr_of!(NPF_GUEST_CTX) as *const u64, pc);
+            crate::shadow_mmu::maybe_enable_hw_mmu(pc);
             last_pc = pc;
             // [vma] record the just-allocated vm_area_struct (x0) at vm_area_dup+0x2c
             // (the block after `bl kmem_cache_alloc`). At the fork-corruption fault

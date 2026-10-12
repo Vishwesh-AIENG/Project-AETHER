@@ -36,10 +36,22 @@ const HW_MMU_GAP_BASE: i64 = 0xFFFF_8000_0000_0000u64 as i64;
 impl IntLower {
     /// Emit `RAX = GAP_BASE | (addr_reg & 0x0000_00FF_FFFF_FFFF)` — the
     /// hardware-MMU access alias. Clobbers RAX/RCX (reserved scratch); addr_reg
-    /// is preserved.
+    /// is preserved. First stamps the guest PC of THIS instruction into the PC
+    /// slot so that a hardware #PF (demand page / permission) injects the abort
+    /// with the correct ELR (the faulting instruction), not the stale block-start
+    /// PC — without it the kernel ERETs to the wrong instruction after handling
+    /// the fault and the guest re-runs earlier ops (the /init corruption shape).
+    /// (The software path gets this from the MMU helper's fault-exit; the
+    /// hardware #PF has no helper, so the stamp must be eager. A host-RIP→guest-PC
+    /// side table is the later zero-cost optimisation.)
     fn emit_hw_mmu_alias(enc: &mut X86Encoder, addr_reg: u8) {
         const RAX: u8 = 0;
         const RCX: u8 = 1;
+        let pc = crate::backend::encode::CUR_LOWER_PC.load(core::sync::atomic::Ordering::Relaxed);
+        if pc != 0 {
+            enc.emit_mov_r64_imm64(RAX, pc as i64);
+            enc.emit_mov_mem_r64(CONTEXT_REG, PC_DISP, RAX);
+        }
         enc.emit_mov_rr64(RAX, addr_reg);
         enc.emit_shl_r64_imm8(RAX, 24); // drop bits [63:40]…
         enc.emit_shr_r64_imm8(RAX, 24); // …leaving va & 0xFF_FFFF_FFFF
@@ -3189,7 +3201,19 @@ impl IntLower {
                         Self::emit_dbt_invalidate_call(enc);
                     }
                     MsrMmuEffect::InvalidateBlocks => Self::emit_dbt_invalidate_call(enc),
-                    MsrMmuEffect::TtbrSwitchOnly => {}
+                    MsrMmuEffect::TtbrSwitchOnly => {
+                        // ch66 P3b: a TTBR0 switch changes user VA->PA, so drop
+                        // the hardware-MMU shadow's user half. Emitted ONLY when
+                        // the hardware-MMU path is enabled at translate time, so
+                        // the software-TLB path (HW off) stays byte-identical —
+                        // the SW TLB is TTBR-tagged and needs nothing here.
+                        if HW_MMU_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                            Self::emit_dbt_invalidate_call_to(
+                                enc,
+                                crate::runtime::mmu::aether_shadow_reset_user as *const () as usize,
+                            );
+                        }
+                    }
                     MsrMmuEffect::None => {}
                 }
             }

@@ -1086,6 +1086,8 @@ pub fn aether_dbt_dispatch_block(guest_pc: u64, guest_mem: &[u8]) -> AetherDbtRe
 /// return value consumed); the `AetherDbtResult` is for the structural /
 /// host-test callers.
 pub extern "C" fn aether_dbt_invalidate_all() -> AetherDbtResult {
+    // ch66 P3b: also drop the hardware-MMU shadow (TTBR1/TLBI change mappings).
+    crate::runtime::mmu::aether_shadow_reset();
     match global::with(|rt| rt.invalidate_all()) {
         Some(()) => AetherDbtResult::Ok,
         None => AetherDbtResult::NotInitialised,
