@@ -22,9 +22,47 @@
 // via translate_straight_line. Two such tests running concurrently race (loads
 // read 0, torn blocks, 0xC0000005). So every #[test] takes this ONE lock first.
 // Poison-tolerant: one failing test must not cascade-fail the rest.
+//
+// Serializing is NOT enough on its own: the lock makes tests mutually
+// exclusive but the ORDER they acquire it in is nondeterministic under the
+// multi-threaded harness, and the global state outlives each test. Several
+// tests translate DIFFERENT code at the SAME guest PCs (0x1000, 0x2000, ...)
+// through the global DbtRuntime; `aether_dbt_init` no-ops once live, so a test
+// that does not flush first is served the previous test's cached block. E.g.
+// m3_cbz_cbnz_next_pc (MOVZ;CBZ @0x1000) running after
+// m3_multiblock_store_load_dispatch executed its cached `STR X0,[X2]` with
+// X2 = 0 under the (0, u64::MAX) window that test left pinned -> a flat host
+// write to NULL = 0xC0000005. --test-threads=1 runs alphabetically (m3_cbz
+// first), which is why it never reproduced single-threaded. So `serial()`
+// also resets every piece of shared state a test can leave behind, giving
+// each test the same fresh-process view it gets when run alone.
 static EXEC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn serial() -> std::sync::MutexGuard<'static, ()> {
-    EXEC_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    let guard = EXEC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_global_state();
+    guard
+}
+
+/// Return the process-global translator/MMU state to its initial values.
+/// Called with EXEC_LOCK held, before the test body runs.
+fn reset_global_state() {
+    use aether_translator::dbt::{aether_dbt_invalidate_all, aether_dbt_set_space};
+    use aether_translator::runtime::mmu::{
+        aether_mmu_flush_all, aether_mmu_set_window, aether_mmu_set_window2, GUEST_PA_BASE,
+        GUEST_PA_SIZE,
+    };
+    // Drop every cached block, chain link and jump-cache entry (returns
+    // NotInitialised before the first aether_dbt_init — nothing to drop then).
+    let _ = aether_dbt_invalidate_all();
+    aether_dbt_set_space(0);
+    // Software TLB: entries are tagged by TTBR value, which in these tests is a
+    // host heap address a later test's page table can be re-allocated at.
+    aether_mmu_flush_all();
+    // Guest-PA windows back to their boot defaults (tests pin host arenas or
+    // (0, u64::MAX) and not all of them restore it).
+    aether_mmu_set_window(GUEST_PA_BASE, GUEST_PA_SIZE);
+    aether_mmu_set_window2(0, 0);
+    aether_translator::runtime::sysreg_rt::aether_platform_reset();
 }
 
 use aether_translator::backend::{IntLower, X86Encoder};
