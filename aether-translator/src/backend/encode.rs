@@ -30,6 +30,15 @@ use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 /// (e.g. unit tests that lower with pc==0, where no StampFaultPc is emitted).
 pub static CUR_LOWER_PC: AtomicU64 = AtomicU64::new(0);
 
+/// ch66: the host CPU executes FMA3 (VEX) with AVX state enabled. When false,
+/// the FMA3 emitters emit the fail-loud UD2 sentinel instead, so the DBT's
+/// trial-lowering routes the instruction to the exact `simd_rt` helper (soft
+/// fused multiply-add). The hypervisor sets it at boot from CPUID + XCR0; host
+/// tests run on an FMA-capable CPU, so the default is true.
+pub static HOST_FMA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+/// ch66: the host executes F16C (VCVTPH2PS / VCVTPS2PH). Same routing as HOST_FMA.
+pub static HOST_F16C: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
 /// Guest ARM PC of the LAST op that called `emit_ud2`. Read by the block-safety
 /// gate after it detects a UD2 sentinel.
 pub static UNSAFE_OP_PC: AtomicU64 = AtomicU64::new(0);
@@ -1574,6 +1583,10 @@ impl X86Encoder {
     //   VFNMSUB213 0xAF:  dst = -src1*dst - src2
     // The fused multiply-add rounds ONCE, matching ARM FMADD/FMSUB/FNMADD/FNMSUB.
     fn emit_vex_fma213(&mut self, opcode: u8, w: bool, dst: u8, vvvv: u8, rm: u8) {
+        if !HOST_FMA.load(Ordering::Relaxed) {
+            self.emit_ud2(); // no FMA3/AVX on this host: route to simd_rt
+            return;
+        }
         // Byte 1: C4 (3-byte VEX escape).
         self.buf.push(0xC4);
         // Byte 2: R X B (inverted) in [7:5], mmmmm = 00010 (0F38) in [4:0].
@@ -1641,6 +1654,10 @@ impl X86Encoder {
     /// General 3-byte VEX, VEX.128 (L=0), pp=01 (66), register-register form:
     /// `map` = mmmmm (0b00010 = 0F38, 0b00011 = 0F3A); vvvv unused (1111).
     fn emit_vex128_66(&mut self, map: u8, opcode: u8, reg: u8, rm: u8) {
+        if !HOST_F16C.load(Ordering::Relaxed) {
+            self.emit_ud2(); // no F16C/AVX on this host: route to simd_rt
+            return;
+        }
         self.buf.push(0xC4);
         let r_inv = ((!(reg >> 3)) & 1) << 7;
         let b_inv = ((!(rm >> 3)) & 1) << 5;

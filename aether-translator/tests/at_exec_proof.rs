@@ -63,6 +63,9 @@ fn reset_global_state() {
     aether_mmu_set_window(GUEST_PA_BASE, GUEST_PA_SIZE);
     aether_mmu_set_window2(0, 0);
     aether_translator::runtime::sysreg_rt::aether_platform_reset();
+    // ch66: a test may force the no-FMA lowering; every other test expects FMA3.
+    aether_translator::backend::encode::HOST_FMA.store(true, core::sync::atomic::Ordering::Relaxed);
+    aether_translator::backend::encode::HOST_F16C.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
 use aether_translator::backend::{IntLower, X86Encoder};
@@ -9825,4 +9828,61 @@ fn inline_tlb_store_spilled_value_survives_probe() {
         let got = unsafe { core::ptr::read_volatile(data_a as *const u64) };
         assert_eq!(got as i64, VAL, "pass {pass}: spilled store value must survive the probe");
     }
+}
+
+/// ch66: on a host without usable FMA3 (e.g. the WHPX `kvm64` vCPU, or real
+/// firmware leaving AVX state off) a VEX FMA is a #UD. With HOST_FMA=false the
+/// FMA3 emitters emit the UD2 sentinel, the DBT's trial-lowering routes the word
+/// to the exact simd_rt helper (soft fused multiply-add), and the translated
+/// block must contain NO VEX FMA while computing the same single-rounding
+/// result as the hardware path. FMADD d0,d1,d2,d3 + FMLA v4.2d,v5.2d,v6.2d.
+#[test]
+fn fma_routes_to_soft_fma_without_host_fma() {
+    let _serial = serial();
+    use aether_translator::backend::encode::HOST_FMA;
+    use aether_translator::dbt::{aether_dbt_set_space, AetherDbtResult, DbtRuntime};
+    use aether_translator::runtime::context::{vec_disp, CHAIN_BUDGET_IDX, SYSREG_SLOT0};
+    use core::sync::atomic::Ordering;
+    extern "system" {
+        fn VirtualProtect(a: *const core::ffi::c_void, s: usize, n: u32, o: *mut u32) -> i32;
+    }
+    let vd = |r: u8| (vec_disp(r) as usize) / 8;
+    // fmadd d0,d1,d2,d3 | fmla v4.2d,v5.2d,v6.2d | b .+0x100
+    let words: [u32; 3] = [0x1F42_0C20, 0x4E66_CCA4, 0x1400_0040];
+    let mem: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let (n, m, a) = (1.0f64 + f64::EPSILON, 1.0f64 - f64::EPSILON, -1.0f64);
+    let (v5, v6, v4) = ([3.0f64, 1e-300], [0.1f64, 1e-10], [0.7f64, -1e-310]);
+    for host_fma in [true, false] {
+        HOST_FMA.store(host_fma, Ordering::Relaxed);
+        aether_dbt_set_space(0);
+        let mut rt = DbtRuntime::new();
+        let cb = rt.code_buf.base_ptr();
+        let mut old = 0u32;
+        // SAFETY: making the runtime's own code arena executable for in-place runs.
+        assert!(unsafe { VirtualProtect(cb as *const _, rt.code_buf.capacity(), 0x40, &mut old) } != 0);
+        assert_eq!(rt.translate_block(0x30000, &mem), AetherDbtResult::Ok);
+        let (off, len) = rt.host_offset_for_pc(0x30000).expect("translated");
+        // SAFETY: the translated block's bytes inside the runtime arena.
+        let code = unsafe { core::slice::from_raw_parts(cb.add(off), len) };
+        let has_vex_fma = code.windows(4).any(|w| w[0] == 0xC4 && w[1] & 0x1F == 0x02 && (0xA8..=0xAF).contains(&w[3]));
+        assert_eq!(has_vex_fma, host_fma, "VEX FMA present iff the host has FMA (host_fma={host_fma})");
+        let mut ctx = vec![0u64; CTX_U64S];
+        ctx[vd(1)] = n.to_bits();
+        ctx[vd(2)] = m.to_bits();
+        ctx[vd(3)] = a.to_bits();
+        for i in 0..2 {
+            ctx[vd(4) + i] = v4[i].to_bits();
+            ctx[vd(5) + i] = v5[i].to_bits();
+            ctx[vd(6) + i] = v6[i].to_bits();
+        }
+        ctx[SYSREG_SLOT0 + CHAIN_BUDGET_IDX] = 0; // stop at the block exit
+        // SAFETY: RET-terminated translated block in the RWX arena.
+        unsafe { enter_block(cb.add(off), ctx.as_mut_ptr()) };
+        assert_eq!(ctx[vd(0)], n.mul_add(m, a).to_bits(), "FMADD single rounding (host_fma={host_fma})");
+        assert_eq!(ctx[vd(0) + 1], 0, "FMADD zeroes V0[127:64]");
+        for i in 0..2 {
+            assert_eq!(ctx[vd(4) + i], v5[i].mul_add(v6[i], v4[i]).to_bits(), "FMLA lane {i} (host_fma={host_fma})");
+        }
+    }
+    HOST_FMA.store(true, Ordering::Relaxed);
 }

@@ -45,22 +45,107 @@ static mut SHADOW_NEXT: usize = 0;
 /// The shadow root (PML4). One page; its PA is the value loaded into CR3.
 static mut SHADOW_PML4: Page4K = Page4K([0u8; 4096]);
 
+/// Free list of reclaimed pool pages (page indices), so dropped user subtrees
+/// return their tables instead of leaking until the next full reset.
+static mut FREE_LIST: [u16; POOL_PAGES] = [0; POOL_PAGES];
+static mut FREE_TOP: usize = 0;
+
 /// Allocate a zeroed 4 KiB pool page; returns its (identity) physical address,
 /// or 0 when the pool is exhausted.
 #[allow(unsafe_code)]
 fn pool_alloc() -> u64 {
-    // SAFETY: EL2-private, single-vCPU; bump index bounded below.
+    // SAFETY: EL2-private, single-vCPU; indices bounded by POOL_PAGES.
     unsafe {
-        let n = *ptr::addr_of!(SHADOW_NEXT);
-        if n >= POOL_PAGES {
-            return 0;
-        }
-        *ptr::addr_of_mut!(SHADOW_NEXT) = n + 1;
-        let p = ptr::addr_of_mut!(SHADOW_POOL) as u64 + (n as u64) * 4096;
+        let base = ptr::addr_of_mut!(SHADOW_POOL) as u64;
+        let top = *ptr::addr_of!(FREE_TOP);
+        let n = if top > 0 {
+            *ptr::addr_of_mut!(FREE_TOP) = top - 1;
+            (*ptr::addr_of!(FREE_LIST))[top - 1] as usize
+        } else {
+            let n = *ptr::addr_of!(SHADOW_NEXT);
+            if n >= POOL_PAGES {
+                return 0;
+            }
+            *ptr::addr_of_mut!(SHADOW_NEXT) = n + 1;
+            n
+        };
+        let p = base + (n as u64) * 4096;
         // Already zero in .bss on first use; zero again in case of reuse.
         ptr::write_bytes(p as *mut u8, 0, 4096);
         p
     }
+}
+
+/// Return a pool page (by its physical address) to the free list.
+#[allow(unsafe_code)]
+fn pool_free(pa: u64) {
+    // SAFETY: EL2-private, single-vCPU; `pa` came from pool_alloc.
+    unsafe {
+        let base = ptr::addr_of!(SHADOW_POOL) as u64;
+        let idx = ((pa - base) / 4096) as usize;
+        let top = *ptr::addr_of!(FREE_TOP);
+        if idx < POOL_PAGES && top < POOL_PAGES {
+            (*ptr::addr_of_mut!(FREE_LIST))[top] = idx as u16;
+            *ptr::addr_of_mut!(FREE_TOP) = top + 1;
+        }
+    }
+}
+
+/// Pages still allocatable (bump headroom + free list).
+#[allow(unsafe_code)]
+fn pool_avail() -> usize {
+    // SAFETY: EL2-private, single-vCPU.
+    unsafe { POOL_PAGES - *ptr::addr_of!(SHADOW_NEXT) + *ptr::addr_of!(FREE_TOP) }
+}
+
+/// Free a whole user subtree given its PML4 entry (PDPT -> PD -> PT pages).
+#[allow(unsafe_code)]
+fn free_subtree(pml4e: u64) {
+    const M: u64 = 0x000F_FFFF_FFFF_F000;
+    if pml4e & 1 == 0 {
+        return;
+    }
+    let pdpt = pml4e & M;
+    // SAFETY: the subtree's tables are pool pages (identity-mapped).
+    unsafe {
+        for i in 0..512u64 {
+            let pdpte = ptr::read((pdpt + i * 8) as *const u64);
+            if pdpte & 1 == 0 {
+                continue;
+            }
+            let pd = pdpte & M;
+            for j in 0..512u64 {
+                let pde = ptr::read((pd + j * 8) as *const u64);
+                if pde & 1 != 0 {
+                    pool_free(pde & M);
+                }
+            }
+            pool_free(pd);
+        }
+    }
+    pool_free(pdpt);
+}
+
+/// The PT covering `alias` under the subtree rooted at PML4 entry `pml4e`, or 0
+/// when that 2 MiB region has no PT.
+#[allow(unsafe_code)]
+fn subtree_pt(pml4e: u64, alias: u64) -> u64 {
+    const M: u64 = 0x000F_FFFF_FFFF_F000;
+    if pml4e & 1 == 0 {
+        return 0;
+    }
+    let mut table = pml4e & M;
+    // SAFETY: pool pages, identity-mapped.
+    unsafe {
+        for shift in [30u32, 21] {
+            let e = ptr::read((table + ((alias >> shift) & 0x1FF) * 8) as *const u64);
+            if e & 1 == 0 {
+                return 0;
+            }
+            table = e & M;
+        }
+    }
+    table
 }
 
 #[allow(unsafe_code)]
@@ -450,8 +535,12 @@ pub extern "C" fn shadow_pf_try(cr2: u64, error: u64, frame: *mut u64) -> u64 {
                 // Pool guard: user-only resets don't reclaim pool pages, so when
                 // the bump nears the cap do a full reset (reclaims everything)
                 // before mapping — avoids pointing a leaf at pool page 0.
-                if *ptr::addr_of!(SHADOW_NEXT) + 4 >= POOL_PAGES {
-                    shadow_reset();
+                if pool_avail() < 4 {
+                    ucache_clear(); // reclaim parked user subtrees first
+                    if pool_avail() < 4 {
+                        *ptr::addr_of_mut!(SHADOW_GUARD_RESETS) += 1;
+                        shadow_reset();
+                    }
                 }
                 let pml4 = read_cr3() & 0x000F_FFFF_FFFF_F000;
                 let mut alloc = pool_alloc;
@@ -492,10 +581,13 @@ pub extern "C" fn shadow_reset() {
         let pml4 = read_cr3() & 0x000F_FFFF_FFFF_F000;
         ptr::write((pml4 + 0x100 * 8) as *mut u64, 0); // user half
         ptr::write((pml4 + 0x101 * 8) as *mut u64, 0); // kernel half
-        *ptr::addr_of_mut!(SHADOW_NEXT) = 0;
         // Parked user subtrees live in the pool being reclaimed: drop them, and
-        // label the (now empty) installed user half with the live TTBR0.
-        ucache_clear();
+        // label the (now empty) installed user half with the live TTBR0. The
+        // whole pool is rebuilt from scratch, so the free list is discarded.
+        *ptr::addr_of_mut!(UCACHE) = [(0, 0); UCACHE_N];
+        *ptr::addr_of_mut!(UCACHE_NEXT) = 0;
+        *ptr::addr_of_mut!(SHADOW_NEXT) = 0;
+        *ptr::addr_of_mut!(FREE_TOP) = 0;
         *ptr::addr_of_mut!(UCUR_KEY) = live_ttbr0();
         *ptr::addr_of_mut!(SHADOW_RESETS) += 1;
         let c = read_cr3();
@@ -519,6 +611,10 @@ static mut UCACHE_NEXT: usize = 0;
 static mut UCUR_KEY: u64 = 0;
 /// Count of TTBR0 switches served from the cache (diagnostic).
 pub static mut SHADOW_UCACHE_HITS: u64 = 0;
+/// Count of user-half address-space switches (diagnostic).
+pub static mut SHADOW_USER_SWITCHES: u64 = 0;
+/// Count of full resets forced by pool exhaustion (diagnostic).
+pub static mut SHADOW_GUARD_RESETS: u64 = 0;
 
 /// The guest's live TTBR0_EL1 (incl. ASID) from the dispatcher's context.
 #[allow(unsafe_code)]
@@ -532,11 +628,18 @@ fn live_ttbr0() -> u64 {
     }
 }
 
-/// Drop every parked user subtree (the installed one is untouched).
+/// Drop every parked user subtree (the installed one is untouched), returning
+/// its tables to the pool.
 #[allow(unsafe_code)]
 unsafe fn ucache_clear() {
     unsafe {
-        *ptr::addr_of_mut!(UCACHE) = [(0, 0); UCACHE_N];
+        let cache = &mut *ptr::addr_of_mut!(UCACHE);
+        for e in cache.iter_mut() {
+            if e.1 != 0 {
+                free_subtree(e.1);
+            }
+            *e = (0, 0);
+        }
         *ptr::addr_of_mut!(UCACHE_NEXT) = 0;
     }
 }
@@ -561,9 +664,17 @@ pub extern "C" fn shadow_reset_user() {
         // Park the outgoing subtree (replace its key's entry, else round-robin).
         if cur != 0 {
             match cache.iter().position(|e| e.0 == old_key && e.1 != 0) {
-                Some(i) => cache[i].1 = cur,
+                Some(i) => {
+                    if cache[i].1 != cur {
+                        free_subtree(cache[i].1);
+                    }
+                    cache[i].1 = cur;
+                }
                 None => {
                     let i = *ptr::addr_of!(UCACHE_NEXT);
+                    if cache[i].1 != 0 {
+                        free_subtree(cache[i].1); // evict: reclaim its tables
+                    }
                     cache[i] = (old_key, cur);
                     *ptr::addr_of_mut!(UCACHE_NEXT) = (i + 1) % UCACHE_N;
                 }
@@ -577,7 +688,7 @@ pub extern "C" fn shadow_reset_user() {
             *ptr::addr_of_mut!(SHADOW_UCACHE_HITS) += 1;
         }
         *ptr::addr_of_mut!(UCUR_KEY) = new_key;
-        *ptr::addr_of_mut!(SHADOW_RESETS) += 1;
+        *ptr::addr_of_mut!(SHADOW_USER_SWITCHES) += 1;
         if next != cur {
             ptr::write(slot as *mut u64, next);
             let c = read_cr3();
@@ -601,10 +712,17 @@ pub extern "C" fn shadow_invalidate_va(xt: u64) {
     // (identity-mapped), and only their leaf words are written.
     unsafe {
         *ptr::addr_of_mut!(SHADOW_INVAL_VAS) += 1;
-        // A user-VA TLBI may name another ASID's translation: drop every parked
-        // user subtree (the installed one is handled below like the kernel half).
+        // A user-VA TLBI may name another address space's translation: clear
+        // the same 2 MiB region in every PARKED user subtree too (not installed,
+        // so no INVLPG: their TLB entries died with the CR3 reload that parked
+        // them). The installed subtree is handled below like the kernel half.
         if (va >> 55) & 1 == 0 {
-            ucache_clear();
+            for e in (*ptr::addr_of!(UCACHE)).iter() {
+                let pt = subtree_pt(e.1, alias);
+                if pt != 0 {
+                    ptr::write_bytes(pt as *mut u8, 0, 4096);
+                }
+            }
         }
         let pml4 = read_cr3() & 0x000F_FFFF_FFFF_F000;
         let mut table = pml4;
@@ -634,8 +752,50 @@ pub fn register() {
         shadow_reset,
         shadow_reset_user,
         shadow_invalidate_va,
+        shadow_ttbr1_written,
     );
 }
+/// TTBR1 table base the kernel half was filled under (ASID bits stripped).
+static mut KERN_TTBR1_BASE: u64 = 0;
+/// Count of kernel-half drops caused by a TTBR1 base change (diagnostic).
+pub static mut SHADOW_TTBR1_RESETS: u64 = 0;
+
+/// TTBR1 written (the new value is already in the guest context). If only the
+/// ASID changed (SW_TTBR0_PAN does this on every uaccess) nothing is remapped;
+/// if the table BASE changed (e.g. KPTI trampoline <-> swapper) the kernel
+/// aliases may now be wrong, so the kernel half is dropped and its tables freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn shadow_ttbr1_written() {
+    use aether_translator::runtime::context::SYSREG_SLOT0;
+    use aether_translator::runtime::mmu::SLOT_TTBR1;
+    // SAFETY: EL2-private single-vCPU; PML4[0x101] belongs to the shadow.
+    unsafe {
+        let ctx = ptr::addr_of!(crate::boot_x86::NPF_GUEST_CTX) as *const u64;
+        let mut base = *ctx.add(SYSREG_SLOT0 + SLOT_TTBR1) & 0x0000_FFFF_FFFF_FFFE;
+        // KPTI flips TTBR1 between tramp_pg_dir and swapper_pg_dir (= tramp +
+        // 0x2000) on every kernel entry/exit; the software MMU resolves the
+        // trampoline base through the swapper snapshot, so kernel aliases are
+        // identical under both — treat the pair as one address space.
+        let snap = *ptr::addr_of!(aether_translator::runtime::mmu::KERNEL_PGD_SNAPSHOT);
+        if snap != 0 && base == snap.wrapping_sub(0x2000) {
+            base = snap;
+        }
+        if base == *ptr::addr_of!(KERN_TTBR1_BASE) {
+            return;
+        }
+        *ptr::addr_of_mut!(KERN_TTBR1_BASE) = base;
+        let slot = (read_cr3() & 0x000F_FFFF_FFFF_F000) + 0x101 * 8;
+        let k = ptr::read(slot as *const u64);
+        if k != 0 {
+            ptr::write(slot as *mut u64, 0);
+            free_subtree(k);
+            let c = read_cr3();
+            write_cr3(c);
+        }
+        *ptr::addr_of_mut!(SHADOW_TTBR1_RESETS) += 1;
+    }
+}
+
 /// Count of page-precise TLBI invalidates (diagnostic).
 pub static mut SHADOW_INVAL_VAS: u64 = 0;
 /// Count of #PF stub -> shadow_pf_try entries (diagnostic).
@@ -662,7 +822,13 @@ pub unsafe fn maybe_enable_hw_mmu(pc: u64) {
     register(); // shadow-reset callback (coherence) BEFORE enabling
     // SAFETY: EL2-private single-vCPU; label the (empty) user half with the live
     // address space before any fill can happen.
-    unsafe { *ptr::addr_of_mut!(UCUR_KEY) = live_ttbr0() };
+    unsafe {
+        *ptr::addr_of_mut!(UCUR_KEY) = live_ttbr0();
+        use aether_translator::runtime::context::SYSREG_SLOT0;
+        use aether_translator::runtime::mmu::SLOT_TTBR1;
+        let ctx = ptr::addr_of!(crate::boot_x86::NPF_GUEST_CTX) as *const u64;
+        *ptr::addr_of_mut!(KERN_TTBR1_BASE) = *ctx.add(SYSREG_SLOT0 + SLOT_TTBR1) & 0x0000_FFFF_FFFF_FFFE;
+    }
     aether_translator::backend::lower_int::HW_MMU_ENABLED.store(true, Ordering::Relaxed);
     let _ = aether_translator::dbt::aether_dbt_invalidate_all(); // re-translate onto HW path
     // SAFETY: diagnostic print on the established path.

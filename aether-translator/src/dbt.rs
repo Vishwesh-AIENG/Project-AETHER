@@ -1086,8 +1086,11 @@ pub fn aether_dbt_dispatch_block(guest_pc: u64, guest_mem: &[u8]) -> AetherDbtRe
 /// return value consumed); the `AetherDbtResult` is for the structural /
 /// host-test callers.
 pub extern "C" fn aether_dbt_invalidate_all() -> AetherDbtResult {
-    // ch66 P3b: also drop the hardware-MMU shadow (TTBR1/TLBI change mappings).
-    crate::runtime::mmu::aether_shadow_reset();
+    // NB: never touches the hardware-MMU shadow. Dropping translated BLOCKS
+    // (IC, TLBI, TTBR writes) does not change any VA->PA mapping; every event
+    // that does (TLBI, TTBR0/TTBR1-base, TCR, MAIR) resets the shadow on its own
+    // path. A shadow reset here wiped it on every IC/TLBI (1.7M full resets per
+    // boot-minute range) and defeated the page-precise TLBI + user cache.
     match global::with(|rt| rt.invalidate_all()) {
         Some(()) => AetherDbtResult::Ok,
         None => AetherDbtResult::NotInitialised,

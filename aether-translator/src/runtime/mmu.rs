@@ -1300,6 +1300,7 @@ pub type ShadowResetFn = unsafe extern "C" fn();
 static SHADOW_RESET_ALL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static SHADOW_RESET_USER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static SHADOW_INVAL_VA: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static SHADOW_TTBR1: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 /// Page-precise shadow invalidate for a `TLBI VA*` (raw `Xt` operand).
 pub type ShadowInvalVaFn = unsafe extern "C" fn(u64);
 
@@ -1307,10 +1308,31 @@ pub type ShadowInvalVaFn = unsafe extern "C" fn(u64);
 /// the whole gap shadow (TLBI / TCR / MAIR / TTBR1), `user` drops only the user
 /// (TTBR0) half so a TTBR0 switch — which SW_TTBR0_PAN does on every uaccess —
 /// does NOT storm the kernel aliases.
-pub fn register_shadow_reset(all: ShadowResetFn, user: ShadowResetFn, inval_va: ShadowInvalVaFn) {
+pub fn register_shadow_reset(
+    all: ShadowResetFn,
+    user: ShadowResetFn,
+    inval_va: ShadowInvalVaFn,
+    ttbr1: ShadowResetFn,
+) {
     SHADOW_RESET_ALL.store(all as usize, core::sync::atomic::Ordering::Release);
     SHADOW_RESET_USER.store(user as usize, core::sync::atomic::Ordering::Release);
     SHADOW_INVAL_VA.store(inval_va as usize, core::sync::atomic::Ordering::Release);
+    SHADOW_TTBR1.store(ttbr1 as usize, core::sync::atomic::Ordering::Release);
+}
+
+/// Invoke the registered TTBR1-written shadow callback (emitted after an
+/// `MSR TTBR1_EL1` on the hardware-MMU path). The callback drops the kernel half
+/// only when the table BASE changed — SW_TTBR0_PAN rewrites TTBR1 on every
+/// uaccess with only the ASID changed, which must not reset anything.
+#[allow(unsafe_code)]
+pub extern "C" fn aether_shadow_ttbr1_written() {
+    let raw = SHADOW_TTBR1.load(core::sync::atomic::Ordering::Acquire);
+    if raw == 0 {
+        return;
+    }
+    // SAFETY: registered via register_shadow_reset.
+    let f: ShadowResetFn = unsafe { core::mem::transmute(raw) };
+    unsafe { f() };
 }
 
 /// Decode a `TLBI VAE1/VALE1/VAAE1/VAALE1` operand into the page VA it names:

@@ -162,8 +162,9 @@ fn process_nans(f: Fmt, a: u64, b: u64) -> Option<u64> {
     else { None }
 }
 
-/// Fused multiply-add a*b + c with a single rounding (host FMA; the translator
-/// already emits FMA3 for FMLA/FMADD, so the instruction is present).
+/// Fused multiply-add a*b + c with a single rounding. Uses the host FMA3 unit
+/// when it is usable (`HOST_FMA`), else the exact software [`soft_fma`] — an
+/// FMA3 instruction on a host without FMA/AVX state is a #UD.
 #[cfg(target_arch = "x86_64")]
 fn fma64(a: f64, b: f64, c: f64) -> f64 {
     #[target_feature(enable = "fma")]
@@ -171,7 +172,11 @@ fn fma64(a: f64, b: f64, c: f64) -> f64 {
         use core::arch::x86_64::*;
         _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c)))
     }
-    unsafe { f(a, b, c) }
+    if host_fma() {
+        unsafe { f(a, b, c) }
+    } else {
+        f64::from_bits(soft_fma_any(F64, a.to_bits(), b.to_bits(), c.to_bits()))
+    }
 }
 #[cfg(target_arch = "x86_64")]
 fn fma32(a: f32, b: f32, c: f32) -> f32 {
@@ -180,12 +185,318 @@ fn fma32(a: f32, b: f32, c: f32) -> f32 {
         use core::arch::x86_64::*;
         _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(b), _mm_set_ss(c)))
     }
-    unsafe { f(a, b, c) }
+    if host_fma() {
+        unsafe { f(a, b, c) }
+    } else {
+        f32::from_bits(soft_fma_any(F32, a.to_bits() as u64, b.to_bits() as u64, c.to_bits() as u64) as u32)
+    }
 }
 #[cfg(not(target_arch = "x86_64"))]
-fn fma64(a: f64, b: f64, c: f64) -> f64 { a * b + c }
+fn fma64(a: f64, b: f64, c: f64) -> f64 {
+    f64::from_bits(soft_fma_any(F64, a.to_bits(), b.to_bits(), c.to_bits()))
+}
 #[cfg(not(target_arch = "x86_64"))]
-fn fma32(a: f32, b: f32, c: f32) -> f32 { a * b + c }
+fn fma32(a: f32, b: f32, c: f32) -> f32 {
+    f32::from_bits(soft_fma_any(F32, a.to_bits() as u64, b.to_bits() as u64, c.to_bits() as u64) as u32)
+}
+
+/// Whether the host FMA3 unit may be used (the boot-time `HOST_FMA` switch;
+/// unit tests can force the software path on their own thread only, so they
+/// never race the encoder tests that read the global).
+fn host_fma() -> bool {
+    #[cfg(test)]
+    if FORCE_SOFT_FMA.with(|c| c.get()) {
+        return false;
+    }
+    crate::backend::encode::HOST_FMA.load(core::sync::atomic::Ordering::Relaxed)
+}
+#[cfg(test)]
+std::thread_local! {
+    static FORCE_SOFT_FMA: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// IEEE fused multiply-add on raw bits (any operands, round to nearest even):
+/// NaN / infinity cases take the plain arithmetic path (the host's non-fused
+/// ops give the right special value), everything finite goes through the exact
+/// integer [`soft_fma`].
+fn soft_fma_any(f: Fmt, a: u64, b: u64, c: u64) -> u64 {
+    let exp_all = ((1u64 << f.ebits) - 1) << f.fbits;
+    let special = |x: u64| f.abs(x) & exp_all == exp_all;
+    if special(a) || special(b) || special(c) {
+        let v = f.to_f64(a) * f.to_f64(b) + f.to_f64(c); // inf/NaN: exact enough
+        return if f.width() == 32 { (v as f32).to_bits() as u64 } else { v.to_bits() };
+    }
+    soft_fma(f, a, b, c)
+}
+
+/// Exact `a*b + c` (all FINITE) with ONE rounding to nearest-even in format
+/// `f` — a software FMA. The product is formed exactly in a u128, both terms
+/// are aligned with a sticky bit, summed exactly, then rounded once (with
+/// subnormal and overflow handling). Zero results follow IEEE: an exact zero
+/// sum of opposite signs is +0; (+-0)+(+-0) keeps the common sign.
+fn soft_fma(f: Fmt, a: u64, b: u64, c: u64) -> u64 {
+    let w = f.width();
+    let bias = (1i64 << (f.ebits - 1)) - 1;
+    let unpack = |x: u64| -> (u64, u128, i64) {
+        let s = (x >> (w - 1)) & 1;
+        let e = ((x >> f.fbits) & ((1u64 << f.ebits) - 1)) as i64;
+        let m = x & ((1u64 << f.fbits) - 1);
+        if e == 0 {
+            (s, m as u128, 1 - bias - f.fbits as i64)
+        } else {
+            (s, (m | (1u64 << f.fbits)) as u128, e - bias - f.fbits as i64)
+        }
+    };
+    let (sa, ma, ea) = unpack(a);
+    let (sb, mb, eb) = unpack(b);
+    let (sc, mc, ec) = unpack(c);
+    let sp = sa ^ sb;
+    let p = ma * mb; // exact (<= 106 bits)
+    if p == 0 {
+        // product is +-0: result = (+-0) + c
+        if mc != 0 {
+            return c;
+        }
+        return if sp == sc { sp << (w - 1) } else { 0 };
+    }
+    // Normalize a value so its MSB sits at bit 125 (headroom for the sum).
+    let norm = |m: u128, e: i64| -> (u128, i64) {
+        let sh = m.leading_zeros() as i64 - 2;
+        (m << sh, e - sh)
+    };
+    let (pm, pe) = norm(p, ea + eb);
+    let shr_sticky = |x: u128, s: i64| -> u128 {
+        if s <= 0 {
+            x
+        } else if s >= 127 {
+            (x != 0) as u128
+        } else {
+            (x >> s) | ((x & ((1u128 << s) - 1)) != 0) as u128
+        }
+    };
+    let (mut sum, e, sign);
+    if mc == 0 {
+        sum = pm;
+        e = pe;
+        sign = sp;
+    } else {
+        let (cm, ce) = norm(mc, ec);
+        // Align the smaller-exponent term to the larger.
+        let (bm, be, bs, smm, ss) = if pe >= ce {
+            (pm, pe, sp, shr_sticky(cm, pe - ce), sc)
+        } else {
+            (cm, ce, sc, shr_sticky(pm, ce - pe), sp)
+        };
+        e = be;
+        if bs == ss {
+            sum = bm + smm;
+            sign = bs;
+        } else if bm >= smm {
+            sum = bm - smm;
+            sign = bs;
+        } else {
+            sum = smm - bm;
+            sign = ss;
+        }
+        if sum == 0 {
+            return 0; // exact cancellation -> +0 (round to nearest)
+        }
+    }
+    // Round sum * 2^e to the format.
+    let k = 127 - sum.leading_zeros() as i64; // MSB index
+    let emin = 1 - bias; // minimum normal exponent
+    let msb_exp = k + e;
+    let shift = if msb_exp >= emin { k - f.fbits as i64 } else { (emin - f.fbits as i64) - e };
+    let mut m: u128;
+    if shift <= 0 {
+        m = sum << (-shift);
+    } else if shift >= 128 {
+        m = 0; // far below half an ulp of the smallest subnormal
+    } else {
+        m = sum >> shift;
+        let rem = sum & ((1u128 << shift) - 1);
+        let half = 1u128 << (shift - 1);
+        if rem > half || (rem == half && m & 1 == 1) {
+            m += 1;
+        }
+    }
+    sum = m;
+    let mut biased = if msb_exp >= emin { msb_exp + bias } else { 0 };
+    if msb_exp >= emin && sum == 1u128 << (f.fbits + 1) {
+        sum >>= 1; // rounding carried into a new bit
+        biased += 1;
+    }
+    let emax_biased = (1i64 << f.ebits) - 1;
+    if biased >= emax_biased {
+        return (sign << (w - 1)) | (((1u64 << f.ebits) - 1) << f.fbits); // overflow -> inf
+    }
+    let frac = (sum as u64) & ((1u64 << f.fbits) - 1);
+    let enc = if biased == 0 {
+        sum as u64 // subnormal (or rounded up into the smallest normal)
+    } else {
+        ((biased as u64) << f.fbits) | frac
+    };
+    (sign << (w - 1)) | enc
+}
+
+/// ARM FPMulAdd(addend, op1, op2) with FPCR.DN=0, RN: FPProcessNaNs3 order
+/// (SNaN a, n, m, then QNaN a, n, m), qNaN addend + inf*0 -> default NaN,
+/// invalid inf*0 / (inf - inf) -> default NaN, else ONE fused rounding.
+fn fp_muladd(f: Fmt, a: u64, n: u64, m: u64) -> u64 {
+    let w = f.width();
+    let exp_all = ((1u64 << f.ebits) - 1) << f.fbits;
+    let is_inf = |x: u64| f.abs(x) == exp_all;
+    let is_zero = |x: u64| f.abs(x) == 0;
+    let inf_zero = (is_inf(n) && is_zero(m)) || (is_zero(n) && is_inf(m));
+    let nan = if f.is_snan(a) {
+        Some(f.quiet(a))
+    } else if f.is_snan(n) {
+        Some(f.quiet(n))
+    } else if f.is_snan(m) {
+        Some(f.quiet(m))
+    } else if f.is_nan(a) {
+        Some(a)
+    } else if f.is_nan(n) {
+        Some(n)
+    } else if f.is_nan(m) {
+        Some(m)
+    } else {
+        None
+    };
+    if f.is_nan(a) && !f.is_snan(a) && inf_zero {
+        return default_nan(f);
+    }
+    if let Some(r) = nan {
+        return r;
+    }
+    let sp = ((n ^ m) >> (w - 1)) & 1;
+    let sa = (a >> (w - 1)) & 1;
+    let inf_p = is_inf(n) || is_inf(m);
+    if inf_zero || (is_inf(a) && inf_p && sa != sp) {
+        return default_nan(f);
+    }
+    if is_inf(a) {
+        return a;
+    }
+    if inf_p {
+        return (sp << (w - 1)) | exp_all;
+    }
+    if host_fma() && cfg!(target_arch = "x86_64") {
+        // Finite operands: the host unit gives the same single rounding.
+        return if w == 32 {
+            fma32(f32::from_bits(n as u32), f32::from_bits(m as u32), f32::from_bits(a as u32)).to_bits() as u64
+        } else {
+            fma64(f64::from_bits(n), f64::from_bits(m), f64::from_bits(a)).to_bits()
+        };
+    }
+    soft_fma(f, n, m, a)
+}
+
+/// FPNeg (sign flip, applied BEFORE NaN processing as in the ARM pseudocode).
+#[inline]
+fn fneg(f: Fmt, x: u64) -> u64 { x ^ (1u64 << (f.width() - 1)) }
+
+/// ch66: the fused FP forms the typed lowering implements with FMA3 / F16C.
+/// Routed here (exact ARM semantics, soft FMA) when the host lacks them.
+fn fma_family(w: u32) -> Option<Family> {
+    // FP data-processing 3-source: 0 0 0 11111 type o1 Rm o0 Ra Rn Rd (S / D).
+    if w & 0xFF00_0000 == 0x1F00_0000 && bits(w, 23, 22) <= 1 {
+        return Some(Family::FpMulAdd3);
+    }
+    // Vector FP 3-same FMLA/FMLS: 0 Q 0 01110 a sz 1 Rm 11001 1 Rn Rd.
+    if w & 0xBF20_FC00 == 0x0E20_CC00 {
+        let (q, sz) = (bits(w, 30, 30), bits(w, 22, 22));
+        return (!(sz == 1 && q == 0)).then_some(Family::VecFmla);
+    }
+    // FMLA/FMLS (by element), vector (0 Q 0 01111 1 sz ..) and scalar
+    // (01 0 11111 1 sz ..): opcode 0001 / 0101, bit 10 = 0.
+    let byel = w & 0xBF80_B400; // ignore Q (bit 30) and the FMLA/FMLS bit (14)
+    if byel == 0x0F80_1000 || byel == 0x1F80_1000 {
+        let (sz, l) = (bits(w, 22, 22), bits(w, 21, 21));
+        let scalar = bits(w, 28, 28) == 1;
+        if scalar && bits(w, 30, 30) == 0 {
+            return None;
+        }
+        let ok = !(sz == 1 && l == 1) && !(!scalar && sz == 1 && bits(w, 30, 30) == 0);
+        return ok.then_some(Family::FpByElemFma);
+    }
+    // Vector FCVTN/FCVTL to/from half: 0 Q 0 01110 0 0 10000 1011x 10 Rn Rd.
+    if w & 0xBFFF_EC00 == 0x0E21_6800 {
+        return Some(Family::VecFcvtHalf);
+    }
+    None
+}
+
+/// Execute one of the [`fma_family`] encodings.
+fn exec_fma_family(fam: Family, w: u32, d: u128, read: &dyn Fn(u32) -> u128) -> u128 {
+    let q = bits(w, 30, 30) == 1;
+    let n = read(bits(w, 9, 5));
+    match fam {
+        Family::FpMulAdd3 => {
+            let f = if bits(w, 23, 22) == 1 { F64 } else { F32 };
+            let es = f.width();
+            let (o1, o0) = (bits(w, 21, 21), bits(w, 15, 15));
+            let nv = lane(n, es, 0);
+            let mv = lane(read(bits(w, 20, 16)), es, 0);
+            let av = lane(read(bits(w, 14, 10)), es, 0);
+            // FMADD a+nm, FMSUB a-nm, FNMADD -a-nm, FNMSUB -a+nm: ARM negates
+            // the addend when o1, and operand 1 when o1 != o0.
+            let a2 = if o1 == 1 { fneg(f, av) } else { av };
+            let n2 = if o1 != o0 { fneg(f, nv) } else { nv };
+            fp_muladd(f, a2, n2, mv) as u128
+        }
+        Family::VecFmla => {
+            let f = if bits(w, 22, 22) == 1 { F64 } else { F32 };
+            let es = f.width();
+            let sub = bits(w, 23, 23) == 1;
+            let m = read(bits(w, 20, 16));
+            let cnt = if q { 128 / es } else { 64 / es };
+            let mut r = 0u128;
+            for i in 0..cnt {
+                let nv = lane(n, es, i);
+                let n2 = if sub { fneg(f, nv) } else { nv };
+                set_lane(&mut r, es, i, fp_muladd(f, lane(d, es, i), n2, lane(m, es, i)));
+            }
+            r
+        }
+        Family::FpByElemFma => {
+            let sz = bits(w, 22, 22);
+            let f = if sz == 1 { F64 } else { F32 };
+            let es = f.width();
+            let sub = bits(w, 14, 14) == 1;
+            let (h, l) = (bits(w, 11, 11), bits(w, 21, 21));
+            let idx = if sz == 1 { h } else { (h << 1) | l };
+            let rm = bits(w, 20, 16);
+            let elem = lane(read(rm), es, idx);
+            let scalar = bits(w, 28, 28) == 1;
+            let cnt = if scalar { 1 } else if q { 128 / es } else { 64 / es };
+            let mut r = 0u128;
+            for i in 0..cnt {
+                let nv = lane(n, es, i);
+                let n2 = if sub { fneg(f, nv) } else { nv };
+                set_lane(&mut r, es, i, fp_muladd(f, lane(d, es, i), n2, elem));
+            }
+            r
+        }
+        _ => {
+            // VecFcvtHalf: opcode bit 12: 1 = FCVTL (half -> single), 0 = FCVTN.
+            if bits(w, 12, 12) == 1 {
+                let src = if q { high64(n) } else { low64(n) };
+                let mut r = 0u128;
+                for i in 0..4 {
+                    set_lane(&mut r, 32, i, half_to(F32, lane(src, 16, i)));
+                }
+                r
+            } else {
+                let mut lo = 0u128;
+                for i in 0..4 {
+                    set_lane(&mut lo, 16, i, to_half(F32, lane(n, 32, i)));
+                }
+                if q { low64(d) | (lo << 64) } else { lo }
+            }
+        }
+    }
+}
 
 /// FRECPS (`two`=true: 2 - n*m) / FRSQRTS (`two`=false: (3 - n*m)/2), ARM
 /// FPRecipStepFused / FPRSqrtStepFused: op1 is negated BEFORE NaN processing;
@@ -396,9 +707,17 @@ enum Family {
     ScalarTwoRegMisc,
     ScalarThreeSame,
     ScalarFcvtHalf,
+    /// ch66 soft-FMA routes (see [`fma_family`]).
+    FpMulAdd3,
+    VecFmla,
+    FpByElemFma,
+    VecFcvtHalf,
 }
 
 fn classify(w: u32) -> Option<Family> {
+    if let Some(f) = fma_family(w) {
+        return Some(f);
+    }
     let q = bits(w, 30, 30);
     let u = bits(w, 29, 29);
     let size = bits(w, 23, 22);
@@ -507,6 +826,9 @@ pub fn exec(w: u32, d: u128, read: &dyn Fn(u32) -> u128) -> Option<u128> {
         Some(f) => f,
         None => return classify_ext(w).map(|e| exec_ext(e, w, d, read)),
     };
+    if matches!(fam, Family::FpMulAdd3 | Family::VecFmla | Family::FpByElemFma | Family::VecFcvtHalf) {
+        return Some(exec_fma_family(fam, w, d, read));
+    }
     let q = bits(w, 30, 30) == 1;
     let u = bits(w, 29, 29) == 1;
     let size = bits(w, 23, 22);
@@ -525,6 +847,9 @@ pub fn exec(w: u32, d: u128, read: &dyn Fn(u32) -> u128) -> Option<u128> {
             let f = if size & 1 == 1 { F64 } else { F32 };
             let es = f.width();
             recip_step(f, lane(n, es, 0), lane(read(rm), es, 0), size >> 1 == 0) as u128
+        }
+        Family::FpMulAdd3 | Family::VecFmla | Family::FpByElemFma | Family::VecFcvtHalf => {
+            unreachable!("handled above")
         }
         Family::ScalarFcvtHalf => {
             let (ft, opc) = (bits(w, 23, 22), bits(w, 16, 15));
@@ -1439,6 +1764,132 @@ mod tests {
     fn run(w: u32, regs: &[(u32, u128)]) -> u128 {
         let get = |r: u32| regs.iter().find(|(i, _)| *i == r).map(|x| x.1).unwrap_or(0);
         exec(w, get(w & 0x1F), &get).expect("supported")
+    }
+
+    /// xorshift64* — deterministic operand generator.
+    fn rng(s: &mut u64) -> u64 {
+        *s ^= *s >> 12;
+        *s ^= *s << 25;
+        *s ^= *s >> 27;
+        s.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    /// Finite operands biased toward the hard cases: subnormals, near-equal
+    /// magnitudes (cancellation), huge exponent gaps, tiny/huge products.
+    fn pick64(s: &mut u64) -> u64 {
+        let r = rng(s);
+        let sign = (r >> 63) << 63;
+        let frac = rng(s) & ((1u64 << 52) - 1);
+        let exp = match r % 6 {
+            0 => 0,                          // subnormal / zero
+            1 => 1 + (r >> 8) % 60,          // tiny
+            2 => 2046 - (r >> 8) % 60,       // huge
+            3 => 1023 + (r >> 8) % 8 - 4,    // ~1.0 (cancellation)
+            _ => 1 + (r >> 8) % 2046,        // anything finite
+        };
+        sign | (exp << 52) | frac
+    }
+    fn pick32(s: &mut u64) -> u32 {
+        let r = rng(s);
+        let sign = ((r >> 63) as u32) << 31;
+        let frac = (rng(s) as u32) & ((1 << 23) - 1);
+        let exp = match r % 6 {
+            0 => 0,
+            1 => 1 + ((r >> 8) % 20) as u32,
+            2 => 254 - ((r >> 8) % 20) as u32,
+            3 => 127 + ((r >> 8) % 8) as u32 - 4,
+            _ => 1 + ((r >> 8) % 254) as u32,
+        };
+        sign | (exp << 23) | frac
+    }
+    fn same64(a: f64, b: f64) -> bool { a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()) }
+    fn same32(a: f32, b: f32) -> bool { a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()) }
+
+    /// ch66: the software FMA is bit-identical to the host's correctly-rounded
+    /// fused multiply-add (std `mul_add`) on 400K biased random operand triples
+    /// per format plus a fixed edge set (exact cancellation, signed zeros,
+    /// overflow, results rounding into/out of the subnormal range).
+    #[test]
+    fn soft_fma_matches_hardware_fused_multiply_add() {
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..400_000 {
+            let (a, b, c) = (pick64(&mut s), pick64(&mut s), pick64(&mut s));
+            let (fa, fb, fc) = (f64::from_bits(a), f64::from_bits(b), f64::from_bits(c));
+            let want = fa.mul_add(fb, fc);
+            let got = f64::from_bits(soft_fma(F64, a, b, c));
+            assert!(same64(got, want), "f64 fma({fa:e},{fb:e},{fc:e}) soft={got:e} hw={want:e}");
+            let (a, b, c) = (pick32(&mut s), pick32(&mut s), pick32(&mut s));
+            let (fa, fb, fc) = (f32::from_bits(a), f32::from_bits(b), f32::from_bits(c));
+            let want = fa.mul_add(fb, fc);
+            let got = f32::from_bits(soft_fma(F32, a as u64, b as u64, c as u64) as u32);
+            assert!(same32(got, want), "f32 fma({fa:e},{fb:e},{fc:e}) soft={got:e} hw={want:e}");
+        }
+        let edge: [(f64, f64, f64); 9] = [
+            (1.0, 1.0, -1.0),                       // exact cancellation -> +0
+            (-0.0, 1.0, -0.0),                      // -0 + -0 = -0
+            (0.0, -1.0, 0.0),                       // -0 + +0 = +0
+            (f64::MAX, 2.0, -f64::MAX),             // finite despite huge product
+            (f64::MAX, f64::MAX, 0.0),              // overflow -> inf
+            (f64::MIN_POSITIVE, 0.5, 0.0),          // into the subnormal range
+            (f64::MIN_POSITIVE, -0.5, f64::MIN_POSITIVE), // subnormal sum
+            (1.0 + f64::EPSILON, 1.0 - f64::EPSILON, -1.0), // tiny exact residue
+            (3.0e-320, 1.0e10, -1.0e-300),          // subnormal x normal
+        ];
+        for (a, b, c) in edge {
+            let got = f64::from_bits(soft_fma(F64, a.to_bits(), b.to_bits(), c.to_bits()));
+            assert!(same64(got, a.mul_add(b, c)), "edge fma({a:e},{b:e},{c:e}) = {got:e}");
+        }
+    }
+
+    /// ch66: every soft-FMA-routed encoding (scalar FMADD/FMSUB/FNMADD/FNMSUB,
+    /// vector FMLA/FMLS, by-element FMLA/FMLS, FCVTL/FCVTN half) gives the same
+    /// result with the host FMA unit as with the software path, and matches the
+    /// ARM definition computed with std `mul_add`.
+    #[test]
+    fn fma_families_exact_with_and_without_host_fma() {
+        let both = |w: u32, regs: &[(u32, u128)]| -> u128 {
+            let hw = run(w, regs);
+            FORCE_SOFT_FMA.with(|c| c.set(true));
+            let sw = run(w, regs);
+            FORCE_SOFT_FMA.with(|c| c.set(false));
+            assert_eq!(hw, sw, "word {w:#010x}: host-FMA vs soft-FMA differ");
+            sw
+        };
+        let d = |x: f64| x.to_bits() as u128;
+        let (n, m, a) = (1.0f64 + f64::EPSILON, 1.0f64 - f64::EPSILON, -1.0f64);
+        let regs = [(1u32, d(n)), (2, d(m)), (3, d(a))];
+        // FMADD d0, d1, d2, d3 = 0x1F420C20 ; FMSUB (o0) ; FNMADD (o1) ; FNMSUB (o1,o0)
+        assert_eq!(both(0x1F42_0C20, &regs), d(n.mul_add(m, a)));
+        assert_eq!(both(0x1F42_8C20, &regs), d((-n).mul_add(m, a)));
+        assert_eq!(both(0x1F62_0C20, &regs), d((-n).mul_add(m, -a)));
+        assert_eq!(both(0x1F62_8C20, &regs), d(n.mul_add(m, -a)));
+        // Single: FMADD s0, s1, s2, s3 = 0x1F020C20 (upper bits zeroed).
+        let (sn, sm, sa) = (1.5f32, 3.25f32, -0.125f32);
+        let sregs = [(1u32, h(sn)), (2, h(sm)), (3, h(sa))];
+        assert_eq!(both(0x1F02_0C20, &sregs), h(sn.mul_add(sm, sa)));
+        // FMLA v0.4s, v1.4s, v2.4s = 0x4E22CC20 ; FMLS = 0x4EA2CC20.
+        let v4 = |x: [f32; 4]| x.iter().enumerate().fold(0u128, |acc, (i, f)| acc | ((f.to_bits() as u128) << (32 * i)));
+        let (vd, vn, vm) = ([1.0f32, -2.0, 0.5, 1e-30], [3.0f32, 0.1, -7.0, 1e-20], [2.0f32, 0.3, 0.25, 1e10]);
+        let vregs = [(0u32, v4(vd)), (1, v4(vn)), (2, v4(vm))];
+        let fmla: [f32; 4] = core::array::from_fn(|i| vn[i].mul_add(vm[i], vd[i]));
+        let fmls: [f32; 4] = core::array::from_fn(|i| (-vn[i]).mul_add(vm[i], vd[i]));
+        assert_eq!(both(0x4E22_CC20, &vregs), v4(fmla));
+        assert_eq!(both(0x4EA2_CC20, &vregs), v4(fmls));
+        // FMLA v0.4s, v1.4s, v2.s[1] = 0x4FA21020 (L=1 -> index 1).
+        let byel: [f32; 4] = core::array::from_fn(|i| vn[i].mul_add(vm[1], vd[i]));
+        assert_eq!(both(0x4FA2_1020, &vregs), v4(byel));
+        // FMLA d0, d1, v2.d[1] (scalar by element) = 0x5FC21820 (H=1).
+        let dregs = [(0u32, d(0.5)), (1, d(n)), (2, d(9.0) | (d(m) << 64))];
+        assert_eq!(both(0x5FC2_1820, &dregs), d(n.mul_add(m, 0.5)));
+        // NaN / infinity rules: inf*0 -> default NaN; qNaN addend + inf*0 -> default NaN.
+        let inf0 = [(1u32, d(f64::INFINITY)), (2, d(0.0)), (3, d(1.0))];
+        assert_eq!(both(0x1F42_0C20, &inf0), 0x7FF8_0000_0000_0000);
+        // FCVTL v0.4s, v1.4h = 0x0E217820 ; FCVTN v0.4h, v1.4s = 0x0E216820.
+        let halves: u128 = 0x3C00 | (0xC000 << 16) | (0x3555 << 32) | (0x7BFF << 48); // 1,-2,~1/3,65504
+        let wide = run(0x0E21_7820, &[(1, halves)]);
+        assert_eq!(lane(wide, 32, 0), 1.0f32.to_bits() as u64);
+        assert_eq!(lane(wide, 32, 1), (-2.0f32).to_bits() as u64);
+        assert_eq!(lane(wide, 32, 3), 65504.0f32.to_bits() as u64);
+        assert_eq!(run(0x0E21_6820, &[(1, wide)]) & 0xFFFF_FFFF_FFFF_FFFF, halves);
     }
     fn h(x: f32) -> u128 { x.to_bits() as u128 }
 

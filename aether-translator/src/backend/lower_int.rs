@@ -3248,7 +3248,19 @@ impl IntLower {
                         Self::emit_mmu_flush_call(enc);
                         Self::emit_dbt_invalidate_call(enc);
                     }
-                    MsrMmuEffect::InvalidateBlocks => Self::emit_dbt_invalidate_call(enc),
+                    MsrMmuEffect::InvalidateBlocks => {
+                        Self::emit_dbt_invalidate_call(enc);
+                        // ch66 P3b: a TTBR1 base change remaps kernel VAs — let
+                        // the hardware-MMU shadow drop its kernel half (it
+                        // ignores ASID-only rewrites). HW path only, so the
+                        // software path stays byte-identical.
+                        if HW_MMU_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                            Self::emit_dbt_invalidate_call_to(
+                                enc,
+                                crate::runtime::mmu::aether_shadow_ttbr1_written as *const () as usize,
+                            );
+                        }
+                    }
                     MsrMmuEffect::TtbrSwitchOnly => {
                         // ch66 P3b: a TTBR0 switch changes user VA->PA, so drop
                         // the hardware-MMU shadow's user half. Emitted ONLY when

@@ -4354,6 +4354,61 @@ fn irq_deliverable_now(cur_el: u64, blocks: u32) -> bool {
     }
 }
 
+/// ch66: enable the host AVX register state when the CPU supports it, then tell
+/// the translator whether FMA3 / F16C (VEX) may be emitted. UEFI firmware
+/// commonly leaves CR4.OSXSAVE / XCR0.AVX off, and a VEX instruction then #UDs
+/// even on a CPU that has FMA — so the state is enabled here (CPUID.1:ECX XSAVE
+/// + AVX, and CPUID.0Dh says the AVX component is supported). Without it (old
+/// CPU, or a virtual CPU model that hides AVX) the translator routes fused
+/// multiply-add / half conversions to the exact software helper instead.
+fn enable_host_simd() {
+    use aether_translator::backend::encode::{HOST_F16C, HOST_FMA};
+    use core::arch::x86_64::__cpuid_count;
+    use core::sync::atomic::Ordering;
+    // SAFETY: CPUID is unconditionally available on x86_64; CR4/XCR0 are only
+    // written when CPUID reports XSAVE + AVX and XCR0 component 2 support.
+    unsafe {
+        let l1 = __cpuid_count(1, 0);
+        let fma = l1.ecx & (1 << 12) != 0;
+        let xsave = l1.ecx & (1 << 26) != 0;
+        let avx = l1.ecx & (1 << 28) != 0;
+        let f16c = l1.ecx & (1 << 29) != 0;
+        let mut avx_state = false;
+        if xsave && avx {
+            let d = __cpuid_count(0xD, 0);
+            if d.eax & 0b110 == 0b110 {
+                let mut cr4: u64;
+                core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
+                if cr4 & (1 << 18) == 0 {
+                    cr4 |= 1 << 18; // CR4.OSXSAVE
+                    core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack));
+                }
+                let (lo, hi): (u32, u32);
+                core::arch::asm!("xgetbv", in("ecx") 0u32, out("eax") lo, out("edx") hi, options(nomem, nostack));
+                let xcr0 = ((hi as u64) << 32) | lo as u64 | 0b111; // x87 | SSE | AVX
+                core::arch::asm!("xsetbv", in("ecx") 0u32, in("eax") xcr0 as u32, in("edx") (xcr0 >> 32) as u32, options(nomem, nostack));
+                avx_state = true;
+            }
+        }
+        HOST_FMA.store(avx_state && fma, Ordering::Relaxed);
+        HOST_F16C.store(avx_state && f16c, Ordering::Relaxed);
+        dual_puts(b"[simd] cpuid fma=");
+        dual_puthex64(fma as u64);
+        dual_puts(b" f16c=");
+        dual_puthex64(f16c as u64);
+        dual_puts(b" xsave=");
+        dual_puthex64(xsave as u64);
+        dual_puts(b" avx=");
+        dual_puthex64(avx as u64);
+        dual_puts(b" -> avx_state=");
+        dual_puthex64(avx_state as u64);
+        dual_puts(b" (FMA3/F16C via ");
+        dual_puts(if avx_state && fma { &b"host"[..] } else { &b"soft helper"[..] });
+        dual_puts(b")
+");
+    }
+}
+
 /// Host time-stamp counter (RDTSC), the raw monotonic source.
 #[inline]
 fn host_tsc() -> u64 {
@@ -5107,6 +5162,10 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
             *ctx.add(0xF8 / 8) = regs.sp;
             *ctx.add(NPF_PC_SLOT) = regs.pc;
 
+            // ch66: decide FMA3/F16C BEFORE the first translation (the lowering
+            // reads these switches at translate time).
+            enable_host_simd();
+
             dual_puts(b"[x86] host-mode dispatch loop: entry pc=");
             dual_puthex64(regs.pc);
             dual_puts(b" x0(dtb)=");
@@ -5289,6 +5348,12 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                     dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_MMIO));
                     dual_puts(b" hwinv=");
                     dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_INVAL_VAS));
+                    dual_puts(b" uswitch=");
+                    dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_USER_SWITCHES));
+                    dual_puts(b" hwguard=");
+                    dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_GUARD_RESETS));
+                    dual_puts(b" k1rst=");
+                    dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_TTBR1_RESETS));
                     dual_puts(b" uchit=");
                     dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_UCACHE_HITS));
                     dual_puts(b" wfiwarp=");
