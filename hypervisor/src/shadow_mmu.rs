@@ -771,16 +771,19 @@ pub extern "C" fn shadow_ttbr1_written() {
     // SAFETY: EL2-private single-vCPU; PML4[0x101] belongs to the shadow.
     unsafe {
         let ctx = ptr::addr_of!(crate::boot_x86::NPF_GUEST_CTX) as *const u64;
-        let mut base = *ctx.add(SYSREG_SLOT0 + SLOT_TTBR1) & 0x0000_FFFF_FFFF_FFFE;
-        // KPTI flips TTBR1 between tramp_pg_dir and swapper_pg_dir (= tramp +
-        // 0x2000) on every kernel entry/exit; the software MMU resolves the
-        // trampoline base through the swapper snapshot, so kernel aliases are
-        // identical under both — treat the pair as one address space.
-        let snap = *ptr::addr_of!(aether_translator::runtime::mmu::KERNEL_PGD_SNAPSHOT);
-        if snap != 0 && base == snap.wrapping_sub(0x2000) {
-            base = snap;
+        let base = *ctx.add(SYSREG_SLOT0 + SLOT_TTBR1) & 0x0000_FFFF_FFFF_FFFE;
+        let cur = *ptr::addr_of!(KERN_TTBR1_BASE);
+        // KPTI flips TTBR1 between swapper_pg_dir and tramp_pg_dir (= swapper -
+        // 0x2000, arm64 linker layout) on EVERY kernel exit/entry. Nothing is
+        // remapped by that flip: the trampoline tables only map the trampoline
+        // alias, which swapper maps identically, and EL0 code never touches
+        // kernel VAs. So the pair is one kernel address space — dropping the
+        // kernel half on each flip re-faulted it ~466K times per boot phase.
+        if base == cur || (cur != 0 && base == cur.wrapping_sub(0x2000)) {
+            return;
         }
-        if base == *ptr::addr_of!(KERN_TTBR1_BASE) {
+        if cur != 0 && base == cur.wrapping_add(0x2000) {
+            *ptr::addr_of_mut!(KERN_TTBR1_BASE) = base; // first seen tramp, now swapper
             return;
         }
         *ptr::addr_of_mut!(KERN_TTBR1_BASE) = base;
