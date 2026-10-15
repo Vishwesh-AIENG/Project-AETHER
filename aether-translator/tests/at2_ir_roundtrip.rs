@@ -360,6 +360,7 @@ fn all_variants() -> Vec<IrOp> {
         IrOp::Isb,
         IrOp::Sb,
         IrOp::TlbInval { va: Some(v(0)) },
+        IrOp::IcInval,
         IrOp::AtS1E1 { va: v(0), is_write: true, at_el0: false },
         IrOp::Hint { imm: 200 },
         // ----- Guest CPU state access -----
@@ -427,7 +428,7 @@ fn variant_tag_is_injective() {
     // Sanity: the sample set must cover every variant exactly once. (198 is the
     // current IrOp variant count; bump this if a variant is added — and add its
     // sample above so the tag stays unique.)
-    assert_eq!(ops.len(), 201, "all_variants() must hold one of every IrOp variant");
+    assert_eq!(ops.len(), 202, "all_variants() must hold one of every IrOp variant");
 
     let mut by_tag: HashMap<u8, &'static str> = HashMap::new();
     let mut collisions: Vec<String> = Vec::new();
@@ -619,6 +620,7 @@ fn variant_name(op: &IrOp) -> &'static str {
         IrOp::Isb => "Isb",
         IrOp::Sb => "Sb",
         IrOp::TlbInval { .. } => "TlbInval",
+        IrOp::IcInval => "IcInval",
         IrOp::AtS1E1 { .. } => "AtS1E1",
         IrOp::Hint { .. } => "Hint",
         IrOp::ReadGpr { .. } => "ReadGpr",

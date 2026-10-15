@@ -30,33 +30,51 @@ pub static INLINE_TLB_ENABLED: core::sync::atomic::AtomicBool =
 /// handler + shadow address space are live.
 pub static HW_MMU_ENABLED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
-/// Gap base for the hardware-MMU alias (must match `shadow_mmu::GAP_BASE`).
-const HW_MMU_GAP_BASE: i64 = 0xFFFF_8000_0000_0000u64 as i64;
+/// Gap base for the hardware-MMU alias (must match `shadow_mmu::GAP_BASE`);
+/// `emit_hw_alias` synthesises it with shifts (no imm64 / no second scratch).
+pub const HW_MMU_GAP_BASE: u64 = 0xFFFF_8000_0000_0000;
 
 impl IntLower {
-    /// Emit `RAX = GAP_BASE | (addr_reg & 0x0000_00FF_FFFF_FFFF)` — the
-    /// hardware-MMU access alias. Clobbers RAX/RCX (reserved scratch); addr_reg
-    /// is preserved. First stamps the guest PC of THIS instruction into the PC
-    /// slot so that a hardware #PF (demand page / permission) injects the abort
-    /// with the correct ELR (the faulting instruction), not the stale block-start
-    /// PC — without it the kernel ERETs to the wrong instruction after handling
-    /// the fault and the guest re-runs earlier ops (the /init corruption shape).
-    /// (The software path gets this from the MMU helper's fault-exit; the
-    /// hardware #PF has no helper, so the stamp must be eager. A host-RIP→guest-PC
-    /// side table is the later zero-cost optimisation.)
-    fn emit_hw_mmu_alias(enc: &mut X86Encoder, addr_reg: u8) {
-        const RAX: u8 = 0;
+    /// Stamp the guest PC of THIS instruction into the PC slot so that a
+    /// hardware #PF (demand page / permission) injects the abort with the correct
+    /// ELR (the faulting instruction), not a stale PC. (The software path gets
+    /// this from the MMU helper's fault-exit; the hardware #PF has no helper, so
+    /// the stamp is eager.) Clobbers ONLY RCX — the caller must guarantee RCX
+    /// holds no live value (true at every `emit_mmu_xlate_call` site; the Store
+    /// arm stamps BEFORE materialising a spilled value into RCX). It must never
+    /// touch RAX: a spilled address is materialised in RAX before this runs, and
+    /// the earlier RAX-based stamp overwrote it with the PC → the access went to
+    /// the guest PC's address (the 3.26B-dispatch zero-region spin).
+    fn emit_hw_pc_stamp(enc: &mut X86Encoder) {
         const RCX: u8 = 1;
         let pc = crate::backend::encode::CUR_LOWER_PC.load(core::sync::atomic::Ordering::Relaxed);
         if pc != 0 {
-            enc.emit_mov_r64_imm64(RAX, pc as i64);
-            enc.emit_mov_mem_r64(CONTEXT_REG, PC_DISP, RAX);
+            enc.emit_mov_r64_imm64(RCX, pc as i64);
+            enc.emit_mov_mem_r64(CONTEXT_REG, PC_DISP, RCX);
         }
-        enc.emit_mov_rr64(RAX, addr_reg);
-        enc.emit_shl_r64_imm8(RAX, 24); // drop bits [63:40]…
-        enc.emit_shr_r64_imm8(RAX, 24); // …leaving va & 0xFF_FFFF_FFFF
-        enc.emit_mov_r64_imm64(RCX, HW_MMU_GAP_BASE);
-        enc.emit_or_rr64(RAX, RCX); // RAX = alias
+    }
+
+    /// Emit `RAX = GAP_BASE | (addr_reg & 0x0000_00FF_FFFF_FFFF)` — the
+    /// hardware-MMU access alias — clobbering ONLY RAX (addr_reg preserved; RCX
+    /// untouched so a spilled store value staged there survives). Sequence:
+    /// `shl 24` keeps va[39:0] at [63:24]; `shr 8` moves it to [55:16] with
+    /// [63:56]=0; `bts 63`; `sar 16` brings va[39:0] back to [39:0] with
+    /// [46:40]=0 and [63:47]=1, i.e. exactly `0xFFFF_8000_0000_0000 | va40`.
+    pub fn emit_hw_alias(enc: &mut X86Encoder, addr_reg: u8) {
+        const RAX: u8 = 0;
+        if addr_reg != RAX {
+            enc.emit_mov_rr64(RAX, addr_reg);
+        }
+        enc.emit_shl_r64_imm8(RAX, 24);
+        enc.emit_shr_r64_imm8(RAX, 8);
+        enc.emit_bts_r64_imm(RAX, 63);
+        enc.emit_sar_r64_imm8(RAX, 16);
+    }
+
+    /// PC stamp + alias for an `emit_mmu_xlate_call` site (RCX dead there).
+    fn emit_hw_mmu_alias(enc: &mut X86Encoder, addr_reg: u8) {
+        Self::emit_hw_pc_stamp(enc);
+        Self::emit_hw_alias(enc, addr_reg);
     }
 }
 
@@ -545,6 +563,7 @@ impl IntLower {
         const TTBR1: i32 = 0x338;
         const SCR_VA: i32 = 0x328 + 31 * 8;
         const SCR_PAGE: i32 = 0x328 + 32 * 8;
+        const SCR_VAL: i32 = 0x328 + 33 * 8;
         let a = crate::runtime::mmu::tlb_fast_addrs();
         let mask = crate::runtime::mmu::TLB_ENTRIES_MASK as i32;
         // entry stride is a power of two (32); shift = log2.
@@ -558,6 +577,14 @@ impl IntLower {
         // path (where the slow call marshals `addr_reg`). For a normal GPR
         // `addr_reg` the restore is a harmless reload of the same value.
         enc.emit_mov_mem_r64(R15, SCR_VA, addr_reg);
+        // A spilled store value is staged in RCX (SCRATCH1), which the probe
+        // clobbers — stash it and reload it at the hit store and on the miss
+        // path (where the slow call marshals it). Without this the stored value
+        // was the probe's page-base/tag temporary.
+        let val_in_rcx = store_val == Some(RCX);
+        if val_in_rcx {
+            enc.emit_mov_mem_r64(R15, SCR_VAL, RCX);
+        }
         // MMU on? (SCTLR.M = bit 0). Off => flat path only, handled by the call.
         enc.emit_mov_r64_mem(RAX, R15, SCTLR);
         enc.emit_and_r64_imm32(RAX, 1);
@@ -615,6 +642,9 @@ impl IntLower {
         enc.emit_mov_r64_mem(RAX, R15, SCR_VA);
         enc.emit_and_r64_imm32(RAX, 0xFFF);
         enc.emit_add_rr64(RAX, RCX); // RAX = host PA
+        if val_in_rcx {
+            enc.emit_mov_r64_mem(RCX, R15, SCR_VAL);
+        }
         if let Some(val) = store_val {
             match size {
                 1 => enc.emit_mov_mem_r8(RAX, 0, val),
@@ -632,6 +662,9 @@ impl IntLower {
             enc.patch_rel32(j, miss_pos);
         }
         enc.emit_mov_r64_mem(addr_reg, R15, SCR_VA);
+        if val_in_rcx {
+            enc.emit_mov_r64_mem(RCX, R15, SCR_VAL);
+        }
         Some(hit_jmp)
     }
 
@@ -779,7 +812,9 @@ impl IntLower {
         // ch66 P3b: hardware-MMU path — RAX = gap alias, store directly. An MMIO
         // target is left unmapped in the shadow → #PF → shadow_pf_try emulates.
         if HW_MMU_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
-            Self::emit_hw_mmu_alias(enc, addr_reg);
+            // The Store arm already stamped the PC (before staging a spilled
+            // value into RCX); the alias touches only RAX, so val_reg survives.
+            Self::emit_hw_alias(enc, addr_reg);
             Self::emit_w_store(enc, 0 /* RAX */, val_reg, size as u8);
             return;
         }
@@ -2442,6 +2477,11 @@ impl IntLower {
                     // the Win64 ABI; both copies happen after we materialize
                     // the spilled values into SCRATCH0/SCRATCH1.
                     let ra = Self::src_in(alloc, enc, *addr, SCRATCH0);
+                    // ch66 P3b: stamp the PC NOW, while RCX is still dead — a
+                    // spilled value is staged into RCX next and must survive.
+                    if HW_MMU_ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+                        Self::emit_hw_pc_stamp(enc);
+                    }
                     let rv = Self::src_in(alloc, enc, *val, SCRATCH1);
                     let size: i32 = match ty {
                         StoreTy::U8 => 1,
@@ -3065,6 +3105,13 @@ impl IntLower {
             Hint { imm } if *imm >= 200 => {
                 enc.emit_ud2();
             }
+            // WFI: flag the dispatcher (ctx WFI slot) so it can skip idle time
+            // to the next timer deadline. Architecturally WFI may complete at any
+            // time, so falling through is still correct; RAX is reserved scratch.
+            Hint { imm: 3 } => {
+                enc.emit_mov_r64_imm32(SCRATCH0, 1);
+                enc.emit_mov_mem_r64(CONTEXT_REG, crate::runtime::context::WFI_FLAG_DISP, SCRATCH0);
+            }
             Hint { .. } => {
                 enc.emit_nop(); // architectural no-op; pc advances to next insn.
             }
@@ -3105,6 +3152,7 @@ impl IntLower {
             // (None-assigned IR value) VA fails loud — distinct from `va == None`,
             // which is the broad (whole-TLB) form. `addr_in` returns None for the
             // unassigned case.
+            IcInval => Self::emit_dbt_invalidate_call(enc),
             TlbInval { va } => {
                 match va {
                     Some(v) => {

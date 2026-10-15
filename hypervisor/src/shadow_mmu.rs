@@ -35,11 +35,11 @@ use crate::boot_x86::{dual_puthex64, dual_puts, Page4K};
 pub static HW_MMU_SELFTEST: AtomicBool = AtomicBool::new(false);
 static SELFTEST_DONE: AtomicBool = AtomicBool::new(false);
 
-/// Shadow page-table pool: 2048 × 4 KiB = 8 MiB of intermediate tables, enough
+/// Shadow page-table pool: 4096 × 4 KiB = 16 MiB of intermediate tables, enough
 /// for a boot's kernel working set (vmalloc + linear map + kimg). On exhaustion
 /// the caller resets (bump to 0 + rebuild root). In `.bss`, identity-mapped, so
 /// a pool page's physical address equals its usable virtual address.
-const POOL_PAGES: usize = 2048;
+const POOL_PAGES: usize = 4096;
 static mut SHADOW_POOL: [Page4K; POOL_PAGES] = [const { Page4K([0u8; 4096]) }; POOL_PAGES];
 static mut SHADOW_NEXT: usize = 0;
 /// The shadow root (PML4). One page; its PA is the value loaded into CR3.
@@ -384,6 +384,7 @@ pub extern "C" fn shadow_pf_try(cr2: u64, error: u64, frame: *mut u64) -> u64 {
                 *ctx.add(SYSREG_SLOT0 + SLOT_PEND_FAR) = guest_va;
                 *ctx.add(SYSREG_SLOT0 + SLOT_PEND_ESR) = data_abort_esr(kind, level, is_write);
                 *frame.add(FRAME_RIP) = (host_block_abort_ret as unsafe extern "C" fn()) as usize as u64;
+                *ptr::addr_of_mut!(SHADOW_ABORTS) += 1;
                 1
             }
             Ok(pa) if pa_is_mmio(pa) => {
@@ -439,6 +440,7 @@ pub extern "C" fn shadow_pf_try(cr2: u64, error: u64, frame: *mut u64) -> u64 {
                     }
                 }
                 *frame.add(FRAME_RIP) = rip + mi.len as u64;
+                *ptr::addr_of_mut!(SHADOW_MMIO) += 1;
                 1
             }
             Ok(pa) => {
@@ -472,6 +474,10 @@ pub extern "C" fn shadow_pf_try(cr2: u64, error: u64, frame: *mut u64) -> u64 {
 pub static mut SHADOW_FILLS: u64 = 0;
 /// Count of shadow resets (diagnostic).
 pub static mut SHADOW_RESETS: u64 = 0;
+/// Count of #PFs reflected to the guest as an ARM Data Abort (diagnostic).
+pub static mut SHADOW_ABORTS: u64 = 0;
+/// Count of MMIO accesses emulated from the #PF path (diagnostic).
+pub static mut SHADOW_MMIO: u64 = 0;
 
 /// Drop the whole gap shadow: clear the live CR3's PML4[0x100] (user) and
 /// [0x101] (kernel) entries, reset the pool bump, and flush the TLB (CR3
@@ -487,33 +493,151 @@ pub extern "C" fn shadow_reset() {
         ptr::write((pml4 + 0x100 * 8) as *mut u64, 0); // user half
         ptr::write((pml4 + 0x101 * 8) as *mut u64, 0); // kernel half
         *ptr::addr_of_mut!(SHADOW_NEXT) = 0;
+        // Parked user subtrees live in the pool being reclaimed: drop them, and
+        // label the (now empty) installed user half with the live TTBR0.
+        ucache_clear();
+        *ptr::addr_of_mut!(UCUR_KEY) = live_ttbr0();
         *ptr::addr_of_mut!(SHADOW_RESETS) += 1;
         let c = read_cr3();
         write_cr3(c); // flush non-global TLB
     }
 }
 
-/// User-half reset (TTBR0 switch): clear only PML4[0x100]; the kernel aliases
-/// (PML4[0x101]) survive, so kernel code keeps its hardware-MMU mappings across
-/// the SW_TTBR0_PAN toggles that happen on every uaccess. Pool is NOT reset
-/// (kernel entries still reference it); user re-fills bump new pool pages.
+/// Per-address-space cache of user shadow subtrees: (TTBR0 value incl. ASID,
+/// PML4[0x100] entry). A TTBR0 switch parks the outgoing subtree under its TTBR0
+/// and reinstalls the incoming one's, so a context switch (or a SW_TTBR0_PAN
+/// toggle back to the same table) does not re-fault the whole user working set.
+/// Coherent because every way a cached translation can go stale is a guest TLBI
+/// (Linux breaks-before-makes; ASID reuse is preceded by a TLBI on rollover):
+/// any TLBI of a user VA drops all PARKED subtrees, any broad TLBI / full reset
+/// drops everything. Evicted subtrees leak their pool pages until the next full
+/// reset (the pool guard in `shadow_pf_try` triggers one).
+const UCACHE_N: usize = 32;
+static mut UCACHE: [(u64, u64); UCACHE_N] = [(0, 0); UCACHE_N];
+static mut UCACHE_NEXT: usize = 0;
+/// TTBR0 value whose subtree is currently installed in PML4[0x100].
+static mut UCUR_KEY: u64 = 0;
+/// Count of TTBR0 switches served from the cache (diagnostic).
+pub static mut SHADOW_UCACHE_HITS: u64 = 0;
+
+/// The guest's live TTBR0_EL1 (incl. ASID) from the dispatcher's context.
+#[allow(unsafe_code)]
+fn live_ttbr0() -> u64 {
+    use aether_translator::runtime::context::SYSREG_SLOT0;
+    use aether_translator::runtime::mmu::SLOT_TTBR0;
+    // SAFETY: EL2-private single-vCPU read of the live guest context.
+    unsafe {
+        let ctx = ptr::addr_of!(crate::boot_x86::NPF_GUEST_CTX) as *const u64;
+        *ctx.add(SYSREG_SLOT0 + SLOT_TTBR0)
+    }
+}
+
+/// Drop every parked user subtree (the installed one is untouched).
+#[allow(unsafe_code)]
+unsafe fn ucache_clear() {
+    unsafe {
+        *ptr::addr_of_mut!(UCACHE) = [(0, 0); UCACHE_N];
+        *ptr::addr_of_mut!(UCACHE_NEXT) = 0;
+    }
+}
+
+/// User-half switch (TTBR0 write): park the current PML4[0x100] subtree under the
+/// outgoing TTBR0 and install the incoming TTBR0's cached subtree (or empty). The
+/// kernel aliases (PML4[0x101]) are untouched. Reloads CR3 only when the entry
+/// actually changes. The new TTBR0 is already in the guest context (the MSR
+/// stores before this callback runs).
 #[unsafe(no_mangle)]
 pub extern "C" fn shadow_reset_user() {
-    // SAFETY: EL2-private single-vCPU.
+    // SAFETY: EL2-private single-vCPU; PML4[0x100] belongs to the shadow.
     unsafe {
-        let pml4 = read_cr3() & 0x000F_FFFF_FFFF_F000;
-        ptr::write((pml4 + 0x100 * 8) as *mut u64, 0);
+        let new_key = live_ttbr0();
+        let old_key = *ptr::addr_of!(UCUR_KEY);
+        if new_key == old_key {
+            return; // same address space: the installed subtree is still right
+        }
+        let slot = (read_cr3() & 0x000F_FFFF_FFFF_F000) + 0x100 * 8;
+        let cur = ptr::read(slot as *const u64);
+        let cache = &mut *ptr::addr_of_mut!(UCACHE);
+        // Park the outgoing subtree (replace its key's entry, else round-robin).
+        if cur != 0 {
+            match cache.iter().position(|e| e.0 == old_key && e.1 != 0) {
+                Some(i) => cache[i].1 = cur,
+                None => {
+                    let i = *ptr::addr_of!(UCACHE_NEXT);
+                    cache[i] = (old_key, cur);
+                    *ptr::addr_of_mut!(UCACHE_NEXT) = (i + 1) % UCACHE_N;
+                }
+            }
+        }
+        // Fetch the incoming one (taken out of the cache: it is now installed).
+        let mut next = 0u64;
+        if let Some(i) = cache.iter().position(|e| e.0 == new_key && e.1 != 0) {
+            next = cache[i].1;
+            cache[i] = (0, 0);
+            *ptr::addr_of_mut!(SHADOW_UCACHE_HITS) += 1;
+        }
+        *ptr::addr_of_mut!(UCUR_KEY) = new_key;
         *ptr::addr_of_mut!(SHADOW_RESETS) += 1;
-        let c = read_cr3();
-        write_cr3(c);
+        if next != cur {
+            ptr::write(slot as *mut u64, next);
+            let c = read_cr3();
+            write_cr3(c); // drop the outgoing address space's TLB entries
+        }
+    }
+}
+
+/// Page-precise shadow invalidate for a guest `TLBI VA*` (`xt` = raw operand).
+/// Clears every present leaf in the 2 MiB-aligned shadow page table that covers
+/// the named page (INVLPG each), keeping the PT page attached so nothing leaks
+/// from the pool. 2 MiB rather than 4 KiB because the guest may have mapped the
+/// VA with an ARM block descriptor, which Linux invalidates with ONE TLBI per
+/// block stride while our shadow holds 4 KiB leaves for it. Paging-structure
+/// caches are covered by INVLPG (it drops all PSC entries for the PCID).
+#[unsafe(no_mangle)]
+pub extern "C" fn shadow_invalidate_va(xt: u64) {
+    let va = aether_translator::runtime::mmu::tlbi_operand_va(xt);
+    let alias = alias_of(va);
+    // SAFETY: EL2-private single-vCPU; the gap subtree pages are pool pages
+    // (identity-mapped), and only their leaf words are written.
+    unsafe {
+        *ptr::addr_of_mut!(SHADOW_INVAL_VAS) += 1;
+        // A user-VA TLBI may name another ASID's translation: drop every parked
+        // user subtree (the installed one is handled below like the kernel half).
+        if (va >> 55) & 1 == 0 {
+            ucache_clear();
+        }
+        let pml4 = read_cr3() & 0x000F_FFFF_FFFF_F000;
+        let mut table = pml4;
+        // Descend PML4 -> PDPT -> PD to the PT covering `alias` (stop if absent).
+        for shift in [39u32, 30, 21] {
+            let e = ptr::read((table + ((alias >> shift) & 0x1FF) * 8) as *const u64);
+            if e & 1 == 0 {
+                return; // nothing shadowed in this region
+            }
+            table = e & 0x000F_FFFF_FFFF_F000;
+        }
+        let base = alias & !0x1F_FFFF; // 2 MiB-aligned alias of the region
+        for i in 0..512u64 {
+            let slot = (table + i * 8) as *mut u64;
+            if ptr::read(slot) & 1 != 0 {
+                ptr::write(slot, 0);
+                invlpg(base + (i << 12));
+            }
+        }
     }
 }
 
 /// Install the shadow machinery with the translator (once, at boot): the
-/// shadow-reset callback. Enables HW-MMU invalidation coherence.
+/// shadow-reset callbacks. Enables HW-MMU invalidation coherence.
 pub fn register() {
-    aether_translator::runtime::mmu::register_shadow_reset(shadow_reset, shadow_reset_user);
+    aether_translator::runtime::mmu::register_shadow_reset(
+        shadow_reset,
+        shadow_reset_user,
+        shadow_invalidate_va,
+    );
 }
+/// Count of page-precise TLBI invalidates (diagnostic).
+pub static mut SHADOW_INVAL_VAS: u64 = 0;
 /// Count of #PF stub -> shadow_pf_try entries (diagnostic).
 pub static mut SHADOW_PF_CALLS: u64 = 0;
 pub static mut SHADOW_PF_LAST_CR2: u64 = 0;
@@ -536,6 +660,9 @@ pub unsafe fn maybe_enable_hw_mmu(pc: u64) {
     }
     HW_MMU_ON.store(true, Ordering::Relaxed);
     register(); // shadow-reset callback (coherence) BEFORE enabling
+    // SAFETY: EL2-private single-vCPU; label the (empty) user half with the live
+    // address space before any fill can happen.
+    unsafe { *ptr::addr_of_mut!(UCUR_KEY) = live_ttbr0() };
     aether_translator::backend::lower_int::HW_MMU_ENABLED.store(true, Ordering::Relaxed);
     let _ = aether_translator::dbt::aether_dbt_invalidate_all(); // re-translate onto HW path
     // SAFETY: diagnostic print on the established path.

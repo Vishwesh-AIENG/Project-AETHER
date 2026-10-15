@@ -124,6 +124,32 @@ pub extern "C" fn aether_timer_set_now(count: u64) {
     }
 }
 
+/// ch66 P7 idle skip: the earliest FUTURE compare value among the enabled,
+/// unmasked timers (virtual + physical), or 0 when none is armed or one has
+/// already fired (its interrupt is pending — nothing to skip to). The dispatcher
+/// warps the count here when the guest executes WFI with no interrupt pending.
+#[allow(unsafe_code)]
+pub fn aether_timer_next_deadline() -> u64 {
+    let now = now();
+    // SAFETY: EL2-private, single-vCPU; read-only snapshot.
+    let (v, p) = unsafe { (*core::ptr::addr_of!(TIMER), *core::ptr::addr_of!(PTIMER)) };
+    let mut best = 0u64;
+    for t in [v, p] {
+        if t.ctl & crate::runtime::timer::CNTV_CTL_ENABLE == 0
+            || t.ctl & crate::runtime::timer::CNTV_CTL_IMASK != 0
+        {
+            continue;
+        }
+        if t.condition_met(now) {
+            return 0; // already firing — the IRQ is (about to be) pending
+        }
+        if best == 0 || t.cval < best {
+            best = t.cval;
+        }
+    }
+    best
+}
+
 /// Reset all platform state (timer disabled, GIC empty, count 0). For the host
 /// test harness between cases; also safe at boot bring-up.
 #[allow(unsafe_code)]

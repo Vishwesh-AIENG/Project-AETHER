@@ -311,6 +311,69 @@ pub extern "C" fn host_exception_handler(
             dual_puts(b"\n");
         }
 
+        // ch66: capture for a fault in JIT code (#UD/#GP): the x86 bytes around
+        // RIP (a `0F 0B` at RIP = a deliberate fail-loud UD2 reached at runtime;
+        // anything else = garbled/stale code), the guest PC last stamped in the
+        // context, and which recently-dispatched block's host range holds RIP,
+        // with that block's ARM words — enough to root-cause statically.
+        if vector == 6 || vector == 13 {
+            dual_puts(b"[idt] code bytes rip-64..rip+16:\n[idt]  ");
+            let mut a = rip.wrapping_sub(64);
+            while a < rip.wrapping_add(16) {
+                if a == rip {
+                    dual_puts(b" |");
+                }
+                let byte = core::ptr::read_volatile(a as *const u8);
+                let hx = |n: u8| if n < 10 { b'0' + n } else { b'a' + n - 10 };
+                dual_puts(&[hx(byte >> 4), hx(byte & 0xF)]);
+                a += 1;
+            }
+            dual_puts(b"\n[idt] ctx.pc=");
+            let g = &*core::ptr::addr_of!(crate::boot_x86::NPF_GUEST_CTX);
+            dual_puthex64(g[0x100 / 8]);
+            dual_puts(b" unsafe_op_pc=");
+            dual_puthex64(aether_translator::backend::encode::UNSAFE_OP_PC
+                .load(core::sync::atomic::Ordering::Relaxed));
+            dual_puts(b" reason=");
+            dual_puthex64(aether_translator::backend::encode::UNSAFE_OP_REASON
+                .load(core::sync::atomic::Ordering::Relaxed) as u64);
+            dual_puts(b"\n");
+            let idx = *core::ptr::addr_of!(crate::boot_x86::DBG_GUEST_PC_IDX);
+            let mut k: usize = 0;
+            while k < 16 {
+                let p = *core::ptr::addr_of!(crate::boot_x86::DBG_GUEST_PC_RING[(idx + k) % 16]);
+                if p != 0 {
+                    if let Some((hva, len)) = aether_translator::dbt::aether_dbt_block_host_va(p) {
+                        let hva = hva as u64;
+                        dual_puts(b"[idt]   blk pc=");
+                        dual_puthex64(p);
+                        dual_puts(b" host=");
+                        dual_puthex64(hva);
+                        dual_puts(b" len=");
+                        dual_puthex64(len as u64);
+                        if rip >= hva && rip < hva + len as u64 {
+                            dual_puts(b" <== CONTAINS RIP (off=");
+                            dual_puthex64(rip - hva);
+                            dual_puts(b") words:");
+                            let ctxp = core::ptr::addr_of_mut!(crate::boot_x86::NPF_GUEST_CTX) as *mut u64;
+                            let mut w = 0u64;
+                            while w < 16 {
+                                let pa = aether_translator::runtime::mmu::aether_mmu_fetch_pa(ctxp, p + w * 4);
+                                if pa == 0 {
+                                    break;
+                                }
+                                dual_puts(b" ");
+                                dual_puthex64(core::ptr::read_volatile(pa as *const u32) as u64);
+                                w += 1;
+                            }
+                        }
+                        dual_puts(b"\n");
+                    }
+                }
+                k += 1;
+            }
+        }
+
         // Distinctive cue: 5 high beeps (vs halt()'s 3x440 Hz).
         beep_n(5, 1200);
     }

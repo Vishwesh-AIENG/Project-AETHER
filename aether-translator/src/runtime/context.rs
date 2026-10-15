@@ -100,6 +100,12 @@ pub const RESV_VALID_DISP: i32 = (SYSREG_BASE + 62 * 8) as i32; // 0x518
 /// next block. `CHAIN_BUDGET`: chained transfers left before the chain must
 /// return to the dispatcher (interrupt / timer / clock bookkeeping). A
 /// zero-initialised context therefore never chains (harness-safe).
+/// ch66 P7: set to 1 by a translated `WFI` (EL2-private sysreg slot). The
+/// dispatcher clears it and, when no interrupt is pending, warps the virtual
+/// counter to the next armed timer deadline (icount-style idle skip) instead of
+/// burning blocks in the idle loop until the deadline is reached.
+pub const WFI_FLAG_IDX: usize = 37;
+pub const WFI_FLAG_DISP: i32 = (SYSREG_BASE + WFI_FLAG_IDX * 8) as i32;
 pub const CHAIN_EXIT_IDX: usize = 38;
 pub const CHAIN_BUDGET_IDX: usize = 39;
 pub const CHAIN_EXIT_DISP: i32 = (SYSREG_BASE + CHAIN_EXIT_IDX * 8) as i32;

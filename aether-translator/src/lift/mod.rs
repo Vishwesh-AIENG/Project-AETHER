@@ -2089,10 +2089,12 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
             // change). The JIT block cache keys on guest PC with no content tag,
             // so a no-op here keeps serving the STALE x86 translation of the old
             // bytes (ART JIT/AOT codegen, mprotect(RX)-after-write trampolines).
-            // Conservatively flush the block cache (TlbInval{None} ->
+            // Conservatively flush the block cache (IcInval ->
             // aether_dbt_invalidate_all) on any IC so the next fetch re-translates.
+            // ch66: blocks only — the mapping is unchanged, so the software TLB
+            // and the hardware-MMU shadow stay valid.
             let _ = cx.read_reg(rt, true);
-            cx.push(IrOp::TlbInval { va: None });
+            cx.push(IrOp::IcInval);
         }
         SysAt { op1, crm, op2, rt } => {
             // AT (Address Translate). Phase-E: instead of treating as a
@@ -2151,13 +2153,17 @@ fn lift_insn(cx: &mut LiftCtx<'_>, insn: &DecodedInsn) -> Result<(), LiftErr> {
                 cx.push(IrOp::Hint { imm: 128 });
             }
         }
-        SysTlbi { op2, rt, .. } => {
+        SysTlbi { op1, crm, op2, rt } => {
             // TLB invalidate. The address-taking EL1 forms (VAE1=op2 001,
             // VAAE1=011, VALE1=101, VAALE1=111) carry the page VA in Rt; the
             // broad forms (VMALLE1=000, ASIDE1=010) ignore the register. The
             // odd-`op2` rule selects the VA-taking variants for the EL1 set.
             // (Rt==0b11111 / XZR is the canonical encoding for the broad forms.)
-            let va_form = (op2 & 1) == 1 && rt.0 != 31;
+            // ch66: only the plain page forms (CRm 1/3/7 = OS/IS/local, op1 0)
+            // carry a single page VA. Range forms (RVAE1*, CRm 2/5/6) encode a
+            // RANGE in Xt — a page-precise invalidate of them would leave the rest
+            // of the range stale, so they take the broad (whole-TLB) path.
+            let va_form = (op2 & 1) == 1 && rt.0 != 31 && op1 == 0 && matches!(crm, 1 | 3 | 7);
             if va_form {
                 let v_va = cx.read_reg(rt, true);
                 cx.push(IrOp::TlbInval { va: Some(v_va) });

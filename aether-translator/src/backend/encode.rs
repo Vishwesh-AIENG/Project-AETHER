@@ -390,6 +390,15 @@ impl X86Encoder {
         self.buf.push(bit);
     }
 
+    /// BTS r64, imm8 — set bit `bit` of `reg` (CF = its old value).
+    pub fn emit_bts_r64_imm(&mut self, reg: u8, bit: u8) {
+        self.rex_opt(true, 0, 0, reg);
+        self.buf.push(0x0F);
+        self.buf.push(0xBA);
+        self.modrm_rr(5, reg); // /5 = BTS
+        self.buf.push(bit);
+    }
+
     /// SUB qword [base + disp], imm8 (sign-extended). Sets CF on borrow.
     pub fn emit_sub_mem64_imm8(&mut self, base: u8, disp: i32, imm: i8) {
         self.rex_opt(true, 0, 0, base);

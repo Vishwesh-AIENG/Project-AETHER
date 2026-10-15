@@ -3503,8 +3503,30 @@ pub(crate) unsafe fn enter_translated_block_from_npf(pc: u64) -> Option<u64> {
         *ptr::addr_of_mut!(DBT_BLOCKS_EXECUTED) =
             (*ptr::addr_of!(DBT_BLOCKS_EXECUTED)).wrapping_add(executed);
         {
-            const VIRT_TICKS_PER_BLOCK: u64 = 64;
-            let n = (*ptr::addr_of!(VIRT_NOW)).wrapping_add(executed * VIRT_TICKS_PER_BLOCK);
+            // ch66 P7: 4 ticks (≈167 ns at 24 MHz) per executed block. The old 64
+            // (≈2.7 µs/block, ~500× slower than an ARM core's ~5 ns/block) made
+            // every guest-time timeout calibrated for real hardware expire after
+            // ~500× too little work (netd's iptables-restore poll budget → its
+            // deliberate exit(1); odsign SIGKILL) and fired the 250 Hz tick every
+            // ~1.5K blocks, so a large share of all execution was timer IRQs. Idle
+            // time no longer needs a coarse clock: WFI warps to the next deadline.
+            const VIRT_TICKS_PER_BLOCK: u64 = 4;
+            let mut n = (*ptr::addr_of!(VIRT_NOW)).wrapping_add(executed * VIRT_TICKS_PER_BLOCK);
+            // WFI idle skip (icount-style): the guest is idle; if nothing is
+            // pending, jump the counter to the next armed timer deadline so the
+            // wake-up happens now instead of after millions of idle-loop blocks.
+            let wfi = aether_translator::runtime::context::WFI_FLAG_IDX;
+            if ctx_slice[SYSREG_SLOT0 + wfi] != 0 {
+                ctx_slice[SYSREG_SLOT0 + wfi] = 0;
+                sysreg_rt::aether_timer_set_now(n);
+                if sysreg_rt::aether_pending_irq() == aether_translator::runtime::gic::SPURIOUS_INTID {
+                    let d = sysreg_rt::aether_timer_next_deadline();
+                    if d != 0 && (d.wrapping_sub(n) as i64) > 0 {
+                        n = d;
+                        *ptr::addr_of_mut!(WFI_WARPS) += 1;
+                    }
+                }
+            }
             *ptr::addr_of_mut!(VIRT_NOW) = n;
             sysreg_rt::aether_timer_set_now(n);
         }
@@ -4356,6 +4378,8 @@ fn host_tsc() -> u64 {
 /// block in `enter_translated_block_from_npf`. Decoupled from wall-clock so the
 /// generic-timer tick fires at a sane rate relative to DBT throughput.
 static mut VIRT_NOW: u64 = 0;
+/// ch66 P7: count of WFI idle skips (virtual counter warped to a deadline).
+pub(crate) static mut WFI_WARPS: u64 = 0;
 
 /// 4 KiB page mask for the guest instruction-window read.
 const GUEST_PAGE_BYTES: u64 = 0x1000;
@@ -5252,6 +5276,23 @@ unsafe fn run_android_dispatch_loop_inner() -> ! {
                         aether_translator::runtime::mmu::MMU_TLBI_VA_TOTAL) as u64);
                     dual_puts(b" tsc=");
                     dual_puthex64(host_tsc());
+                    // ch66 P3b: hardware-MMU #PF entries / shadow fills / resets.
+                    dual_puts(b" hwpf=");
+                    dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_PF_CALLS));
+                    dual_puts(b" hwfill=");
+                    dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_FILLS));
+                    dual_puts(b" hwrst=");
+                    dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_RESETS));
+                    dual_puts(b" hwabt=");
+                    dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_ABORTS));
+                    dual_puts(b" hwmmio=");
+                    dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_MMIO));
+                    dual_puts(b" hwinv=");
+                    dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_INVAL_VAS));
+                    dual_puts(b" uchit=");
+                    dual_puthex64(*ptr::addr_of!(crate::shadow_mmu::SHADOW_UCACHE_HITS));
+                    dual_puts(b" wfiwarp=");
+                    dual_puthex64(*ptr::addr_of!(WFI_WARPS));
                     dual_puts(b"
 ");
                 }

@@ -1299,14 +1299,30 @@ pub extern "C" fn aether_mmu_flush_all() {
 pub type ShadowResetFn = unsafe extern "C" fn();
 static SHADOW_RESET_ALL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static SHADOW_RESET_USER: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static SHADOW_INVAL_VA: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+/// Page-precise shadow invalidate for a `TLBI VA*` (raw `Xt` operand).
+pub type ShadowInvalVaFn = unsafe extern "C" fn(u64);
 
 /// Install the hypervisor's shadow-reset callbacks (once, at boot): `all` drops
 /// the whole gap shadow (TLBI / TCR / MAIR / TTBR1), `user` drops only the user
 /// (TTBR0) half so a TTBR0 switch — which SW_TTBR0_PAN does on every uaccess —
 /// does NOT storm the kernel aliases.
-pub fn register_shadow_reset(all: ShadowResetFn, user: ShadowResetFn) {
+pub fn register_shadow_reset(all: ShadowResetFn, user: ShadowResetFn, inval_va: ShadowInvalVaFn) {
     SHADOW_RESET_ALL.store(all as usize, core::sync::atomic::Ordering::Release);
     SHADOW_RESET_USER.store(user as usize, core::sync::atomic::Ordering::Release);
+    SHADOW_INVAL_VA.store(inval_va as usize, core::sync::atomic::Ordering::Release);
+}
+
+/// Decode a `TLBI VAE1/VALE1/VAAE1/VAALE1` operand into the page VA it names:
+/// `Xt[43:0]` = VA[55:12] (ASID in [63:48] is ignored), sign-extended from
+/// VA bit 55 so a TTBR1 (kernel) page comes back as its `0xFFFF…` VA.
+pub fn tlbi_operand_va(xt: u64) -> u64 {
+    let va = (xt & 0x0000_0FFF_FFFF_FFFF) << 12;
+    if va & (1 << 55) != 0 {
+        va | 0xFF00_0000_0000_0000
+    } else {
+        va
+    }
 }
 
 /// Invoke the registered whole-shadow reset (TLBI / TCR / MAIR / TTBR1).
@@ -1400,7 +1416,18 @@ pub extern "C" fn aether_mmu_tlbi_va(va: u64) {
             }
         }
     }
-    aether_shadow_reset();
+    // Hardware-MMU shadow: invalidate just this page's neighbourhood (the
+    // callback clears the surrounding 2 MiB of shadow leaves, which also covers a
+    // block mapping invalidated by one TLBI) instead of dropping the whole shadow
+    // — a whole drop per TLBI re-faulted the kernel's entire working set ~200×/s.
+    let raw = SHADOW_INVAL_VA.load(core::sync::atomic::Ordering::Acquire);
+    if raw != 0 {
+        // SAFETY: registered via register_shadow_reset.
+        let f: ShadowInvalVaFn = unsafe { core::mem::transmute(raw) };
+        unsafe { f(va) };
+    } else {
+        aether_shadow_reset();
+    }
 }
 
 /// Phase-E: spurious-fault loop breaker. The kernel's
@@ -2733,6 +2760,19 @@ mod tests {
     // window), so the tests must run serially. This mutex serializes them and
     // recovers from poison (a panicking test must not wedge the rest).
     use super::MMU_TEST_LOCK;
+
+    /// ch66: TLBI VA operand decode — `Xt[43:0]` = VA[55:12], ASID ignored,
+    /// sign-extended from bit 55 for TTBR1 pages.
+    #[test]
+    fn tlbi_operand_va_decodes_user_and_kernel_pages() {
+        // user page 0x7f_a1af_0000, ASID 0x2a in [63:48]
+        let xt = (0x2au64 << 48) | (0x7f_a1af_0000u64 >> 12);
+        assert_eq!(tlbi_operand_va(xt), 0x7f_a1af_0000);
+        // kernel page 0xffff_ffc0_0950_8000 (VA[55:12] = 0xff_ffc0_0950_8)
+        let kva = 0xffff_ffc0_0950_8000u64;
+        let xt = (kva >> 12) & 0x0000_0FFF_FFFF_FFFF;
+        assert_eq!(tlbi_operand_va(xt), kva);
+    }
 
     /// Acquire the serialization lock, flush the TLB, and open the window wide
     /// so geometry tests can use host-allocated tables (whose addresses are not

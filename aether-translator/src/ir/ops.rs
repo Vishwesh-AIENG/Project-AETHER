@@ -1032,6 +1032,11 @@ pub enum IrOp {
     TlbInval {
         va: Option<IrValueId>,
     },
+    /// ch66: `IC IVAU / IALLU / IALLUIS` — instruction-cache maintenance. The
+    /// guest publishes modified code with it; the VA->PA mapping is unchanged,
+    /// so ONLY the JIT block cache is dropped (never the software TLB or the
+    /// hardware-MMU shadow — that was a needless whole-shadow refault storm).
+    IcInval,
     /// Phase-E: `AT S1E1R/W/E0R/W` — Address Translate Stage 1 at
     /// EL1/EL0. Calls the walker on `va`; writes PAR_EL1 with the
     /// resulting PA (success) or fault status (F=1, failure). Lifted
@@ -1688,7 +1693,7 @@ impl IrOp {
             | IrOp::VecBicOrrImm { .. } | IrOp::VecAddLongPair { .. }
             | IrOp::VecUnzip { .. } | IrOp::VecReduceAdd { .. }
             | IrOp::Dmb { .. } | IrOp::Dsb { .. }
-            | IrOp::Isb | IrOp::Sb | IrOp::Hint { .. } => self,
+            | IrOp::Isb | IrOp::Sb | IrOp::Hint { .. } | IrOp::IcInval => self,
             IrOp::VecDupGpr { d, src, size, q } =>
                 IrOp::VecDupGpr { d, src: vr(src), size, q },
             IrOp::FpCvtIntScalar { d, src, to_dbl, signed, src_64, fbits } =>

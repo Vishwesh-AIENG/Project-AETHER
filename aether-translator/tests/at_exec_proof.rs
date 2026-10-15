@@ -9724,3 +9724,105 @@ fn lazy_nzcv_elides_dead_flags_without_changing_result() {
     assert!(len_on < len_off,
             "lazy encoding must be shorter (dead build_nzcv elided): on={len_on} off={len_off}");
 }
+
+/// ch66 P3b: the hardware-MMU alias `GAP_BASE | (va & 0xFF_FFFF_FFFF)` must be
+/// computed with RAX ONLY. The earlier form clobbered RCX (a spilled store value
+/// staged there was replaced by the gap base) and its eager PC stamp clobbered
+/// RAX (a spilled address became the guest PC). Executes the emitted sequence for
+/// user, kernel and TBI-tagged VAs, from both a GPR and RAX, and checks RCX
+/// survives untouched.
+#[test]
+fn hw_mmu_alias_is_rax_only_and_correct() {
+    let _serial = serial();
+    use aether_translator::backend::lower_int::HW_MMU_GAP_BASE;
+    const RAX: u8 = 0;
+    const RCX: u8 = 1;
+    const RDX: u8 = 2;
+    const MARK: i64 = 0x1234_5678;
+    // f(va in RCX) = alias(va) + MARK, where RCX is re-seeded with MARK before
+    // the alias and added after it — proves the alias leaves RCX intact.
+    let build = |from_rax: bool| {
+        let mut enc = X86Encoder::new();
+        enc.emit_mov_rr64(RDX, RCX);
+        enc.emit_mov_r64_imm64(RCX, MARK);
+        if from_rax {
+            enc.emit_mov_rr64(RAX, RDX);
+            IntLower::emit_hw_alias(&mut enc, RAX);
+        } else {
+            IntLower::emit_hw_alias(&mut enc, RDX);
+        }
+        enc.emit_add_rr64(RAX, RCX);
+        enc.emit_ret();
+        enc.finish()
+    };
+    for from_rax in [false, true] {
+        let code = winexec::make_executable(&build(from_rax));
+        // SAFETY: freshly emitted, RET-terminated, Win64 leaf (RAX/RCX/RDX only).
+        let f: extern "win64" fn(u64) -> u64 = unsafe { core::mem::transmute(code) };
+        for va in [
+            0x0000_007F_1234_5678u64, // user (bit39 clear)
+            0xFFFF_FFC0_0950_8F34,    // kernel (bit39 set)
+            0xB400_007F_DEAD_B008,    // TBI-tagged user pointer (Scudo)
+            0x0000_0000_0000_0000,
+            0xFFFF_FFFF_FFFF_FFFF,
+        ] {
+            let want = (HW_MMU_GAP_BASE | (va & 0xFF_FFFF_FFFF)).wrapping_add(MARK as u64);
+            assert_eq!(f(va), want, "va={va:#x} from_rax={from_rax}");
+        }
+    }
+}
+
+/// ch66: a SPILLED store value is staged in RCX (SCRATCH1), which the inline
+/// software-TLB probe uses as a temporary. The probe must stash/reload it, or
+/// the stored value becomes the probe's page/tag temporary. Runs the same
+/// spilled-value STR twice under the MMU (1st = helper miss path, 2nd = inline
+/// hit path) and checks guest memory both times.
+#[test]
+fn inline_tlb_store_spilled_value_survives_probe() {
+    let _serial = serial();
+    use aether_translator::ir::memory::{MemOrder, StoreTy};
+    use aether_translator::ir::value::IrValueKind;
+    use aether_translator::ir::{IrFunction, IrOp};
+    let va = 0x0000_0056_0000_0000u64;
+    let (mut ctx, _l0, _l3, _slot, data_a, _data_b) = build_remappable_ctx(va);
+    let pend = SYSREG_SLOT0 + aether_translator::runtime::mmu::SLOT_PEND_PENDING;
+    const VAL: i64 = 0x5EED_CAFE_F00D_0042;
+
+    let mut func = IrFunction::new(0x9000);
+    let vval = {
+        let block = func.add_block();
+        let vs = push_spill_pressure(block, 16);
+        let vval = block.new_value(IrValueKind::I64);
+        block.push_op(IrOp::ConstI64 { dst: vval, val: VAL });
+        let vaddr = block.new_value(IrValueKind::I64);
+        block.push_op(IrOp::ReadGpr { dst: vaddr, reg: 0, sf: true });
+        block.push_op(IrOp::Store { val: vval, addr: vaddr, ty: StoreTy::U64, order: MemOrder::Relaxed });
+        // Keep the pressure + the value live past the store so `vval` spills.
+        let mut acc = vs[0];
+        for &v in &vs[1..] {
+            let n = block.new_value(IrValueKind::I64);
+            block.push_op(IrOp::Add { dst: n, a: acc, b: v });
+            acc = n;
+        }
+        let fin = block.new_value(IrValueKind::I64);
+        block.push_op(IrOp::Add { dst: fin, a: acc, b: vval });
+        block.push_op(IrOp::WriteGpr { reg: 1, src: fin, sf: true });
+        vval
+    };
+    let alloc = regalloc::allocate(&func);
+    assert!(is_spilled_in(&alloc, vval.0), "test invalid: store value not spilled");
+    let code = lower_built_func(&func);
+    let e = winexec::make_executable(&code);
+    for pass in 0..2 {
+        // SAFETY: data_a is in the mapped arena.
+        unsafe { core::ptr::write_volatile(data_a as *mut u64, 0) };
+        ctx[0] = va;
+        ctx[pend] = 0;
+        // SAFETY: RWX RET-terminated block; MMU-on ctx maps `va` -> data_a (RW).
+        unsafe { enter_block(e, ctx.as_mut_ptr()) };
+        assert_eq!(ctx[pend], 0, "pass {pass}: no fault");
+        // SAFETY: as above.
+        let got = unsafe { core::ptr::read_volatile(data_a as *const u64) };
+        assert_eq!(got as i64, VAL, "pass {pass}: spilled store value must survive the probe");
+    }
+}

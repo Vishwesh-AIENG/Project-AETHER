@@ -286,7 +286,7 @@ impl DbtRuntime {
         use crate::ir::IrOp;
         ops.iter().all(|op| match op {
             IrOp::Hvc { .. } | IrOp::Svc { .. } | IrOp::Smc { .. } | IrOp::Brk { .. }
-            | IrOp::Hlt { .. } | IrOp::EretRt | IrOp::TlbInval { .. } | IrOp::AtS1E1 { .. }
+            | IrOp::Hlt { .. } | IrOp::EretRt | IrOp::TlbInval { .. } | IrOp::IcInval | IrOp::AtS1E1 { .. }
             | IrOp::Isb | IrOp::Unimplemented { .. } => false,
             IrOp::Msr { reg, .. } => matches!(
                 reg,

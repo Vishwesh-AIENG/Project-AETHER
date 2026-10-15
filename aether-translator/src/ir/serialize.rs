@@ -785,7 +785,7 @@ pub fn encode(op: &IrOp, out: &mut Vec<u8>) -> Result<(), SerErr> {
             put_u8(out, u8::from(*q));
         }
         IrOp::Dmb { domain } | IrOp::Dsb { domain } => put_barrier(out, *domain),
-        IrOp::Isb | IrOp::Sb => {}
+        IrOp::Isb | IrOp::Sb | IrOp::IcInval => {}
         IrOp::Hint { imm } => put_u8(out, *imm),
         IrOp::NzcvBitOp { dst, flags, bit } => {
             put_vid(out, *dst);
@@ -1318,6 +1318,7 @@ pub fn decode(bytes: &[u8]) -> Result<(IrOp, usize), SerErr> {
         0xC7 => IrOp::Dmb { domain: r.barrier()? },
         0xC8 => IrOp::Dsb { domain: r.barrier()? },
         0xC9 => IrOp::Isb,
+        0x06 => IrOp::IcInval,
         0xCA => IrOp::Sb,
         0xCB => IrOp::Hint { imm: r.u8()? },
         0x3A => IrOp::NzcvBitOp { dst: r.vid()?, flags: r.fid()?, bit: r.nzcv()? },
@@ -1691,6 +1692,7 @@ pub fn variant_tag(op: &IrOp) -> u8 {
         IrOp::Dmb { .. } => 0xC7,
         IrOp::Dsb { .. } => 0xC8,
         IrOp::Isb => 0xC9,
+        IrOp::IcInval => 0x06,
         IrOp::Sb => 0xCA,
         IrOp::Hint { .. } => 0xCB,
         IrOp::TlbInval { .. } => 0xCC,
