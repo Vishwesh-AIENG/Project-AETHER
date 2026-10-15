@@ -806,11 +806,15 @@ pub static mut SHADOW_PF_CALLS: u64 = 0;
 pub static mut SHADOW_PF_LAST_CR2: u64 = 0;
 
 /// ch66 P3b: auto-enable the hardware-MMU path on the first guest kernel VA
-/// (MMU guaranteed on). Default OFF — flip to true for an exploratory HW-MMU
-/// boot. When it fires it registers the shadow-reset callback, turns on the
-/// translator's direct-mov lowering, and flushes the block cache so every block
+/// (MMU guaranteed on). Default ON since 2026-10-16: a WHPX boot ran the whole
+/// Android bring-up on it (apexd, odsign, bpfloader, netd, zygote,
+/// SurfaceFlinger) ~1.5x faster than the software-TLB path, which reached the
+/// same points after the same amount of guest work. Set false to fall back to
+/// the software TLB (e.g. to bisect a suspected shadow-coherence bug). When it
+/// fires it registers the shadow callbacks, turns on the translator's
+/// direct-mov lowering, and flushes the block cache so every block
 /// re-translates onto the hardware-MMU path.
-pub static HW_MMU_AUTOENABLE: AtomicBool = AtomicBool::new(false);
+pub static HW_MMU_AUTOENABLE: AtomicBool = AtomicBool::new(true);
 static HW_MMU_ON: AtomicBool = AtomicBool::new(false);
 
 #[allow(unsafe_code)]
